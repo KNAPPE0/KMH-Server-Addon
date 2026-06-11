@@ -1,0 +1,5 @@
+KMH icons are from Google Noto Emoji (https://github.com/googlefonts/noto-emoji),
+licensed under the Apache License 2.0.
+
+kmh_logo is a placeholder (a castle) - replace it with your own server logo by
+dropping a PNG named kmh_logo.png into KMH-Data/Icons.

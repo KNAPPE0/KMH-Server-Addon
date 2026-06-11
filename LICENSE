@@ -1,0 +1,143 @@
+KMH Project Proprietary License
+================================
+
+Copyright (c) 2026 KNAPPE0 ("the Author" / "KMH")
+All Rights Reserved.
+
+This software, including its source code, compiled binaries, associated
+documentation, art, configuration files, and any other accompanying
+materials (collectively, "the Work"), is the proprietary work of the
+Author. The Work is made available for inspection and limited use under
+the strict terms set forth below.
+
+
+1. Grants — what you MAY do without prior permission
+----------------------------------------------------
+
+  a. Run the official, unmodified Work as distributed by the Author.
+  b. Read, study, and reference the source code for personal,
+     non-commercial educational purposes.
+  c. Submit bug reports, feature requests, or suggestions to the
+     official project via the Author's designated channels.
+
+
+2. Restrictions — what you may NOT do without prior written permission
+----------------------------------------------------------------------
+
+The following actions are prohibited unless and until you receive
+explicit, prior, written permission from KNAPPE0:
+
+  a. Modify the Work, in source or binary form, in any way — including
+     for personal use.
+  b. Create, prepare, or publish derivative works based on the Work,
+     in whole or in part.
+  c. Redistribute the Work, modified versions, or any portion thereof,
+     by any means including but not limited to: file sharing, code
+     hosting platforms, public archives, mod portals (including but
+     not limited to Steam Workshop, Nexus Mods, ModDB), or peer-to-
+     peer networks.
+  d. Sublicense, relicense, or attempt to remove or alter this
+     LICENSE file or any copyright / attribution notices.
+  e. Use the Work, in whole or in part, in any commercial product,
+     paid service, paid mod, subscription offering, or revenue-
+     generating activity of any kind.
+  f. Incorporate the Work, in whole or in part, into any other
+     project or codebase regardless of that project's own license.
+  g. Bundle the Work with installers, mod packs, or other
+     distributions intended for third-party consumption.
+
+
+3. Permission requests
+----------------------
+
+All permission requests must be submitted in writing to KNAPPE0
+through the official GitHub repository for this Work:
+
+    https://github.com/KNAPPE0
+
+Requests should clearly describe:
+
+  - The intended use, scope, and audience
+  - Whether the use is commercial or non-commercial
+  - Whether modifications are proposed and, if so, their nature
+  - The party requesting permission and how they may be contacted
+
+A grant of permission, if given, is non-transferable, may be revoked,
+may be conditioned on additional terms, and applies only to the
+specific use described in the request. Silence does not constitute
+permission.
+
+
+4. Termination
+--------------
+
+Any violation of this License — including any unauthorized
+modification, redistribution, sublicensing, commercial use, or
+attempt to circumvent these terms — immediately and automatically
+terminates all rights granted under Section 1 with respect to the
+violator. Continued use after termination is unauthorized and may be
+subject to legal action.
+
+
+5. No warranty
+--------------
+
+THE WORK IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NON-
+INFRINGEMENT. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY CLAIM,
+DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT,
+OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE WORK OR
+THE USE OR OTHER DEALINGS IN THE WORK.
+
+
+6. Relationship to upstream RimWorld Together
+---------------------------------------------
+
+The Work interoperates with the RimWorld Together mod ("RWT") at
+runtime via published APIs and well-documented protocols. The Work
+contains NONE of RWT's source code, defs, assets, or compiled
+binaries. RWT remains the property of its respective authors under
+its own license (Creative Commons Attribution-NonCommercial-
+NoDerivatives 4.0 International). This License governs only the
+Work and does not modify, override, or supersede RWT's license in
+any way.
+
+
+7. Extensions via the public SDK
+--------------------------------
+
+Use of the publicly documented `KMH.Sdk.Server` namespace (and any
+future `KMH.Sdk.Client` namespace) from a separately distributed
+extension assembly is permitted and is not considered a
+modification of the Work for purposes of Section 2.
+
+This permission covers:
+
+  - Writing extensions that reference the SDK's public interfaces,
+    records, and event payloads
+  - Distributing such extensions under any license the author
+    chooses (including commercial / closed-source)
+  - Bundling multiple SDK-using extensions together
+
+This permission does NOT cover:
+
+  - Modifying, forking, or redistributing the Work's own source or
+    binaries (those still require permission per Section 2)
+  - Bundling KMH binaries inside an extension distribution —
+    extensions must direct users to obtain KMH from the upstream
+    official release
+
+See EXTENSIONS.md in the project root for the SDK reference and
+the contract-stability policy that protects extension authors from
+KMH internal changes between releases.
+
+
+8. Severability
+---------------
+
+If any provision of this License is held to be unenforceable, the
+remaining provisions shall remain in full force and effect.
+
+
+END OF LICENSE

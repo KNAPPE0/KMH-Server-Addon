@@ -1,0 +1,58 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    KMH Server Extension - Welcome Bonus
+    ===================================
+
+    A complete working example of a KMH server-side extension.
+    Demonstrates:
+      - Implementing IKmhServerExtension
+      - Subscribing to a lifecycle event (PlayerJoined)
+      - Calling a stable API (ITreasuryApi)
+      - Using IServerLog so output is properly prefixed
+      - Per-extension storage (one-time-only flag so repeat joins
+        don't re-claim the bonus)
+
+    Build with:  dotnet build -c Debug
+    Output:      bin/Debug/net8.0/WelcomeBonus.dll
+
+    Deploy by dropping WelcomeBonus.dll into kmh-extensions/ next to
+    KMHServerAddon.exe. Restart the addon. You'll see in the log:
+      [KMH-Addon] Extensions: loaded 'Welcome Bonus' v1.0.0 (from WelcomeBonus.dll)
+
+    Customise:
+      - The bonus amount and welcome message are constants at the top
+        of WelcomeBonus.cs - change to taste.
+      - The storage filename is "welcomed_users.json" - rename if you
+        run multiple welcome variants.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <Version>1.0.0</Version>
+
+    <!-- Don't copy the SDK DLL into the extension's output -
+         the addon already ships it. -->
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+
+  <!--
+    Reference the SDK only. Extensions should NOT reference
+    KMHServerAddon.dll directly - that would couple the extension
+    to KMH internals. The SDK is the stable contract; internals
+    can change between releases.
+
+    Adjust the HintPath to wherever KMH.Sdk.Server.dll lives on
+    your disk (typically alongside KMHServerAddon.exe in the
+    Deploy folder).
+  -->
+  <ItemGroup>
+    <Reference Include="KMH.Sdk.Server">
+      <HintPath>..\..\Deploy\KMH.Sdk.Server.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,185 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Built once per RWT server generation (dotnet build -p:RwtFlavor=Old|New).
+       Old = the KMHServerAddon.exe launcher (binds Shared/TCPNetwork,
+       26.5.24.1). New = a library payload (binds RTShared/RTNetwork, 26.6.9.1+)
+       that the launcher embeds and loads when it finds a new-generation server
+       next to it - so ONE exe serves both server versions. -->
+  <PropertyGroup>
+    <RwtFlavor Condition="'$(RwtFlavor)' == ''">Old</RwtFlavor>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>KMHServerAddon</RootNamespace>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    <IntermediateOutputPath>obj\$(RwtFlavor)\$(Configuration)\</IntermediateOutputPath>
+
+    <!-- Same RID set the RWT server uses so the addon publishes across
+         the same platforms players already get the server for. -->
+    <RuntimeIdentifiers>win-x64;win-x86;linux-x64;linux-arm;linux-arm64</RuntimeIdentifiers>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(RwtFlavor)' == 'Old'">
+    <OutputType>Exe</OutputType>
+    <AssemblyName>KMHServerAddon</AssemblyName>
+    <DefineConstants>$(DefineConstants);RWT_OLD</DefineConstants>
+    <!-- The real entry point is Bootstrap.Main - an RWT-free shim that probes
+         which server generation sits next to the exe before touching any RWT
+         type, then either runs Main_ here (old) or the embedded payload (new). -->
+    <StartupObject>KMHServerAddon.Bootstrap</StartupObject>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(RwtFlavor)' == 'New'">
+    <OutputType>Library</OutputType>
+    <AssemblyName>KMHAddon.RTShared</AssemblyName>
+    <DefineConstants>$(DefineConstants);RWT_NEW</DefineConstants>
+    <OutputPath>bin\payload</OutputPath>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <RwtServerBuildPath Condition="'$(RwtServerBuildPath)' == ''">E:\RWT Related\rwt-26.6.9.1\Server</RwtServerBuildPath>
+  </PropertyGroup>
+
+  <!-- The launcher embeds the new-generation payload when it has been built
+       (build New before Old for release; a plain dev build still works without). -->
+  <ItemGroup Condition="'$(RwtFlavor)' == 'Old' and Exists('bin\payload\KMHAddon.RTShared.dll')">
+    <EmbeddedResource Include="bin\payload\KMHAddon.RTShared.dll" LogicalName="KMHAddon.RTShared.dll" />
+  </ItemGroup>
+
+  <!-- Harmony bundled with our addon - RWT server doesn't ship it.
+       Private=true so 0Harmony.dll lands in our build output and the
+       single addon publish carries everything the launcher needs. -->
+  <ItemGroup>
+    <PackageReference Include="Lib.Harmony" Version="2.4.2" />
+    <!-- Discord bridge dependency. Bundled with the addon so a single
+         publish carries everything. Bridge is opt-in via
+         Config/Discord/DiscordConfig.json - when that file is absent the
+         dependency is loaded but the bot never starts, so cold-start cost
+         is minimal. -->
+    <PackageReference Include="Discord.Net" Version="3.16.0" />
+  </ItemGroup>
+
+  <!-- Public SDK project for extension authors. Built alongside the
+       addon; the resulting KMH.Sdk.Server.dll is shipped in Deploy/
+       and downstream extensions reference it (not the addon itself,
+       which keeps internals out of their compile-time surface). -->
+  <ItemGroup>
+    <ProjectReference Include="KMH.Sdk.Server\KMH.Sdk.Server.csproj" />
+  </ItemGroup>
+
+  <!-- Bundled Discord embed icons. Copied next to the addon exe so the bot
+       can attach them to embeds (attachment://name.png) with no public URL.
+       Optional - a missing file just yields a plain embed. Drop PNGs into
+       Source/Assets/Icons/ (expected filenames in its README) and rebuild,
+       or drop them straight into the deployed Assets/Icons/ folder. Update
+       (not Include) so we don't duplicate the SDK's auto-included None items. -->
+  <ItemGroup>
+    <None Update="Assets\Icons\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!-- The SDK project lives at Source/KMH.Sdk.Server/ - a sub-folder
+       of this csproj's directory. MSBuild's default Compile glob
+       (**/*.cs) would otherwise pull the SDK's source AND its
+       generated obj/Debug/net8.0/*.cs (AssemblyInfo etc.) into the
+       addon build, producing duplicate-attribute errors. Exclude
+       the SDK folder explicitly. -->
+  <ItemGroup>
+    <Compile          Remove="KMH.Sdk.Server\**\*.cs" />
+    <Content          Remove="KMH.Sdk.Server\**" />
+    <EmbeddedResource Remove="KMH.Sdk.Server\**" />
+    <None             Remove="KMH.Sdk.Server\**" />
+  </ItemGroup>
+
+  <!--
+    RWT server assemblies referenced from a local server-from-source build.
+    Private=False so we DO NOT copy/redistribute RWT's DLLs - the addon
+    expects to live in a folder next to RWT's already-built DLLs.
+
+    Update RwtServerBuildPath when targeting a different RWT version (e.g.
+    upstream/production once aligned, or whichever fork you're building
+    against). Compile-time only - never bundled in our output.
+  -->
+  <PropertyGroup>
+    <!-- Compile-time path to the RWT server's multi-file build output.
+         The Release build is RID-segregated by default; the Debug build
+         is multi-file under a single net8.0 folder which suits HintPath
+         cleanly - always use the Debug output here.
+
+         TARGET RELEASE: built and verified to RUN against the official
+         RimWorld Together release 26.5.24.1
+         (https://github.com/RimworldTogetherTeam/RimworldTogether - check
+         out tag v26.5.24.1 and run `dotnet build -c Debug` inside
+         Source/Server). When you have 26.5.24.1 built, point this at
+         that build's output folder so the typed references in our
+         Harmony patches line up with the runtime DLLs the player loads.
+
+         Two ways to override the default for your local setup without
+         editing this csproj:
+
+           1) Set the RwtServerBuildPath environment variable before
+              calling `dotnet build`, e.g.:
+                $env:RwtServerBuildPath = "C:\path\to\rwt-26.5.24.1\Source\Server\bin\Debug\net8.0"
+                dotnet build -c Debug
+
+           2) Create Source/Local.props (gitignored) with:
+                <Project>
+                  <PropertyGroup>
+                    <RwtServerBuildPath>C:\your\path\here</RwtServerBuildPath>
+                  </PropertyGroup>
+                </Project>
+              The Import below picks it up automatically.
+
+         The default below points at a from-source build of official
+         RWT 26.5.24.1 (clone the upstream repo, check out the
+         26.5.24.1 tag, run `dotnet build -c Debug` inside Source/
+         Server - output lands at <repo>/Source/Server/bin/Debug/
+         net8.0/). Override via env var or Local.props if your local
+         clone lives elsewhere. -->
+    <RwtServerBuildPath Condition="'$(RwtServerBuildPath)' == ''">E:\RWT Related\rwt-26.5.24.1\Source\Server\bin\Debug\net8.0</RwtServerBuildPath>
+  </PropertyGroup>
+
+  <!-- Per-developer override without editing this file. Drop a
+       Source/Local.props alongside this csproj and the import picks
+       it up. Gitignored. -->
+  <Import Project="Local.props" Condition="Exists('Local.props')" />
+
+  <!--
+    RWT server assemblies are referenced for COMPILE ONLY (Private=False).
+    They are NEVER copied into our build output or bundled into the published
+    exe - redistributing RWT's DLLs would violate RWT's license. At runtime
+    the KMH exe loads these from the RimWorld Together server folder it's run
+    in (the .NET host resolves them from the exe's directory). So the admin
+    drops KMHServerAddon.exe into their RWT server folder and runs it there.
+  -->
+  <ItemGroup>
+    <Reference Include="GameServer">
+      <HintPath>$(RwtServerBuildPath)\GameServer.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Newtonsoft.Json">
+      <HintPath>$(RwtServerBuildPath)\Newtonsoft.Json.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+  <ItemGroup Condition="'$(RwtFlavor)' == 'Old'">
+    <Reference Include="Shared">
+      <HintPath>$(RwtServerBuildPath)\Shared.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="TCPNetwork">
+      <HintPath>$(RwtServerBuildPath)\TCPNetwork.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+  <ItemGroup Condition="'$(RwtFlavor)' == 'New'">
+    <Reference Include="RTShared">
+      <HintPath>$(RwtServerBuildPath)\RTShared.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="RTNetwork">
+      <HintPath>$(RwtServerBuildPath)\RTNetwork.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>

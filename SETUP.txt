@@ -1,0 +1,53 @@
+KMH Server Addon - setup
+========================
+
+Two files, dropped together. That's the whole install:
+
+    your-server-folder\
+        GameServer.exe        <- the official RimWorld Together server
+        KMHServerAddon.exe     <- this
+
+Then run KMHServerAddon.exe (NOT GameServer.exe).
+
+KMHServerAddon.exe is a single file. It works with the GameServer.exe you put
+next to it, adds the KMH features, and starts the server. It detects which
+server version it sits next to (26.5.24.1 or 26.6.9.1+) and uses the matching
+build automatically. On first run it creates KMH-Data/ (configs + state),
+kmh-extensions/, and a small .rwt-runtime/ cache next to itself.
+
+Requirement
+-----------
+The .NET 8 runtime installed on the server:
+    https://dotnet.microsoft.com/download/dotnet/8.0
+(KMH patches RWT with Harmony, which needs the JIT from a normally-installed
+runtime - it can't reach the one baked inside the self-contained GameServer.exe.
+That's the one thing the owner installs once.)
+
+If GameServer.exe isn't in the folder, KMH says so and stops.
+
+Config (KMH-Data/Config/)
+-------------------------
+  Economy.json          marketplace tax, listing caps, price floors
+  Sites.json            custom-site pricing, worker XP, cycle rate
+  Reputation.json       score deltas + tier cutoffs
+  Quests.json           per-poster caps, expiry
+  Enforcement.json      config-enforcement state + safe-mods list
+  Discord/DiscordConfig.json   paste a bot token to enable the Discord bridge
+All are generated with defaults on first boot. Reload economy/site config live
+(in-game chat or server console):  kmh reload-economy
+
+Extensions
+----------
+Drop extension DLLs into kmh-extensions/. See EXTENSIONS.md + the SDK bundle
+(KMH.Sdk.Server) to build your own.
+
+Client
+------
+Players install the KMH Patch mod (separate download); it needs RimWorld
+Together + Harmony loaded before it.
+
+Build from source
+-----------------
+Build the target RWT server once, point Source/Local.props or
+$env:RwtServerBuildPath at its build output (for the compile-time references),
+then run:  .\deploy.ps1   -> single-file exe + zip in Releases\.
