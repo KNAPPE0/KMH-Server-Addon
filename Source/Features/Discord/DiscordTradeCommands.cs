@@ -99,7 +99,7 @@ namespace KMHServerAddon.Features.Discord
             // matches reality
             int    boughtQty = Math.Min(qty, listing.RemainingQty);
             long   expected  = (long)listing.UnitPriceSilver * boughtQty;
-            string label     = ItemLabelCache.LabelFor(listing.ItemDefName);
+            string label     = ItemLabelCache.LabelFor(listing.ItemDefName, listing.StuffDefName, listing.QualityIndex);
             if (expected > int.MaxValue || expected < 0)
             {
                 await raw.Channel.SendMessageAsync(
@@ -230,6 +230,15 @@ namespace KMHServerAddon.Features.Discord
             }
             string itemRaw = nameSb.ToString().Replace('_', ' ').Trim();
 
+            // optional trailing quality word: "!kmh-sell power armor excellent 1 800"
+            int requestedQuality = 0;
+            int lastSpace = itemRaw.LastIndexOf(' ');
+            if (lastSpace > 0)
+            {
+                int qw = Util.ItemKey.QualityIndexOf(itemRaw.Substring(lastSpace + 1));
+                if (qw > 0) { requestedQuality = qw; itemRaw = itemRaw.Substring(0, lastSpace).Trim(); }
+            }
+
             // Resolve friendly name → defName via the cache. Ambiguous matches return a candidate list so the user
             // can re-issue more precisely. Unknown items fall through to raw input as a defName (works for mods the
             // server hasn't seen yet - the treasury withdraw will fail cleanly if it really isn't one)
@@ -252,6 +261,44 @@ namespace KMHServerAddon.Features.Discord
                 string fallback = itemRaw.Replace(' ', '_');
                 defName = fallback.Length > 64 ? fallback.Substring(0, 64) : fallback;
             }
+            // Resolve which vault stack this sells: the def may exist plain or as material/quality variants.
+            string sellStuff = ""; int sellQuality = 0;
+            {
+                var vault = Treasury.TreasuryStore.GetSnapshotFor(caller);
+                List<string> variants = new List<string>();
+                if (vault?.Items != null)
+                {
+                    foreach (var kv in vault.Items)
+                    {
+                        Util.ItemKey.Split(kv.Key, out string d, out _, out int q);
+                        if (!string.Equals(d, defName, StringComparison.OrdinalIgnoreCase)) continue;
+                        if (requestedQuality > 0 && q != requestedQuality) continue;
+                        variants.Add(kv.Key);
+                    }
+                }
+                if (variants.Count == 1)
+                {
+                    Util.ItemKey.Split(variants[0], out _, out sellStuff, out sellQuality);
+                }
+                else if (variants.Count > 1)
+                {
+                    System.Text.StringBuilder vb = new System.Text.StringBuilder();
+                    vb.Append("You have multiple variants of that item - add a quality word (or use the in-game marketplace):\n");
+                    foreach (string v in variants)
+                        vb.Append("• **").Append(ItemLabelCache.LabelFor(v)).Append("**\n");
+                    await raw.Channel.SendMessageAsync(vb.ToString()).ConfigureAwait(false);
+                    return;
+                }
+                else if (requestedQuality > 0)
+                {
+                    await raw.Channel.SendMessageAsync(
+                        $"No **{Util.ItemKey.QualityName(requestedQuality)}** {ItemLabelCache.LabelFor(defName)} in your treasury.")
+                        .ConfigureAwait(false);
+                    return;
+                }
+                // zero variants + no quality asked: fall through with the plain def - the escrow fails cleanly
+            }
+
             // Mirror the in-game post path's sanity bounds.
             if (qty   > MaxBuyQty)        qty   = MaxBuyQty;
             if (price > 1_000_000)        price = 1_000_000;
@@ -266,7 +313,8 @@ namespace KMHServerAddon.Features.Discord
 
             try
             {
-                long id = MarketplaceStore.Post(caller, defName, qty, price, "public", expiresInHours: 0);
+                long id = MarketplaceStore.Post(caller, defName, qty, price, "public", expiresInHours: 0,
+                                                stuffDefName: sellStuff, qualityIndex: sellQuality);
                 if (id == 0)
                 {
                     await raw.Channel.SendMessageAsync(
@@ -277,7 +325,7 @@ namespace KMHServerAddon.Features.Discord
                 }
                 MarketplaceHandler.BroadcastSnapshot();
                 MarketplaceHandler.PushTreasuryTo(caller);
-                string sellLabel = ItemLabelCache.LabelFor(defName);
+                string sellLabel = ItemLabelCache.LabelFor(defName, sellStuff, sellQuality);
                 Embed eb = new EmbedBuilder()
                     .WithTitle("Listed for sale")
                     .WithDescription(

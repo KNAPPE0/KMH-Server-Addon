@@ -137,7 +137,7 @@ namespace KMHServerAddon.Features.Discord
             {
                 MarketplaceListing l = rows[i];
                 string expiry = FormatExpiry(l.ExpiresUtcTicks);
-                string label  = ItemLabelCache.LabelFor(l.ItemDefName);
+                string label  = ItemLabelCache.LabelFor(l.ItemDefName, l.StuffDefName, l.QualityIndex);
                 string emoji  = DiscordItemIconMap.EmojiFor(l.ItemDefName);
                 eb.AddField(
                     $"{emoji} #{l.Id} · {label}",
@@ -305,7 +305,7 @@ namespace KMHServerAddon.Features.Discord
             {
                 foreach (MarketplaceListing l in snap.Listings)
                 {
-                    string label = ItemLabelCache.LabelFor(l.ItemDefName);
+                    string label = ItemLabelCache.LabelFor(l.ItemDefName, l.StuffDefName, l.QualityIndex);
                     bool matchLabel  = label.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0;
                     bool matchDef    = l.ItemDefName.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0;
                     if (matchLabel || matchDef) hits.Add(l);
@@ -329,7 +329,7 @@ namespace KMHServerAddon.Features.Discord
             {
                 MarketplaceListing l = hits[i];
                 eb.AddField(
-                    $"{DiscordItemIconMap.EmojiFor(l.ItemDefName)} #{l.Id} · {ItemLabelCache.LabelFor(l.ItemDefName)}",
+                    $"{DiscordItemIconMap.EmojiFor(l.ItemDefName)} #{l.Id} · {ItemLabelCache.LabelFor(l.ItemDefName, l.StuffDefName, l.QualityIndex)}",
                     $"**{l.RemainingQty}**× @ `{SilverFmt.Format(l.UnitPriceSilver)}/ea` · by **{l.SellerUsername}** · {FormatExpiry(l.ExpiresUtcTicks)}",
                     inline: false);
             }

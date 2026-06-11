@@ -185,7 +185,7 @@ namespace KMHServerAddon.Features.Discord
             MarketplaceHandler.PushTreasuryTo(caller);
             MarketplaceHandler.PushTreasuryTo(sellerUsername);
 
-            string label = ItemLabelCache.LabelFor(listing.ItemDefName);
+            string label = ItemLabelCache.LabelFor(listing.ItemDefName, listing.StuffDefName, listing.QualityIndex);
             await component.FollowupAsync(
                 $"Bought **{boughtQty}× {label}** for `{expected}s`. Items delivered to your treasury.",
                 ephemeral: true).ConfigureAwait(false);
