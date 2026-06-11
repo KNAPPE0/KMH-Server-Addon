@@ -1,0 +1,283 @@
+using System;
+using System.Collections.Generic;
+using Discord;
+using KMHServerAddon.Features.Guilds;
+using KMHServerAddon.Features.PlayerStats;
+using KMHServerAddon.Features.PlayerStats.Dto;
+using KMHServerAddon.Util;
+
+namespace KMHServerAddon.Features.Discord
+{
+    // Composes every leaderboard embed (auto-poster, !kmh-leaderboard, /kmh leaderboard, !kmh-rank). Rows are plain
+    // markdown lines, not code-block tables - tables wider than ~56 chars wrap mid-column on Discord and come out
+    // mangled, lines wrap at word boundaries and stay readable on any width
+    internal static class DiscordLeaderboardBuilder
+    {
+        public const string DefaultSort = "score";
+
+        public static readonly string[] SupportedSorts =
+            { "score", "silver", "sales", "spent", "quests", "posted", "sites", "xp" };
+
+        public const string DefaultGuildSort = "members";
+        public static readonly string[] SupportedGuildSorts = { "members", "treasury" };
+
+        private static readonly Color LiveColor  = new Color(0x4A, 0x90, 0xE2);
+        private static readonly Color FinalColor = new Color(0x7A, 0x7A, 0x7A);
+        private static readonly Color GuildColor = new Color(0xBA, 0x84, 0xF6);
+        private static readonly Color RepColor   = new Color(0x6A, 0xC6, 0x7A);
+        private static readonly Color CardColor  = new Color(0xE2, 0xB9, 0x4A);
+
+        // 🥇🥈🥉 for the podium, monospace rank for the rest (keeps rows visually ranked without a table)
+        private static string Rank(int i) => i switch
+        {
+            0 => "🥇", 1 => "🥈", 2 => "🥉",
+            _ => $"`#{i + 1,2}`",
+        };
+
+        // ---- player board ----
+
+        // Top-N players by one metric. Player-focused: name + value only, guild affiliation lives on the guild
+        // board and the rank card. Null when the roster is empty - callers reply "no data yet"
+        public static Embed Build(int topN, string sortKey, bool isFinalized = false,
+                                  DateTime? liveStartedUtc = null, DateTime? resetsAtUtc = null, int updateEveryMin = 0)
+        {
+            topN = Math.Clamp(topN, 1, 25);
+            List<PlayerLeaderboardEntry> rows = PlayerStatsStore.BuildSnapshot()?.Entries;
+            if (rows == null || rows.Count == 0) return null;
+
+            string key = NormalizeSort(sortKey);
+            rows.Sort((a, b) => ReadMetric(b, key).CompareTo(ReadMetric(a, key)));
+            int shown = Math.Min(topN, rows.Count);
+
+            var sb = new System.Text.StringBuilder();
+            AppendStatusLine(sb, isFinalized, liveStartedUtc, resetsAtUtc, updateEveryMin);
+            for (int i = 0; i < shown; i++)
+            {
+                PlayerLeaderboardEntry e = rows[i];
+                sb.Append(Rank(i)).Append(" **").Append(Escape(e.Username)).Append("**");
+                if (e.IsLinkedToDiscord) sb.Append(" 🔗");
+                sb.Append(" · ").Append(FormatMetric(ReadMetric(e, key), key)).Append('\n');
+            }
+
+            return new EmbedBuilder()
+                .WithTitle($"🏆 Player Leaderboard — top {shown} by {SortLabel(key)}")
+                .WithColor(isFinalized ? FinalColor : LiveColor)
+                .WithDescription(sb.ToString())
+                .WithFooter($"Sorts: {string.Join(" · ", SupportedSorts)}  |  !kmh-rank <player> for a stat card")
+                .WithCurrentTimestamp()
+                .Build();
+        }
+
+        // ---- guild board ----
+
+        public static Embed BuildGuilds(int topN, string sortKey, bool isFinalized = false)
+        {
+            topN = Math.Clamp(topN, 1, 25);
+            List<GuildStore.GuildSummary> rows = GuildStore.ComputeLeaderboard();
+            if (rows == null || rows.Count == 0) return null;
+
+            string key = NormalizeGuildSort(sortKey);
+            rows.Sort((a, b) => ReadGuildMetric(b, key).CompareTo(ReadGuildMetric(a, key)));
+            int shown = Math.Min(topN, rows.Count);
+
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < shown; i++)
+            {
+                GuildStore.GuildSummary g = rows[i];
+                sb.Append(Rank(i)).Append(" **").Append(Escape(g.Name)).Append("** · ")
+                  .Append(g.MemberCount).Append(g.MemberCount == 1 ? " member" : " members")
+                  .Append(" · ").Append(SilverFmt.Format(g.TreasurySilver)).Append(" vault")
+                  .Append('\n');
+            }
+
+            return new EmbedBuilder()
+                .WithTitle($"🏰 Guild Leaderboard — top {shown} by {key}")
+                .WithColor(isFinalized ? FinalColor : GuildColor)
+                .WithDescription(sb.ToString())
+                .WithFooter($"Sorts: {string.Join(" · ", SupportedGuildSorts)}")
+                .WithCurrentTimestamp()
+                .Build();
+        }
+
+        // ---- reputation board ----
+
+        public static Embed BuildReputation(int topN)
+        {
+            topN = Math.Clamp(topN, 1, 25);
+            List<Reputation.Dto.ReputationEntryDto> rows = Reputation.ReputationStore.BuildSnapshot()?.Entries;
+            if (rows == null || rows.Count == 0) return null;
+
+            rows.Sort((a, b) => b.Score.CompareTo(a.Score));
+            int shown = Math.Min(topN, rows.Count);
+
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < shown; i++)
+            {
+                Reputation.Dto.ReputationEntryDto e = rows[i];
+                sb.Append(Rank(i)).Append(" **").Append(Escape(e.Username)).Append("** · ")
+                  .Append(e.Score.ToString("N0")).Append(" · ").Append(e.Tier ?? "Neutral").Append('\n');
+            }
+
+            return new EmbedBuilder()
+                .WithTitle($"🤝 Reputation — top {shown} by quest trust")
+                .WithColor(RepColor)
+                .WithDescription(sb.ToString())
+                .WithFooter("Reputation comes from quest behaviour")
+                .WithCurrentTimestamp()
+                .Build();
+        }
+
+        // ---- per-player rank card ----
+
+        // Full stat card for one player: overall rank + every metric with its own rank. Resolves the name
+        // case-insensitively, then by substring; `matches` carries candidates when the query is ambiguous
+        public static Embed BuildPlayerCard(string query, out List<string> matches)
+        {
+            matches = null;
+            if (string.IsNullOrWhiteSpace(query)) return null;
+            List<PlayerLeaderboardEntry> all = PlayerStatsStore.BuildSnapshot()?.Entries;
+            if (all == null || all.Count == 0) return null;
+
+            string q = query.Trim();
+            PlayerLeaderboardEntry me = all.Find(e => string.Equals(e.Username, q, StringComparison.OrdinalIgnoreCase));
+            if (me == null)
+            {
+                List<PlayerLeaderboardEntry> hits =
+                    all.FindAll(e => (e.Username ?? "").IndexOf(q, StringComparison.OrdinalIgnoreCase) >= 0);
+                if (hits.Count == 1) me = hits[0];
+                else if (hits.Count > 1)
+                {
+                    matches = hits.ConvertAll(h => h.Username);
+                    if (matches.Count > 8) matches = matches.GetRange(0, 8);
+                    return null;
+                }
+                else return null;
+            }
+
+            int RankOf(Func<PlayerLeaderboardEntry, long> metric)
+            {
+                long mine = metric(me);
+                int better = 0;
+                foreach (PlayerLeaderboardEntry e in all) if (metric(e) > mine) better++;
+                return better + 1;
+            }
+
+            int overall = RankOf(e => e.EconomyScore);
+            (int repScore, string repTier) = Reputation.ReputationStore.Get(me.Username);
+
+            string who = me.IsLinkedToDiscord ? "Linked to Discord 🔗" : "Not linked to Discord";
+            string guild = string.IsNullOrEmpty(me.GuildName) ? "No guild" : $"Guild: **{Escape(me.GuildName)}**";
+            long firstSeenUnix = TicksToUnix(me.FirstSeenUtcTicks);
+
+            return new EmbedBuilder()
+                .WithTitle($"📊 {me.Username} — #{overall} overall")
+                .WithColor(CardColor)
+                .WithDescription($"{guild} · {repTier} ({repScore:N0} rep) · {who}")
+                .AddField("Economy",
+                    $"Score **{me.EconomyScore:N0}** (#{RankOf(e => e.EconomyScore)})\n" +
+                    $"Donated {SilverFmt.Format(me.SilverDonated)} (#{RankOf(e => e.SilverDonated)})\n" +
+                    $"Sales {SilverFmt.Format(me.SalesEarned)} (#{RankOf(e => e.SalesEarned)})\n" +
+                    $"Spent {SilverFmt.Format(me.PurchasesSpent)} (#{RankOf(e => e.PurchasesSpent)})", inline: true)
+                .AddField("Quests",
+                    $"Completed **{me.QuestsCompleted:N0}** (#{RankOf(e => e.QuestsCompleted)})\n" +
+                    $"Posted {me.QuestsPosted:N0} (#{RankOf(e => e.QuestsPosted)})", inline: true)
+                .AddField("Sites",
+                    $"Built **{me.SitesBuilt:N0}** (#{RankOf(e => e.SitesBuilt)})\n" +
+                    $"Worker XP {me.WorkerXp:N0} (#{RankOf(e => e.WorkerXp)})", inline: true)
+                .AddField("Member since", firstSeenUnix > 0 ? $"<t:{firstSeenUnix}:D> (<t:{firstSeenUnix}:R>)" : "(unknown)")
+                .WithFooter($"Ranked against {all.Count} player{(all.Count == 1 ? "" : "s")}")
+                .WithCurrentTimestamp()
+                .Build();
+        }
+
+        // ---- helpers ----
+
+        // Live boards show their cadence + native Discord countdown; finalized boards show the covered period
+        private static void AppendStatusLine(System.Text.StringBuilder sb, bool isFinalized,
+                                             DateTime? startedUtc, DateTime? resetsAtUtc, int updateEveryMin)
+        {
+            if (isFinalized)
+            {
+                long s = ToUnix(startedUtc), e = ToUnix(DateTime.UtcNow);
+                sb.Append(s > 0 ? $"⏹ _Final snapshot · <t:{s}:f> → <t:{e}:f>_" : "⏹ _Final snapshot_").Append("\n\n");
+            }
+            else if (updateEveryMin > 0)
+            {
+                long r = ToUnix(resetsAtUtc);
+                sb.Append($"📡 _Live · updates every {updateEveryMin}m");
+                if (r > 0) sb.Append($" · resets <t:{r}:R>");
+                sb.Append('_').Append("\n\n");
+            }
+        }
+
+        private static long ToUnix(DateTime? utc)
+            => utc.HasValue ? ((DateTimeOffset)DateTime.SpecifyKind(utc.Value, DateTimeKind.Utc)).ToUnixTimeSeconds() : 0;
+
+        private static long TicksToUnix(long utcTicks)
+            => utcTicks > 0 ? ((DateTimeOffset)new DateTime(utcTicks, DateTimeKind.Utc)).ToUnixTimeSeconds() : 0;
+
+        // Discord markdown specials in player/guild names would break the bold wrapping.
+        private static string Escape(string s)
+            => (s ?? "").Replace("\\", "\\\\").Replace("*", "\\*").Replace("_", "\\_").Replace("`", "\\`").Replace("~", "\\~");
+
+        public static string NormalizeSort(string s)
+        {
+            s = (s ?? "").Trim().ToLowerInvariant();
+            switch (s)
+            {
+                case "donated": return "silver";
+                case "purchases": return "spent";
+                case "built": return "sites";
+                case "workerxp": return "xp";
+            }
+            return Array.IndexOf(SupportedSorts, s) >= 0 ? s : DefaultSort;
+        }
+
+        public static string NormalizeGuildSort(string s)
+        {
+            s = (s ?? "").Trim().ToLowerInvariant();
+            if (s == "silver" || s == "vault") s = "treasury";
+            return Array.IndexOf(SupportedGuildSorts, s) >= 0 ? s : DefaultGuildSort;
+        }
+
+        private static long ReadMetric(PlayerLeaderboardEntry e, string key) => key switch
+        {
+            "silver" => e.SilverDonated,
+            "sales"  => e.SalesEarned,
+            "spent"  => e.PurchasesSpent,
+            "quests" => e.QuestsCompleted,
+            "posted" => e.QuestsPosted,
+            "sites"  => e.SitesBuilt,
+            "xp"     => e.WorkerXp,
+            _        => e.EconomyScore,
+        };
+
+        private static string SortLabel(string key) => key switch
+        {
+            "silver" => "silver donated",
+            "sales"  => "sales earned",
+            "spent"  => "silver spent",
+            "quests" => "quests completed",
+            "posted" => "quests posted",
+            "sites"  => "sites built",
+            "xp"     => "worker XP",
+            _        => "economy score",
+        };
+
+        // Silver metrics get the $ formatting, counts a plain unit, so a row reads as a sentence fragment
+        private static string FormatMetric(long v, string key) => key switch
+        {
+            "silver" => $"{SilverFmt.Format(v)} donated",
+            "sales"  => $"{SilverFmt.Format(v)} sales",
+            "spent"  => $"{SilverFmt.Format(v)} spent",
+            "quests" => $"{v:N0} quest{(v == 1 ? "" : "s")}",
+            "posted" => $"{v:N0} posted",
+            "sites"  => $"{v:N0} site{(v == 1 ? "" : "s")}",
+            "xp"     => $"{v:N0} XP",
+            _        => $"{v:N0} score",
+        };
+
+        private static long ReadGuildMetric(GuildStore.GuildSummary g, string key)
+            => key == "treasury" ? g.TreasurySilver : g.MemberCount;
+    }
+}

@@ -1,0 +1,39 @@
+bin/
+obj/
+*.user
+*.suo
+.vs/
+.idea/
+.vscode/
+
+# Per-developer csproj override pointing at the local RWT build folder
+# (see Source/Local.props.example).
+Local.props
+
+# Build output of deploy.ps1 — regenerable from sources.
+Deploy/
+
+# Release zips assembled by deploy.ps1 — large binary artifacts,
+# uploaded to GitHub Releases rather than tracked.
+Releases/
+
+# Per-user server runtime data folders, in case the dev runs the
+# Deploy build in-place during smoke tests. Anchored to repo root
+# (leading /) so they don't catch identically-named tracked folders
+# under Templates/ or Source/.
+/Assets/
+/Backups/
+/Configs/
+/Logs/
+/Temp/
+/kmh-data/
+/Source/Assets/*
+!/Source/Assets/Icons/
+/Source/Backups/
+/Source/Configs/
+/Source/Logs/
+/Source/Temp/
+/Source/kmh-data/
+
+Thumbs.db
+.DS_Store

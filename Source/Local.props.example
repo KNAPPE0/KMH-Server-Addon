@@ -1,0 +1,26 @@
+<!--
+  Per-developer build-path override. Copy this file to Local.props
+  (next to KMHServerAddon.csproj) and edit the path inside to point
+  at your local RWT 26.5.24.1 build output.
+
+  Local.props is gitignored so your local override never leaks into
+  commits.
+
+  Example (Windows):
+    <RwtServerBuildPath>C:\src\RimworldTogether\Source\Server\bin\Debug\net8.0</RwtServerBuildPath>
+
+  Example (macOS / Linux):
+    <RwtServerBuildPath>/home/me/src/RimworldTogether/Source/Server/bin/Debug/net8.0</RwtServerBuildPath>
+
+  Build steps after this file exists:
+    1) Make sure your RWT 26.5.24.1 build has run successfully and the
+       folder above contains GameServer.dll, Shared.dll, TCPNetwork.dll,
+       and Newtonsoft.Json.dll.
+    2) cd KMH-Server-Addon/Source
+    3) dotnet build -c Debug
+-->
+<Project>
+  <PropertyGroup>
+    <RwtServerBuildPath>E:\RWT Related\rwt-26.5.24.1\Source\Server\bin\Debug\net8.0</RwtServerBuildPath>
+  </PropertyGroup>
+</Project>
