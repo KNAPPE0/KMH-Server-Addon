@@ -75,8 +75,8 @@ namespace KMHServerAddon.Features.Marketplace
         // when you want to tell the user WHY a post was rejected (price floor, listing cap, treasury short)
         public static long Post(
             string sellerUsername, string itemDefName, int qty, int unitPriceSilver,
-            string visibility, int expiresInHours = 0)
-            => Post(sellerUsername, itemDefName, qty, unitPriceSilver, visibility, expiresInHours, out _);
+            string visibility, int expiresInHours = 0, string stuffDefName = "", int qualityIndex = 0)
+            => Post(sellerUsername, itemDefName, qty, unitPriceSilver, visibility, expiresInHours, out _, stuffDefName, qualityIndex);
 
         // Post a listing. Enforces the EconomyConfig knobs (min/max unit price, per-user open-listing cap, listing
         // lifetime). Escrows the items from the seller's treasury. Returns the new listing id, or 0 with a
@@ -88,12 +88,16 @@ namespace KMHServerAddon.Features.Marketplace
             int    unitPriceSilver,
             string visibility,
             int    expiresInHours,
-            out string reason)
+            out string reason,
+            string stuffDefName = "",
+            int    qualityIndex = 0)
         {
             reason = null;
             if (string.IsNullOrEmpty(sellerUsername)) { reason = "No seller.";        return 0; }
             if (string.IsNullOrEmpty(itemDefName))    { reason = "No item.";          return 0; }
             if (qty <= 0)                             { reason = "Quantity must be > 0."; return 0; }
+            qualityIndex = Util.ItemKey.Clamp(qualityIndex);
+            stuffDefName = stuffDefName ?? "";
 
             Economy.EconomyConfig cfg = Economy.EconomyConfig.Current;
             if (unitPriceSilver < cfg.MarketplaceMinUnitPrice)
@@ -120,7 +124,8 @@ namespace KMHServerAddon.Features.Marketplace
 
             // Escrow the items from the seller's treasury. Cross-feature call - TreasuryStore.WithdrawItem returns
             // false if the treasury doesn't have the qty available
-            if (!Treasury.TreasuryStore.WithdrawItem(sellerUsername, itemDefName, qty, note: "marketplace post escrow"))
+            string escrowKey = Util.ItemKey.Compose(itemDefName, stuffDefName, qualityIndex);
+            if (!Treasury.TreasuryStore.WithdrawItem(sellerUsername, escrowKey, qty, note: "marketplace post escrow"))
             {
                 reason = "Your treasury doesn't have that many to list.";
                 return 0;
@@ -143,8 +148,8 @@ namespace KMHServerAddon.Features.Marketplace
                     ListedUtcTicks    = now,
                     ExpiresUtcTicks   = now + TimeSpan.FromHours(lifetimeHours).Ticks,
                     IsAutoListing     = false,
-                    QualityIndex      = 0,
-                    StuffDefName      = "",
+                    QualityIndex      = qualityIndex,
+                    StuffDefName      = stuffDefName,
                     Visibility        = string.IsNullOrEmpty(visibility) ? "public" : visibility,
                 };
             }
@@ -169,7 +174,7 @@ namespace KMHServerAddon.Features.Marketplace
             sellerUsername = listing.SellerUsername;
             if (listing.RemainingQty > 0 && !string.IsNullOrEmpty(sellerUsername))
             {
-                Treasury.TreasuryStore.DepositItem(sellerUsername, listing.ItemDefName, listing.RemainingQty,
+                Treasury.TreasuryStore.DepositItem(sellerUsername, Util.ItemKey.Compose(listing.ItemDefName, listing.StuffDefName, listing.QualityIndex), listing.RemainingQty,
                     note: $"marketplace listing #{listingId} expired");
             }
             SaveToDisk();
@@ -211,7 +216,7 @@ namespace KMHServerAddon.Features.Marketplace
             // Refund the remaining stock outside the lock (treasury has its own lock).
             if (listing.RemainingQty > 0)
             {
-                Treasury.TreasuryStore.DepositItem(callerUsername, listing.ItemDefName, listing.RemainingQty,
+                Treasury.TreasuryStore.DepositItem(callerUsername, Util.ItemKey.Compose(listing.ItemDefName, listing.StuffDefName, listing.QualityIndex), listing.RemainingQty,
                     note: $"marketplace cancel listing #{listingId}");
             }
             SaveToDisk();
@@ -288,7 +293,7 @@ namespace KMHServerAddon.Features.Marketplace
             // Commit: credit seller net silver, give items to buyer.
             Treasury.TreasuryStore.DepositSilver(listing.SellerUsername, sellerNet,
                 note: $"marketplace sale listing #{listingId} to {buyerUsername}");
-            Treasury.TreasuryStore.DepositItem(buyerUsername, listing.ItemDefName, qtyToSell,
+            Treasury.TreasuryStore.DepositItem(buyerUsername, Util.ItemKey.Compose(listing.ItemDefName, listing.StuffDefName, listing.QualityIndex), qtyToSell,
                 note: $"marketplace buy listing #{listingId} from {listing.SellerUsername}");
 
             lock (_lock)

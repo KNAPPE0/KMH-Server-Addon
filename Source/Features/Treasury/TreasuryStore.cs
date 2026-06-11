@@ -195,6 +195,57 @@ namespace KMHServerAddon.Features.Treasury
             return true;
         }
 
+        // Quality-aware withdraw for quest delivery: consume `qty` of any stack whose def matches and whose quality
+        // meets the requirement (any material). Lowest qualifying quality is taken first so claimers keep their
+        // best gear. Atomic - either the full qty is taken (consumed lists what, per key) or nothing changes
+        public static bool TryWithdrawMatching(string username, string targetDefName, int requiredQualityIndex,
+                                               int qty, string note, out List<KeyValuePair<string, int>> consumed)
+        {
+            consumed = new List<KeyValuePair<string, int>>();
+            if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(targetDefName) || qty <= 0) return false;
+            string ownerKey = ResolveOwnerKeyFor(username);
+            lock (_lock)
+            {
+                TreasurySnapshot v = GetOrCreateLocked(ownerKey, ownerKey.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase) == false);
+
+                // gather qualifying stacks, lowest quality first
+                List<KeyValuePair<string, int>> candidates = new List<KeyValuePair<string, int>>();
+                foreach (KeyValuePair<string, int> kv in v.Items)
+                {
+                    Util.ItemKey.Split(kv.Key, out string def, out _, out int q);
+                    if (!string.Equals(def, targetDefName, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!Util.ItemKey.Meets(q, requiredQualityIndex)) continue;
+                    candidates.Add(kv);
+                }
+                candidates.Sort((a, b) =>
+                {
+                    Util.ItemKey.Split(a.Key, out _, out _, out int qa);
+                    Util.ItemKey.Split(b.Key, out _, out _, out int qb);
+                    return qa.CompareTo(qb);
+                });
+
+                int total = 0;
+                foreach (KeyValuePair<string, int> kv in candidates) total += kv.Value;
+                if (total < qty) return false;
+
+                int remaining = qty;
+                foreach (KeyValuePair<string, int> kv in candidates)
+                {
+                    if (remaining <= 0) break;
+                    int take = Math.Min(kv.Value, remaining);
+                    int next = kv.Value - take;
+                    if (next <= 0) v.Items.Remove(kv.Key);
+                    else           v.Items[kv.Key] = next;
+                    RecordTransactionLocked(v, username, TreasuryTransaction.KindWithdraw, take, kv.Key, note);
+                    consumed.Add(new KeyValuePair<string, int>(kv.Key, take));
+                    remaining -= take;
+                }
+            }
+            SaveToDisk();
+            Extensibility.KmhEventBus.Instance.RaiseTreasuryChanged(new KMH.Sdk.Server.Events.TreasuryChangedEvent { OwnerKey = ownerKey, IsGuildOwned = !ownerKey.StartsWith("_personal:", System.StringComparison.OrdinalIgnoreCase), Reason = note ?? "" });
+            return true;
+        }
+
         private static void RecordTransactionLocked(
             TreasurySnapshot v, string username, string kind, int amount, string itemDefName, string note)
         {

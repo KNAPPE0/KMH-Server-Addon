@@ -169,8 +169,9 @@ namespace KMHServerAddon.Features.Quests
                     Description       = desc,
                     BountySilver      = draft.BountySilver,
                     BountyItems       = escrowed,
-                    TargetItemDefName = draft.TargetItemDefName ?? "",
-                    TargetItemQty     = draft.TargetItemQty,
+                    TargetItemDefName  = draft.TargetItemDefName ?? "",
+                    TargetItemQty      = draft.TargetItemQty,
+                    TargetQualityIndex = Util.ItemKey.Clamp(draft.TargetQualityIndex),
                     PostedUtcTicks    = now,
                     ExpiresUtcTicks   = now + TimeSpan.FromHours(expiresInHours > 0 ? expiresInHours : 168).Ticks,
                     // Per-kind params.
@@ -209,6 +210,7 @@ namespace KMHServerAddon.Features.Quests
                     if (d.TargetItemQty <= 0)                      { reason = "Quantity must be > 0.";    return false; }
                     if (d.TargetItemDefName.Length > 64) d.TargetItemDefName = d.TargetItemDefName.Substring(0, 64);
                     if (d.TargetItemQty > 100_000) d.TargetItemQty = 100_000;
+                    d.TargetQualityIndex = Util.ItemKey.Clamp(d.TargetQualityIndex);
                     return true;
 
                 case QuestEntry.KindBounty:
@@ -299,7 +301,7 @@ namespace KMHServerAddon.Features.Quests
             // moves need are captured while we hold the lock
             string kind;
             string targetDef = null, poster = null;
-            int    targetQty = 0, bounty = 0;
+            int    targetQty = 0, bounty = 0, targetQual = 0;
             Dictionary<string, int> bountyItems = null;
             lock (_lock)
             {
@@ -321,6 +323,7 @@ namespace KMHServerAddon.Features.Quests
                     if (q.State != QuestEntry.StateClaimed) return false;
                     targetDef   = q.TargetItemDefName;
                     targetQty   = q.TargetItemQty;
+                    targetQual  = q.TargetQualityIndex;
                     bounty      = q.BountySilver;
                     poster      = q.PosterUsername;
                     bountyItems = new Dictionary<string, int>(q.BountyItems, StringComparer.OrdinalIgnoreCase);
@@ -338,8 +341,8 @@ namespace KMHServerAddon.Features.Quests
 
             // DeliverItem: server-verifiable. Move items claimer -> poster, pay bounty to claimer. The quest is
             // already marked Completed
-            if (!Treasury.TreasuryStore.WithdrawItem(claimerUsername, targetDef, targetQty,
-                    note: $"quest #{questId} delivery"))
+            if (!Treasury.TreasuryStore.TryWithdrawMatching(claimerUsername, targetDef, targetQual, targetQty,
+                    $"quest #{questId} delivery", out var deliveredKeys))
             {
                 // Claimer doesn't have the goods - revert the optimistic completion so the quest stays Claimed and
                 // can be retried
@@ -353,8 +356,9 @@ namespace KMHServerAddon.Features.Quests
                 }
                 return false;
             }
-            Treasury.TreasuryStore.DepositItem(poster, targetDef, targetQty,
-                note: $"quest #{questId} delivery from {claimerUsername}");
+            foreach (var kv in deliveredKeys)
+                Treasury.TreasuryStore.DepositItem(poster, kv.Key, kv.Value,
+                    note: $"quest #{questId} delivery from {claimerUsername}");
 
             if (bounty > 0)
             {
@@ -793,6 +797,7 @@ namespace KMHServerAddon.Features.Quests
                 BountyItems         = new Dictionary<string, int>(q.BountyItems, StringComparer.OrdinalIgnoreCase),
                 TargetItemDefName   = q.TargetItemDefName,
                 TargetItemQty       = q.TargetItemQty,
+                TargetQualityIndex  = q.TargetQualityIndex,
                 TargetTreasuryKey   = q.TargetTreasuryKey,
                 PostedUtcTicks      = q.PostedUtcTicks,
                 ExpiresUtcTicks     = q.ExpiresUtcTicks,

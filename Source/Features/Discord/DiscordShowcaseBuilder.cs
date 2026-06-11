@@ -57,7 +57,7 @@ namespace KMHServerAddon.Features.Discord
             for (int i = 0; i < show; i++)
             {
                 MarketplaceListing l = sorted[i];
-                string label = ItemLabelCache.LabelFor(l.ItemDefName);
+                string label = ItemLabelCache.LabelFor(l.ItemDefName, l.StuffDefName, l.QualityIndex);
                 string emoji = DiscordItemIconMap.EmojiFor(l.ItemDefName);
                 eb.AddField(
                     $"{emoji} #{l.Id} · {label}",

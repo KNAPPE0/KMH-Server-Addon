@@ -30,12 +30,15 @@ namespace KMHServerAddon.Features.Marketplace
         {
             string username       = client?.GetData<UserFile>()?.Username;
             string itemDefName    = env?.GetString("item_def_name") ?? "";
+            string stuffDefName   = env?.GetString("stuff_def_name") ?? "";
+            int    qualityIndex   = env?.GetInt("quality_index", 0) ?? 0;
             int    qty            = env?.GetInt("qty", 0) ?? 0;
             int    price          = env?.GetInt("unit_price_silver", 0) ?? 0;
             string visibility     = env?.GetString("visibility", "public") ?? "public";
             int    expiresInHours = env?.GetInt("expires_hours", 0) ?? 0;
 
-            long id = MarketplaceStore.Post(username, itemDefName, qty, price, visibility, expiresInHours, out string reason);
+            long id = MarketplaceStore.Post(username, itemDefName, qty, price, visibility, expiresInHours, out string reason,
+                                            stuffDefName, qualityIndex);
             if (id == 0)
             {
                 ServerLog.Verbose($"Marketplace post rejected for {username}: {reason}");

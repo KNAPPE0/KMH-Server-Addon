@@ -340,7 +340,7 @@ namespace KMHServerAddon.Features.Discord
             for (int i = skip; i < end; i++)
             {
                 MarketplaceListing l = rows[i];
-                eb.AddField($"#{l.Id} · {ItemLabelCache.LabelFor(l.ItemDefName)}",
+                eb.AddField($"#{l.Id} · {ItemLabelCache.LabelFor(l.ItemDefName, l.StuffDefName, l.QualityIndex)}",
                     $"**{l.RemainingQty}**× @ `{SilverFmt.Format(l.UnitPriceSilver)}/ea` · by **{l.SellerUsername}**",
                     inline: false);
             }

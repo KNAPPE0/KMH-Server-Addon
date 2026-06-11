@@ -54,10 +54,26 @@ namespace KMHServerAddon.Features.ItemLabels
         public static string LabelFor(string defName)
         {
             if (string.IsNullOrEmpty(defName)) return "?";
+            // composed treasury keys (def|stuff|quality) resolve to a full label
+            if (defName.IndexOf(Util.ItemKey.Sep) >= 0)
+            {
+                Util.ItemKey.Split(defName, out string d, out string st, out int q);
+                return LabelFor(d, st, q);
+            }
             lock (_lock)
             {
                 return _labels.TryGetValue(defName, out string label) ? label : defName;
             }
+        }
+
+        // "Excellent plasteel longsword" from listing-style parts
+        public static string LabelFor(string defName, string stuffDefName, int qualityIndex)
+        {
+            string baseLabel = LabelFor(defName);
+            if (!string.IsNullOrEmpty(stuffDefName))
+                baseLabel = $"{LabelFor(stuffDefName)} {baseLabel}";
+            string q = Util.ItemKey.QualityName(qualityIndex);
+            return q.Length > 0 ? $"{q} {baseLabel}" : baseLabel;
         }
 
         // Friendly-name resolution for Discord-side input. Returns the matching defName when the query is
