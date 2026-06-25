@@ -9,18 +9,9 @@ using KMHServerAddon.Persistence;
 
 namespace KMHServerAddon.Extensibility
 {
-    // Discovers + loads server-side extensions at startup.
-    //
-    // Folder layout: kmh-extensions/ next to KMHServerAddon.exe MyAuctionHouse/ one folder per extension
-    // MyAuctionHouse.dll the extension assembly NewtonsoftHelpers.dll any extra deps the extension brings
-    // README.txt BankLoans/ BankLoans.dll
-    //
-    // Or flat: kmh-extensions/ MyAuctionHouse.dll BankLoans.dll
-    //
-    // Both layouts work - we recursively scan for any *.dll.
-    //
-    // Failure handling: every load step is wrapped in try/catch. A broken extension logs the failure + skips; KMH
-    // itself continues
+    // Discovers + loads server-side extensions at startup. Recursively scans kmh-extensions/ (next to the exe) for any
+    // *.dll, whether one folder per extension or flat. Every load step is wrapped in try/catch: a broken extension
+    // logs + skips, KMH itself continues.
     internal static class ExtensionLoader
     {
         private static readonly List<LoadedExtension> _loaded = new List<LoadedExtension>();

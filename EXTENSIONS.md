@@ -212,6 +212,8 @@ The stable surface you get in `Register`. Holds these members:
 | `IItemLabelsApi` | `LabelFor`, `HasLabel`, `Count`, `ResolveDefNameByQuery` |
 | `IReputationApi` | read-only: `ScoreOf`, `TierOf`, `GetAll` (quest reputation - moves only on quest activity) |
 | `ISitesApi` | read-only: `GetAll`, `GetByTile`, `GetByOwner` (custom production sites) |
+| `IAuctionApi` | `GetOpenAuctions`, `Post`, `Bid`, `Cancel` (timed bidding on treasury items) |
+| `IWorldApi` | read: `GetActiveEvents`, `GetServerQuests`, `IsTaxHoliday`, `MarketPayoutMultiplierFor` • drive: `FireEvent`, `EndEvent`, `CreateQuest`, `EndQuest` (World Engine events + global quests) |
 
 All read methods return immutable record DTOs from
 `KMH.Sdk.Server.Records.*`. All mutations return `bool` (false on
@@ -239,6 +241,14 @@ event Action<TreasuryChangedEvent>   TreasuryChanged;
 event Action<GuildChangedEvent>      GuildChanged;   // created / membership / perk / settings / motd / treasury
 event Action<ReputationChangedEvent> ReputationChanged; // a player's quest-reputation score moved
 event Action<SiteChangedEvent>       SiteChanged;    // built / worker_joined / worker_left / removed
+event Action<AuctionPostedEvent>     AuctionPosted;  // an auction went live (item escrowed)
+event Action<AuctionBidEvent>        AuctionBid;     // a bid was accepted (prev high bidder refunded)
+event Action<AuctionSettledEvent>    AuctionSettled; // sold to winner, or returned unsold
+event Action<WorldEventFiredEvent>   WorldEventFired;   // a world event started
+event Action<WorldEventEndedEvent>   WorldEventEnded;   // a world event expired / force-ended
+event Action<GlobalQuestCreatedEvent>   GlobalQuestCreated;   // a global quest was created
+event Action<GlobalQuestCompletedEvent> GlobalQuestCompleted; // goal met, reward paid out
+event Action<GlobalQuestExpiredEvent>   GlobalQuestExpired;   // expired unfinished, reward refunded
 ```
 
 Each payload is an immutable `sealed class` with `init`-only
@@ -408,12 +418,13 @@ extensions go.
 | Multiple instances of your extension load | Don't put more than one `IKmhServerExtension`-implementing class in your assembly unless you want them all loaded. |
 
 
-## Roadmap
+## Client-side extensions
 
-Today the SDK covers the server side. The client-side mirror (an SDK
-for KMH-Patch extensions that load as RimWorld mods depending on
-`KMHPatch.dll`) is on the roadmap and will follow the same
-contract-stability rules.
+A matching SDK for KMH-Patch extensions (RimWorld mods that depend on the
+client) ships as **KMH.Sdk.Client**, with its own ExtensionLoader and a
+starter under `Templates/ClientExtension/`. It follows the same
+contract-stability rules as this server SDK - see the KMH-Patch repo's
+EXTENSIONS.md.
 
 Suggestions, missing surfaces, awkward APIs - open an issue or ping
 KNAPPE0.

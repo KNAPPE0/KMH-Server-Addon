@@ -18,14 +18,10 @@ using KMHServerAddon.Util;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // The /kmh slash-command tree. Registered on Ready (guild-scoped when Bot.GuildId is set, so it appears
-    // instantly; global otherwise) and dispatched from DiscordBridge's SlashCommandExecuted hook. Slash commands
-    // don't need the MessageContent privileged intent, so they work even on bots that never had it enabled - which
-    // is why the overhaul moves here
-    //
-    // Tiers: player commands are open; mod commands need a guild-admin permission or a role in Roles.Moderators;
-    // console run is gated by the Console block (Allow + an optional ConsoleAccess role) and runs in the Admin
-    // channel. The legacy !kmh-* commands keep working in parallel
+    // The /kmh slash-command tree. Registered on Ready (guild-scoped when Bot.GuildId is set, else global) and
+    // dispatched from DiscordBridge. Slash commands don't need the privileged MessageContent intent, so they work on
+    // bots that never enabled it. Tiers: player open; mod needs guild-admin or a Roles.Moderators role; console run
+    // is gated by the Console block and runs in the Admin channel. The legacy !kmh-* commands keep working in parallel.
     internal static class DiscordSlashCommands
     {
         // -------- registration --------
@@ -68,6 +64,8 @@ namespace KMHServerAddon.Features.Discord
             kmh.AddOption(Sub("status",  "Server health + counts"));
             kmh.AddOption(Sub("players", "Who is online right now"));
             kmh.AddOption(Sub("help",    "List the KMH Discord commands"));
+            kmh.AddOption(Sub("whois",   "(owner) An online player's IP for moderation - the reply is private to you")
+                .AddOption(Str("player", "In-game name (must be online)", true)));
 
             // leaderboard
             SlashCommandOptionBuilder lb = Group("leaderboard", "Top players / guilds / reputation");
@@ -207,6 +205,9 @@ namespace KMHServerAddon.Features.Discord
                     if (!await RequireMod(cmd, cfg)) return;
                     await DoConfigReload(cmd); return;
 
+                case "whois":
+                    await DoWhois(cmd, cfg, GetStr(args, "player")); return;
+
                 case "console.run":
                     await DoConsoleRun(cmd, cfg, GetStr(args, "command")); return;
 
@@ -239,6 +240,34 @@ namespace KMHServerAddon.Features.Discord
                 ? "_Nobody is online right now._"
                 : string.Join("\n", names.Select(n => "• " + n));
             await cmd.RespondAsync(embed: Brand(cfg, $"Players online ({names.Count})", body).Build()).ConfigureAwait(false);
+        }
+
+        // Owner-only, ephemeral: an online player's IP for moderation. The reply is private to the requesting admin
+        // (and RequireConsole keeps it in the admin channel), and it's built directly - NOT routed through
+        // DiscordBridge.Redact - so the admin sees the real IP while the channel never does. Online players only
+        // (their live connection IP); offline IP history lives in the local server console / `banlist`.
+        private static async Task DoWhois(SocketSlashCommand cmd, DiscordConfig cfg, string player)
+        {
+            if (!await RequireConsole(cmd, cfg)) return;
+            player = (player ?? "").Trim();
+            if (player.Length == 0) { await Ephemeral(cmd, "Usage: `/kmh whois <player>`"); return; }
+
+            ServerClient match = null;
+            foreach (ServerClient c in Network.ServerClients.Keys)
+            {
+                if (c?.IsVerified != true) continue;
+                if (string.Equals(c.GetData<UserFile>()?.Username, player, StringComparison.OrdinalIgnoreCase)) { match = c; break; }
+            }
+            if (match == null)
+            {
+                await Ephemeral(cmd, $"`{player}` isn't online. This shows live connection IPs only - for offline players use the local server console / `banlist`.");
+                return;
+            }
+
+            string name = match.GetData<UserFile>()?.Username ?? player;
+            string ip   = string.IsNullOrEmpty(match.IP) ? "(unknown)" : match.IP;
+            await cmd.RespondAsync($"**{name}** (online)\nIP: `{ip}`", ephemeral: true).ConfigureAwait(false);
+            ServerLog.Info($"Discord: whois {name} by {cmd.User?.Username} (ephemeral reply)");
         }
 
         private static async Task DoLeaderboard(SocketSlashCommand cmd, DiscordConfig cfg,
@@ -340,8 +369,8 @@ namespace KMHServerAddon.Features.Discord
             for (int i = skip; i < end; i++)
             {
                 MarketplaceListing l = rows[i];
-                eb.AddField($"#{l.Id} · {ItemLabelCache.LabelFor(l.ItemDefName, l.StuffDefName, l.QualityIndex)}",
-                    $"**{l.RemainingQty}**× @ `{SilverFmt.Format(l.UnitPriceSilver)}/ea` · by **{l.SellerUsername}**",
+                eb.AddField($"#{l.Id} · {DiscordText.Escape(ItemLabelCache.LabelFor(l.ItemDefName, l.StuffDefName, l.QualityIndex))}",
+                    $"**{l.RemainingQty}**× @ `{SilverFmt.Format(l.UnitPriceSilver)}/ea` · by **{DiscordText.Escape(l.SellerUsername)}**",
                     inline: false);
             }
             eb.WithFooter(totalPages > 1 ? $"Page {page}/{totalPages} · {rows.Count} listings" : $"{rows.Count} listing(s)");
@@ -358,8 +387,8 @@ namespace KMHServerAddon.Features.Discord
                 SiteEntry s = sites.FirstOrDefault(x => x.Tile == tile);
                 if (s == null) { await Ephemeral(cmd, $"No site at tile {tile}."); return; }
                 EmbedBuilder eb = Brand(cfg, $"Site · tile {s.Tile}", null)
-                    .AddField("Owner",   string.IsNullOrEmpty(s.OwnerGuild) ? s.OwnerUsername : $"{s.OwnerUsername} ({s.OwnerGuild})", true)
-                    .AddField("Produces", $"{s.BaseAmountPerCycle}× {ItemLabelCache.LabelFor(s.ItemDefName)}", true)
+                    .AddField("Owner",   string.IsNullOrEmpty(s.OwnerGuild) ? DiscordText.Escape(s.OwnerUsername) : $"{DiscordText.Escape(s.OwnerUsername)} ({DiscordText.Escape(s.OwnerGuild)})", true)
+                    .AddField("Produces", $"{s.BaseAmountPerCycle}× {DiscordText.Escape(ItemLabelCache.LabelFor(s.ItemDefName))}", true)
                     .AddField("Access",  AccessLabel(s.AccessMode), true)
                     .AddField("Workers", $"{s.Workers?.Count ?? 0}/{s.MaxWorkers}", true);
                 await cmd.RespondAsync(embed: eb.Build()).ConfigureAwait(false);
@@ -375,8 +404,8 @@ namespace KMHServerAddon.Features.Discord
             }
             foreach (SiteEntry s in sites.Take(15))
             {
-                string owner = string.IsNullOrEmpty(s.OwnerGuild) ? s.OwnerUsername : $"{s.OwnerUsername} ({s.OwnerGuild})";
-                list.AddField($"Tile {s.Tile} · {ItemLabelCache.LabelFor(s.ItemDefName)}",
+                string owner = string.IsNullOrEmpty(s.OwnerGuild) ? DiscordText.Escape(s.OwnerUsername) : $"{DiscordText.Escape(s.OwnerUsername)} ({DiscordText.Escape(s.OwnerGuild)})";
+                list.AddField($"Tile {s.Tile} · {DiscordText.Escape(ItemLabelCache.LabelFor(s.ItemDefName))}",
                     $"{s.BaseAmountPerCycle}×/cycle · {AccessLabel(s.AccessMode)} · by **{owner}** · workers {s.Workers?.Count ?? 0}/{s.MaxWorkers}",
                     inline: false);
             }
@@ -416,11 +445,16 @@ namespace KMHServerAddon.Features.Discord
         private static async Task DoConsoleRun(SocketSlashCommand cmd, DiscordConfig cfg, string command)
         {
             if (!await RequireConsole(cmd, cfg)) return;
-            // Full server terminal: runs ANY registered console command (RWT's own + KMH's "kmh ..." family) and
-            // returns its captured output
-            string output = ConsoleExecutor.Run(command);
+            // ConsoleExecutor.Run is synchronous and can run past Discord's 3-second interaction window (big help/
+            // list output), which throws "Cannot respond after 3 seconds". Acknowledge immediately with DeferAsync
+            // (buys ~15 min), then follow up once the captured output is ready
+            await cmd.DeferAsync(ephemeral: true).ConfigureAwait(false);
+            string output;
+            try { output = ConsoleExecutor.Run(command); }
+            catch (Exception ex) { output = $"(command threw) {ex.Message}"; }
+            output = DiscordBridge.Redact(output); // scrub player IPs + host paths from console output before Discord
             ServerLog.Info($"Discord: console-run by {cmd.User?.Username}: {command}");
-            await RespondBlock(cmd, output, ephemeral: true).ConfigureAwait(false);
+            await FollowupBlocks(cmd, output).ConfigureAwait(false);
         }
 
         private static async Task DoHelp(SocketSlashCommand cmd, DiscordConfig cfg)
@@ -520,6 +554,37 @@ namespace KMHServerAddon.Features.Discord
             string body = string.IsNullOrWhiteSpace(text) ? "(no output)" : text.TrimEnd();
             if (body.Length > 1900) body = body.Substring(0, 1900) + "\n…(truncated)";
             return cmd.RespondAsync($"```\n{body}\n```", ephemeral: ephemeral);
+        }
+
+        // Send captured output as one or more ```code``` followups after a DeferAsync, split on line boundaries so
+        // big results (help / deeplist) come through in full instead of being truncated to one message
+        private static async Task FollowupBlocks(SocketSlashCommand cmd, string text)
+        {
+            string body = string.IsNullOrWhiteSpace(text) ? "(no output)" : text.TrimEnd();
+            List<string> chunks = SplitForBlocks(body, 1900);
+            const int maxMsgs = 5; // never flood the channel - cap the followups
+            for (int i = 0; i < chunks.Count && i < maxMsgs; i++)
+            {
+                string c = chunks[i];
+                if (i == maxMsgs - 1 && chunks.Count > maxMsgs) c += "\n…(truncated)";
+                await cmd.FollowupAsync($"```\n{c}\n```", ephemeral: true).ConfigureAwait(false);
+            }
+        }
+
+        // Split text into chunks no larger than cap, breaking on newlines (a single over-long line is hard-split).
+        private static List<string> SplitForBlocks(string text, int cap)
+        {
+            List<string> chunks = new List<string>();
+            StringBuilder sb = new StringBuilder();
+            foreach (string raw in text.Split('\n'))
+            {
+                string line = raw;
+                while (line.Length > cap) { chunks.Add(line.Substring(0, cap)); line = line.Substring(cap); }
+                if (sb.Length + line.Length + 1 > cap) { chunks.Add(sb.ToString().TrimEnd('\n')); sb.Clear(); }
+                sb.Append(line).Append('\n');
+            }
+            if (sb.Length > 0) chunks.Add(sb.ToString().TrimEnd('\n'));
+            return chunks;
         }
 
         private static string GetStr(IReadOnlyCollection<SocketSlashCommandDataOption> args, string name, string def = "")

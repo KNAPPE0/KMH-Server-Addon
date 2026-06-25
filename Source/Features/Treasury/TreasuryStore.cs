@@ -5,10 +5,9 @@ using KMHServerAddon.Persistence;
 
 namespace KMHServerAddon.Features.Treasury
 {
-    // Authoritative treasury ledger, persisted to KMH-Data/Treasury/Treasury.json. Keyed by OwnerKey:
-    // "_personal:<user_lower>" or "<guild_name>". Everything goes through the lock (RWT's chat thread + the sweeper
-    // hit it concurrently). Deposit/withdraw amounts are client-claimed - the server can't see caravan inventory,
-    // so that trust is inherent to the design
+    // Authoritative treasury, persisted to KMH-Data/Treasury/Treasury.json. OwnerKey is "_personal:<user_lower>" or
+    // "<guild_name>". All access is under _lock (RWT's chat thread + the sweeper hit it concurrently). Deposit amounts
+    // are client-claimed - the server can't see caravan inventory, so that trust is inherent to the design.
     internal static class TreasuryStore
     {
         private static readonly object _lock = new object();
@@ -21,9 +20,8 @@ namespace KMHServerAddon.Features.Treasury
         public static string PersonalKeyFor(string username)
             => "_personal:" + (username ?? "").ToLowerInvariant();
 
-        // Resolve which treasury a given caller is operating on. v1 always
-        // returns the caller's personal vault - guild-vault routing lands
-        // when the Guild handler ports (then this checks guild membership and routes accordingly)
+        // Which treasury a caller's own actions operate on - always their personal vault. Guild vaults are addressed
+        // directly by guild name (DepositGuildSilver / WithdrawGuildSilver), not routed through here.
         public static string ResolveOwnerKeyFor(string username)
         {
             return PersonalKeyFor(username);
@@ -42,11 +40,8 @@ namespace KMHServerAddon.Features.Treasury
         }
 
         // --- guild-vault mutations ---
-        //
-        // Guild vaults are keyed by raw guild name (distinct from the "_personal:" personal-vault namespace). These
-        // let guild silver actually be pooled + spent (perk purchases, guild quests). Funded via /kmh guild
-        // deposit; spent via WithdrawGuildSilver. The contributor/actor username is recorded in the vault's
-        // transaction log for the audit trail, but the vault itself belongs to the guild
+        // Guild vaults are keyed by raw guild name (distinct from the "_personal:" namespace) so guild silver can be
+        // pooled + spent. The contributor/actor is recorded in the log, but the vault belongs to the guild.
 
         public static bool DepositGuildSilver(string guildName, int amount, string contributorUsername, string note = "")
         {
@@ -262,6 +257,10 @@ namespace KMHServerAddon.Features.Treasury
             {
                 v.RecentTransactions.RemoveAt(0);
             }
+
+            // Mirror to the durable, server-wide audit ledger. Enqueue is lock-free, so it's safe under _lock - the
+            // actual file write happens off-thread. This one hook captures every economy value movement.
+            Persistence.TransactionLedger.Record(v.OwnerKey, username, kind, amount, itemDefName, note);
         }
 
         // --- persistence ---
@@ -290,11 +289,13 @@ namespace KMHServerAddon.Features.Treasury
         public static void SaveToDisk()
         {
             PersistedState state = new PersistedState();
+            long seq;
             lock (_lock)
             {
                 state.Vaults = new List<TreasurySnapshot>(_vaults.Values);
+                seq = JsonFileStore.NextSequence(); // ticket under the lock = snapshot order, so an older save can't clobber a newer
             }
-            JsonFileStore.Save(KmhDataPaths.TreasuryFile, state);
+            JsonFileStore.Save(KmhDataPaths.TreasuryFile, state, seq);
         }
 
         private class PersistedState

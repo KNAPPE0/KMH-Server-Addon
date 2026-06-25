@@ -1,14 +1,13 @@
 using System;
-using System.Collections.Generic;
 using System.IO;
 using KMHServerAddon.Diagnostics;
 using KMHServerAddon.Persistence;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // Resolves Discord embed icons from KMH-Data/Icons (auto-created), falling back to a bundled Assets/Icons by
-    // the exe. Names are extension-less; the resolver probes raster formats (Discord can't show .dds), null if
-    // none
+    // Resolves Discord embed icons from KMH-Data/Icons - the single icons folder, shipped pre-filled and read
+    // straight from there. Names are extension-less; the resolver probes raster formats (Discord can't show .dds),
+    // null if none
     internal static class DiscordIcons
     {
         // Semantic icon names (no extension) - drop e.g. kmh_logo.png in the folder.
@@ -26,14 +25,6 @@ namespace KMHServerAddon.Features.Discord
         // Formats Discord renders as an embed thumbnail, best first.
         private static readonly string[] Extensions = { ".png", ".webp", ".gif", ".jpg", ".jpeg" };
 
-        // Where icons are looked up, in order: the auto-created KMH-Data/Icons (drop yours here) then any bundled
-        // Assets/Icons next to the exe
-        private static IEnumerable<string> Roots()
-        {
-            yield return KmhDataPaths.IconsDir;
-            yield return Path.Combine(KmhDataPaths.AddonDir, "Assets", "Icons");
-        }
-
         // Path to an existing icon for the name (or the Logo fallback), or null. Honours UseBundledIcons
         public static string ResolveExistingPath(DiscordConfig cfg, string name)
         {
@@ -42,24 +33,14 @@ namespace KMHServerAddon.Features.Discord
 
             try
             {
-                string hit = ProbeRoots(name);
+                string hit = Probe(KmhDataPaths.IconsDir, name);
                 if (hit != null) return hit;
 
                 // Missing-icon fallback: the logo, so embeds still get a thumbnail.
                 if (!string.Equals(name, Logo, StringComparison.OrdinalIgnoreCase))
-                    return ProbeRoots(Logo);
+                    return Probe(KmhDataPaths.IconsDir, Logo);
             }
             catch (Exception ex) { ServerLog.Verbose($"Discord: icon resolve failed for '{name}': {ex.Message}"); }
-            return null;
-        }
-
-        private static string ProbeRoots(string name)
-        {
-            foreach (string root in Roots())
-            {
-                string hit = Probe(root, name);
-                if (hit != null) return hit;
-            }
             return null;
         }
 

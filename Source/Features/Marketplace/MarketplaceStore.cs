@@ -18,6 +18,7 @@ namespace KMHServerAddon.Features.Marketplace
         private static long _houseSilverPool         = 0;
         private static long _lifetimeTradesCompleted = 0;
         private static long _lifetimeSilverTraded    = 0;
+        private static bool _housePoolSeeded         = false; // one-time new-server prime guard (see SeedHousePoolOnce)
 
         // Build a per-caller snapshot. Filters out guild-only listings that the caller isn't entitled to see - see
         // Guilds.GuildVisibility for
@@ -104,6 +105,12 @@ namespace KMHServerAddon.Features.Marketplace
             { reason = $"Minimum unit price is {Util.SilverFmt.Format(cfg.MarketplaceMinUnitPrice)}."; return 0; }
             if (unitPriceSilver > cfg.MarketplaceMaxUnitPrice)
             { reason = $"Maximum unit price is {Util.SilverFmt.Format(cfg.MarketplaceMaxUnitPrice)}."; return 0; }
+
+            // Cap the listing's total value to int range. Buy computes cost as int (UnitPrice * qty); without this a
+            // large-but-legal listing (high qty * high unit price) would overflow to a negative cost - i.e. pay the
+            // buyer. Every partial buy is <= this total, so guarding here covers Buy too. (Mirrors WantStore.Post.)
+            if ((long)unitPriceSilver * qty > int.MaxValue)
+            { reason = "That listing's total value is too large - lower the quantity or price."; return 0; }
 
             // Listing lifetime: the client may request a shorter window, but the config lifetime is the ceiling. 0
             // (unspecified) -> config default
@@ -245,7 +252,9 @@ namespace KMHServerAddon.Features.Marketplace
                     return false; // can't buy your own listing
                 qtyToSell = Math.Min(qty, listing.RemainingQty);
                 if (qtyToSell <= 0) return false;
-                cost = listing.UnitPriceSilver * qtyToSell;
+                long costL = (long)listing.UnitPriceSilver * qtyToSell;
+                if (costL > int.MaxValue) return false; // legacy/tampered listing; Post now caps total to int range
+                cost = (int)costL;
 
                 // Reserve the units now, atomically with the availability check.
                 listing.RemainingQty -= qtyToSell;
@@ -282,9 +291,30 @@ namespace KMHServerAddon.Features.Marketplace
             int reduction = Guilds.GuildStore.GetMarketplaceTaxReductionPoints(
                                 Guilds.GuildStore.CurrentGuildOf(listing.SellerUsername));
             int taxPercent = Math.Max(0, basePct - reduction);
+            // World event: a tax holiday waives the house tax entirely.
+            if (World.WorldStore.IsTaxHoliday()) taxPercent = 0;
+            else if (cfg.DynamicDemandPricingEnabled)
+            {
+                // Supply/demand drift: in-demand items get a tax rebate (seller keeps more), gluts a surcharge (more
+                // flows to the house pool). Closed loop - the buyer's cost is unchanged, only the seller/house split.
+                long demand = WantBoard.WantStore.OpenDemandQty(listing.ItemDefName);
+                long supply = OpenSupplyQty(listing.ItemDefName);
+                long denom  = demand + supply;
+                if (denom > 0)
+                {
+                    double f = (demand - supply) / (double)denom; // +1 = pure demand .. -1 = pure glut
+                    taxPercent = Math.Max(0, Math.Min(90, taxPercent - (int)Math.Round(f * cfg.DemandTaxSwingPercent)));
+                }
+            }
             int houseTax   = (int)Math.Round(cost * (taxPercent / 100.0));
             if (houseTax < 0) houseTax = 0;
             int sellerNet  = cost - houseTax;
+            if (sellerNet < 0) sellerNet = 0;
+
+            // World event: market boom/crash (server-wide) + any resource-shortage demand spike on this item scale
+            // the seller's payout up or down.
+            double payoutMult = World.WorldStore.MarketPayoutMultiplierFor(listing.ItemDefName);
+            if (payoutMult != 1.0) sellerNet = (int)Math.Round(sellerNet * payoutMult);
             if (sellerNet < 0) sellerNet = 0;
 
             // Guild sale tax skims from the seller's net into their guild vault.
@@ -303,8 +333,10 @@ namespace KMHServerAddon.Features.Marketplace
                 _lifetimeSilverTraded    += cost;
             }
 
-            // Cross-feature: bump SalesEarned on seller's leaderboard entry (net).
+            // Cross-feature: bump SalesEarned + trade detail (seller) and spend + items (buyer) on the leaderboard.
             PlayerStats.PlayerStatsStore.AddSalesEarned(listing.SellerUsername, sellerNet);
+            PlayerStats.PlayerStatsStore.RecordSale(listing.SellerUsername, qtyToSell, cost);
+            PlayerStats.PlayerStatsStore.RecordPurchase(buyerUsername, qtyToSell, cost);
             SaveToDisk();
             Extensibility.KmhEventBus.Instance.RaiseMarketplaceBuy(new KMH.Sdk.Server.Events.MarketplaceBuyEvent { ListingId = listingId, BuyerUsername = buyerUsername, SellerUsername = sellerUsername, ItemDefName = listing.ItemDefName, QtyBought = qtyToSell, TotalSilverPaid = cost });
             return true;
@@ -329,8 +361,70 @@ namespace KMHServerAddon.Features.Marketplace
                 Treasury.TreasuryStore.DepositSilver(toUsername, chunk, note: "marketplace house-pool drain");
                 remaining -= chunk;
             }
+            Persistence.TransactionLedger.RecordHousePool(credit: false, amount: drained, note: $"house-pool drain to {toUsername}");
             SaveToDisk();
             return drained;
+        }
+
+        /// <summary>Current house silver pool balance (read-only).</summary>
+        public static long HousePoolBalance()
+        {
+            lock (_lock) { return _houseSilverPool; }
+        }
+
+        /// <summary>Total open listing quantity for an item - the live supply side of the demand/price drift.</summary>
+        public static long OpenSupplyQty(string itemDefName)
+        {
+            if (string.IsNullOrEmpty(itemDefName)) return 0;
+            long total = 0;
+            lock (_lock)
+                foreach (MarketplaceListing l in _byId.Values)
+                    if (l != null && string.Equals(l.ItemDefName, itemDefName, StringComparison.OrdinalIgnoreCase))
+                        total += Math.Max(0, l.RemainingQty);
+            return total;
+        }
+
+        /// <summary>
+        /// Reserve <paramref name="amount"/> from the house pool atomically - true only if the pool covered it.
+        /// Used to fund World Engine quest rewards from tax revenue rather than minting them.
+        /// </summary>
+        public static bool TryDebitHousePool(long amount)
+        {
+            if (amount <= 0) return true;
+            lock (_lock)
+            {
+                if (_houseSilverPool < amount) return false;
+                _houseSilverPool -= amount;
+            }
+            SaveToDisk();
+            return true;
+        }
+
+        /// <summary>Return silver to the house pool (e.g. refunding an unclaimed quest reward).</summary>
+        public static void CreditHousePool(long amount)
+        {
+            if (amount <= 0) return;
+            lock (_lock) { _houseSilverPool += amount; }
+            Persistence.TransactionLedger.RecordHousePool(credit: true, amount: amount, note: "house-pool credit (tax/refund)");
+            SaveToDisk();
+        }
+
+        /// <summary>
+        /// Prime the house pool exactly once on a brand-new server so the first global quests can pay before any
+        /// tax revenue accrues. The seeded flag persists, so a restart (or a drained pool) never re-triggers it -
+        /// this is the only injection of new money; everything after is the closed tax loop.
+        /// </summary>
+        public static void SeedHousePoolOnce(long amount)
+        {
+            bool seeded = false;
+            lock (_lock)
+            {
+                if (_housePoolSeeded) return;
+                _housePoolSeeded = true;
+                if (amount > 0) { _houseSilverPool += amount; seeded = true; }
+            }
+            SaveToDisk(); // persist the flag even when amount is 0, so it stays a true one-shot
+            if (seeded) Diagnostics.ServerLog.Info($"Marketplace: seeded house pool with {amount} silver (one-time, new server).");
         }
 
         // --- persistence ---
@@ -352,6 +446,7 @@ namespace KMHServerAddon.Features.Marketplace
                     }
                     _nextId                  = Math.Max(state.NextId, 1);
                     _houseSilverPool         = state.HouseSilverPool;
+                    _housePoolSeeded         = state.HousePoolSeeded;
                     _lifetimeTradesCompleted = state.LifetimeTradesCompleted;
                     _lifetimeSilverTraded    = state.LifetimeSilverTraded;
                 }
@@ -362,15 +457,18 @@ namespace KMHServerAddon.Features.Marketplace
         public static void SaveToDisk()
         {
             PersistedState state = new PersistedState();
+            long seq;
             lock (_lock)
             {
                 state.Listings                = new List<MarketplaceListing>(_byId.Values);
                 state.NextId                  = _nextId;
                 state.HouseSilverPool         = _houseSilverPool;
+                state.HousePoolSeeded         = _housePoolSeeded;
                 state.LifetimeTradesCompleted = _lifetimeTradesCompleted;
                 state.LifetimeSilverTraded    = _lifetimeSilverTraded;
+                seq = JsonFileStore.NextSequence(); // ticket under the lock = snapshot order, so an older save can't clobber a newer
             }
-            JsonFileStore.Save(KmhDataPaths.MarketplaceFile, state);
+            JsonFileStore.Save(KmhDataPaths.MarketplaceFile, state, seq);
         }
 
         private class PersistedState
@@ -378,6 +476,7 @@ namespace KMHServerAddon.Features.Marketplace
             public List<MarketplaceListing> Listings              { get; set; } = new List<MarketplaceListing>();
             public long                     NextId                { get; set; } = 1;
             public long                     HouseSilverPool       { get; set; } = 0;
+            public bool                     HousePoolSeeded       { get; set; } = false;
             public long                     LifetimeTradesCompleted { get; set; } = 0;
             public long                     LifetimeSilverTraded  { get; set; } = 0;
         }

@@ -12,9 +12,9 @@
     <Nullable>disable</Nullable>
     <LangVersion>latest</LangVersion>
     <ImplicitUsings>enable</ImplicitUsings>
-    <Version>1.0.0</Version>
-    <AssemblyVersion>1.0.0.0</AssemblyVersion>
-    <FileVersion>1.0.0.0</FileVersion>
+    <Version>1.1.0</Version>
+    <AssemblyVersion>1.1.0.0</AssemblyVersion>
+    <FileVersion>1.1.0.0</FileVersion>
     <IntermediateOutputPath>obj\$(RwtFlavor)\$(Configuration)\</IntermediateOutputPath>
 
     <!-- Same RID set the RWT server uses so the addon publishes across
@@ -67,15 +67,28 @@
     <ProjectReference Include="KMH.Sdk.Server\KMH.Sdk.Server.csproj" />
   </ItemGroup>
 
-  <!-- Bundled Discord embed icons. Copied next to the addon exe so the bot
-       can attach them to embeds (attachment://name.png) with no public URL.
-       Optional - a missing file just yields a plain embed. Drop PNGs into
-       Source/Assets/Icons/ (expected filenames in its README) and rebuild,
-       or drop them straight into the deployed Assets/Icons/ folder. Update
-       (not Include) so we don't duplicate the SDK's auto-included None items. -->
+  <!-- Discord embed icons. Source/Assets/Icons/ is the committed source set ONLY - it is
+       deliberately NOT copied next to the exe. On every build the icons are written into
+       KMH-Data/Icons/ instead (Old flavor = the shipped exe; the New payload runs inside
+       it and shares its folder, so it needs no copy). KMH-Data/Icons is the single folder
+       the addon reads at runtime (KmhDataPaths.IconsDir) and the one packaged in every
+       release - so owners get a populated, ready-to-edit icons folder out of the box and
+       there's no Assets/Icons fallback to reason about. Drop/replace PNGs in
+       Source/Assets/Icons/ (filenames in its README) and rebuild. PascalCase KMH-Data
+       matches KmhDataPaths so the running exe finds it as-is (incl. on Linux). -->
   <ItemGroup>
-    <None Update="Assets\Icons\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <KmhDataIcon Include="Assets\Icons\**\*" />
   </ItemGroup>
+  <Target Name="StageKmhDataIconsBuild" AfterTargets="Build" Condition="'$(RwtFlavor)' == 'Old'">
+    <Copy SourceFiles="@(KmhDataIcon)"
+          DestinationFiles="@(KmhDataIcon->'$(OutDir)KMH-Data\Icons\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
+  <Target Name="StageKmhDataIconsPublish" AfterTargets="Publish" Condition="'$(RwtFlavor)' == 'Old'">
+    <Copy SourceFiles="@(KmhDataIcon)"
+          DestinationFiles="@(KmhDataIcon->'$(PublishDir)KMH-Data\Icons\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
 
   <!-- The SDK project lives at Source/KMH.Sdk.Server/ - a sub-folder
        of this csproj's directory. MSBuild's default Compile glob

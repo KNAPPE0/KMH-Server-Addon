@@ -51,7 +51,7 @@ namespace KMHServerAddon.Features.Discord
                 string label = ItemLabelCache.LabelFor(e.ItemDefName);
                 string emoji = DiscordItemIconMap.EmojiFor(e.ItemDefName);
                 eb.AddField(
-                    $"{emoji} {label}",
+                    $"{emoji} {DiscordText.Escape(label)}",
                     $"Up to **{e.MaxQty:N0}**× @ `≤{e.MaxUnitPriceSilver:N0}s`/ea",
                     inline: true);
             }

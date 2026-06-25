@@ -2,16 +2,10 @@ using System;
 
 namespace KMHServerAddon.Features.Guilds
 {
-    // Shared visibility-filter helper used by both Marketplace and Quest snapshot builders. Determines whether a
-    // posted item (listing / quest) should be visible to a given caller given:
-    //   - the post's visibility flag ('public' / 'guild_only')
-    //   - the post's PosterTreasuryKey ('_personal:<user>' for personal
-    //     posters, '<guild_name>' for guild posters)
-    //   - the caller's current guild membership
-    //
-    // Rules: Public -> always visible GuildOnly + posterKey is personal
-    // ('_personal:...') -> never visible (invalid config; no guild scope to apply) GuildOnly + caller is in
-    // poster's guild -> visible GuildOnly + caller's guild is Allied to poster's -> visible else -> hidden
+    // Shared visibility filter used by the Marketplace and Quest snapshot builders. Decides whether a post (listing /
+    // quest) is visible to a caller from its visibility flag ('public' / 'guild_only'), its PosterTreasuryKey
+    // ('_personal:<user>' or '<guild_name>'), and the caller's guild. Rules: public -> always; guild_only with a
+    // personal poster -> never (no guild scope); guild_only -> visible to the poster's guild and its allies; else hidden.
     internal static class GuildVisibility
     {
         public const string Public    = "public";

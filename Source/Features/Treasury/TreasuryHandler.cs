@@ -5,14 +5,9 @@ using KMHServerAddon.SubProtocol;
 
 namespace KMHServerAddon.Features.Treasury
 {
-    // Server-side handler for kmh.treasury.* - counterpart to the patch mod's TreasuryHandler.
-    //
-    // Flow: request -> resolve caller's vault, send snapshot. deposit_silver -> ledger += amount, log tx,
-    // broadcast. withdraw_silver -> ledger -= amount (if sufficient), log, broadcast. deposit_item / withdraw_item
-    // similarly.
-    //
-    // Deposits also bump the caller's SilverDonated on PlayerStats - the "guild donations get counted
-    // automatically" behavior, via AddSilverDonated.
+    // Server-side handler for kmh.treasury.* (counterpart to the client's TreasuryHandler). Flow: request -> send the
+    // caller's vault snapshot; deposit/withdraw silver|item -> adjust the ledger (if sufficient), log the tx, broadcast.
+    // Deposits also bump the caller's SilverDonated on PlayerStats.
     internal static class TreasuryHandler
     {
         public static void Register()

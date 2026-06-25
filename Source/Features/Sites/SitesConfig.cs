@@ -7,6 +7,10 @@ namespace KMHServerAddon.Features.Sites
     // boot. Clamped on load so a hand-edited file can't break the economy. Reload via /kmh server reload-economy
     internal sealed class SitesConfig
     {
+        // Schema version for forward-compatible migrations (absent = 1). Changes so far are additive; this is the
+        // anchor a future field rename would key on.
+        public int SchemaVersion { get; set; } = 1;
+
         // Master switch - when false, build requests are rejected.
         public bool AllowCustomSites { get; set; } = true;
 

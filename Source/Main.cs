@@ -13,8 +13,7 @@ using KMHServerAddon.SubProtocol;
 
 namespace KMHServerAddon
 {
-    // installs Harmony patches, registers KMH handlers, loads persisted state, starts the Discord bridge +
-    // sweepers, then runs RWT's own Main in-process
+    // Installs KMH patches/handlers/state/services, then hands off to RWT Main.
     internal static class Main_
     {
         public const string HarmonyId = Constants.HarmonyId;
@@ -48,7 +47,7 @@ namespace KMHServerAddon
             }
         }
 
-        // Installs patches + registers handlers + loads state. Never throws.
+        // Safe KMH boot: patches, handlers, and state load.
         public static void RunKmhBoot()
         {
             try
@@ -57,13 +56,11 @@ namespace KMHServerAddon
                 System.Console.WriteLine(
                     $"{Constants.LogPrefix} {Constants.DisplayName} v{typeof(Main_).Assembly.GetName().Version} bootstrapping…");
 
-                // Install all [HarmonyPatch] classes in this assembly. Harmony.PatchAll only REGISTERS - patches
-                // fire when their targets are first called (well after RWT's Main starts)
+                // Registers all [HarmonyPatch] classes now; target patches fire later when RWT calls them.
                 HarmonyInstance = new Harmony(HarmonyId);
                 HarmonyInstance.PatchAll(typeof(Main_).Assembly);
 
-                // Register KMH handshake / ping / pong handlers + per-feature handlers. Each feature is
-                // self-contained - registering it is one line; removing it is deleting its folder + this line
+                // Registers handshake/ping handlers plus each self-contained feature handler.
                 KmhHandshakeHandler.Register();
                 LinkedAccountsHandler.Register();
                 PlayerStatsHandler.Register();
@@ -75,73 +72,124 @@ namespace KMHServerAddon
                 Features.Sites.SiteHandler.Register();
                 Features.Reputation.ReputationHandler.Register();
                 Features.Enforcement.EnforcementHandler.Register();
+                Features.World.WorldHandler.Register();
+                Features.Auctions.AuctionHandler.Register();
+                Features.WantBoard.WantHandler.Register();
+                Features.Seasons.SeasonHandler.Register();
 
-                // Load every feature's persisted state from KMH-Data/. Each call is no-op + log-warn if the file is
-                // missing or malformed - first-run / fresh server starts with empty stores
+                // Loads persisted feature state from KMH-Data/, warning and using empty stores when files are missing or invalid.
                 Persistence.KmhDataPaths.EnsureFolder();
 
-                // Configs: generate a ready-to-edit file with defaults on first boot so owners tune a real config
-                // we give them (no example to hunt for). Values are clamped on load
+                // Prove storage actually works before we rely on it: a read-only/locked KMH-Data or bad perms would
+                // otherwise make every save fail silently and look like a data-collection bug. Loud if it fails.
+                if (Persistence.JsonFileStore.SelfTest(out string storageDetail))
+                    Diagnostics.ServerLog.Info($"Persistence self-test: OK - {storageDetail}");
+                else
+                    Diagnostics.ServerLog.Error($"Persistence SELF-TEST FAILED - KMH data will NOT save! ({storageDetail}) " +
+                                                "Check folder permissions / free disk space for KMH-Data.");
+
+                // Release-safety pass, all BEFORE any store loads so it sees/preserves the pristine on-disk state:
+                // (1) reconcile the data-format stamp (backs up + migrates only if a format change shipped),
+                // (2) integrity-scan every KMH JSON and report (loud if irreplaceable data is damaged),
+                // (3) take the once-per-boot safety backup and prune old copies.
+                Maintenance.MaintenanceConfig.EnsureGenerated();
+                Maintenance.MaintenanceConfig maint = Maintenance.MaintenanceConfig.Current;
+
+                // Seed transport config + apply its debug toggle early so boot traces respect it. API transport off by default.
+                Features.Transport.TransportConfig.EnsureGenerated();
+                ServerLog.DebugEnabled = Features.Transport.TransportConfig.Current.DebugLogging;
+
+                ServerLog.Info(Persistence.KmhDataMeta.ReconcileOnBoot());
+                if (maint.IntegrityScanOnBoot)
+                    Persistence.KmhDataIntegrity.LogScan(Persistence.KmhDataIntegrity.Scan());
+                if (maint.BackupOnBoot)
+                {
+                    if (Persistence.KmhDataBackup.TryCreate("boot", out string backupDir, out string backupErr))
+                    {
+                        int pruned = Persistence.KmhDataBackup.Prune(maint.BackupRetention);
+                        ServerLog.Info($"Boot backup: {System.IO.Path.GetFileName(backupDir)}" +
+                                       (pruned > 0 ? $" ({pruned} old backup(s) pruned)" : ""));
+                    }
+                    else ServerLog.Verbose($"Boot backup skipped: {backupErr}");
+                }
+
+                // Guaranteed final flush on shutdown. Saves are already per-mutation, so this only matters for the
+                // rare in-flight change at exit - cheap insurance, registered once.
+                RegisterShutdownFlush();
+
+                // Seeds ready-to-edit config files on first boot; loaded values are clamped.
                 Features.Economy.EconomyConfig.EnsureGenerated();
                 Features.Sites.SitesConfig.EnsureGenerated();
                 Features.Discord.DiscordConfig.EnsureGenerated();
                 Features.Reputation.ReputationConfig.EnsureGenerated();
                 Features.Quests.QuestsConfig.EnsureGenerated();
                 Features.Enforcement.EnforcementConfig.EnsureGenerated();
-                Features.Enforcement.EnforcementProfile.Reload(); // read Enforcement/Profile/ at boot
+                Features.World.WorldConfig.EnsureGenerated();
+                Features.Enforcement.EnforcementProfile.Reload();
 
-                // Load every feature's persisted state from KMH-Data/.
+                // Loads each feature's saved state from KMH-Data/.
                 Features.LinkedAccounts.LinkedAccountsStore.LoadFromDisk();
                 Features.PlayerStats.PlayerStatsStore.LoadFromDisk();
+                Features.PlayerStats.PlayerStatsStore.LoadColonistsFromDisk();
                 Features.Treasury.TreasuryStore.LoadFromDisk();
                 Features.Marketplace.MarketplaceStore.LoadFromDisk();
                 Features.Quests.QuestStore.LoadFromDisk();
                 Features.Guilds.GuildStore.LoadFromDisk();
                 Features.Reputation.ReputationStore.LoadFromDisk();
                 Features.Sites.SiteStore.LoadFromDisk();
+                Features.World.WorldStore.LoadFromDisk();
+                Features.Auctions.AuctionStore.LoadFromDisk();
+                Features.WantBoard.WantStore.LoadFromDisk();
+                Features.Seasons.SeasonStore.LoadFromDisk();
+                Features.Notifications.NotificationStore.LoadFromDisk();
                 Features.ItemLabels.ItemLabelCache.LoadFromDisk();
                 Features.Discord.DiscordUserState.LoadFromDisk();
 
-                // Materialize each state file on first boot so every KMH-Data domain folder ships its file (empty
-                // defaults) instead of sitting empty until the first write
+                // Writes empty default state files on first boot so KMH-Data folders are materialized before first use.
                 EnsureFile(Persistence.KmhDataPaths.LinkedAccountsFile,   Features.LinkedAccounts.LinkedAccountsStore.SaveToDisk);
                 EnsureFile(Persistence.KmhDataPaths.PlayerStatsFile,      Features.PlayerStats.PlayerStatsStore.SaveToDisk);
+                EnsureFile(Persistence.KmhDataPaths.ColonistsFile,        Features.PlayerStats.PlayerStatsStore.SaveColonistsToDisk);
                 EnsureFile(Persistence.KmhDataPaths.TreasuryFile,         Features.Treasury.TreasuryStore.SaveToDisk);
                 EnsureFile(Persistence.KmhDataPaths.MarketplaceFile,      Features.Marketplace.MarketplaceStore.SaveToDisk);
                 EnsureFile(Persistence.KmhDataPaths.QuestsFile,           Features.Quests.QuestStore.SaveToDisk);
                 EnsureFile(Persistence.KmhDataPaths.GuildsFile,           Features.Guilds.GuildStore.SaveToDisk);
                 EnsureFile(Persistence.KmhDataPaths.ReputationFile,       Features.Reputation.ReputationStore.SaveToDisk);
                 EnsureFile(Persistence.KmhDataPaths.SitesFile,            Features.Sites.SiteStore.SaveToDisk);
+                EnsureFile(Persistence.KmhDataPaths.WorldFile,            Features.World.WorldStore.SaveToDisk);
+                EnsureFile(Persistence.KmhDataPaths.AuctionsFile,         Features.Auctions.AuctionStore.SaveToDisk);
+                EnsureFile(Persistence.KmhDataPaths.WantsFile,            Features.WantBoard.WantStore.SaveToDisk);
+                EnsureFile(Persistence.KmhDataPaths.NotificationsFile,    Features.Notifications.NotificationStore.SaveToDisk);
                 EnsureFile(Persistence.KmhDataPaths.ItemLabelsFile,       Features.ItemLabels.ItemLabelCache.SaveToDisk);
                 EnsureFile(Persistence.KmhDataPaths.DiscordUserStateFile, Features.Discord.DiscordUserState.SaveToDisk);
 
-                // Periodic background sweeper for expired listings + quests. Cheap (60s interval, microsecond pass
-                // over small stores)
+                // One-time prime of the marketplace house pool on a brand-new server so global-quest rewards can be
+                // funded before any tax revenue accrues. No-ops on every later boot (the seeded flag persists).
+                Features.Marketplace.MarketplaceStore.SeedHousePoolOnce(Features.World.WorldConfig.Current.HousePoolSeed);
+
+                // Durable economy audit trail: start the background flusher that writes queued ledger lines to disk.
+                Persistence.TransactionLedger.Start();
+
+                // KMH API listener - no-ops unless EnableKmhApiTransport=true (off by default)
+                Features.Transport.KmhApiServer.Start();
+
+                // Periodically sweeps expired listings and quests with a cheap 60s background pass.
                 Maintenance.ExpirySweeper.Start();
 
-                // Optional Discord bridge. Reads Config/Discord/DiscordConfig.json and silently skips startup when
-                // the file is missing or the bot token is empty. With a token configured, the bot logs in on a
-                // background task - its failure mode is isolated, so the addon stays up even if Discord is
-                // unreachable
+                // World Engine: expires ended events, optionally auto-rolls new ones (off by default in World.json).
+                Features.World.WorldEngine.Start();
+
+                // Loads the optional Discord bridge config and starts the bot safely in the background when enabled.
                 DiscordBridge.Start();
-
-                // Leaderboard auto-poster. Self-disables when the bridge is off or leaderboard_channel_id is 0;
-                // otherwise posts a top-N player embed on the configured cadence
+                // Periodically posts the top-N player leaderboard when the Discord bridge and channel are configured.
                 DiscordLeaderboardPoster.Start();
-
-                // Showcase sweep - refreshes every active per-user showcase post on the configured cadence so
-                // listings stay current with treasury moves. Self-disables when the bridge is off / showcase
-                // channel is unconfigured / interval < 1
+                // Periodically refreshes user showcase posts when the Discord bridge/channel/interval are enabled.
                 Features.Discord.DiscordShowcaseSweep.Start();
-
-                // Event publisher - subscribes to the KMH event bus and posts branded embeds (new listing, item
-                // sold, site built, quest completed, guild created) to their configured channels. Each post
-                // self-gates on the Embeds.Post* toggles + channel ids
+                // Subscribes to KMH events and posts enabled branded Discord embeds to their configured channels.
                 Features.Discord.DiscordEventPublisher.Start();
+                // Hooks RWT logging after startup and mirrors console output to the configured Discord Admin channel.
+                Features.Discord.DiscordConsoleFeed.Start();
 
-                // Extension loader - scans kmh-extensions/ for *.dll containing types that implement
-                // IKmhServerExtension, instantiates each, calls Register(host). Failed loads are logged + skipped;
-                // KMH bootstrap continues. Creates the folder with a tiny README on first boot if missing
+                // Scans kmh-extensions/ for IKmhServerExtension DLLs, registers valid ones, and skips failed loads safely.
                 Extensibility.ExtensionLoader.DiscoverAndLoad();
 
                 int patchCount = HarmonyInstance.GetPatchedMethods().Count();
@@ -149,19 +197,34 @@ namespace KMHServerAddon
             }
             catch (System.Exception ex)
             {
-                // Recoverable - if KMH boot fails, RWT's own Main still runs right after this hook, so the stock
-                // server comes up unpatched rather than crashing. NEVER rethrow: a startup-hook exception would
-                // abort the whole GameServer process
+                // Recoverable startup hook: log KMH boot failures and let RWT continue instead of aborting GameServer.
                 System.Console.Error.WriteLine($"{Constants.LogPrefix} Bootstrap failed: {ex}");
             }
         }
 
-        // Write a store's current (usually empty) state if its file doesn't exist yet, so the KMH-Data domain
-        // folder ships its file on first boot
+        // Writes the store's default state if missing so the KMH-Data folder is fully seeded on first boot.
         private static void EnsureFile(string path, System.Action save)
         {
             try { if (!System.IO.File.Exists(path)) save(); }
             catch (System.Exception ex) { ServerLog.Warn($"Could not materialize {System.IO.Path.GetFileName(path)}: {ex.Message}"); }
+        }
+
+        private static bool _shutdownFlushHooked;
+
+        // Flush all stores when the process exits (Ctrl-C / SIGTERM / normal teardown). Idempotent and best-effort.
+        private static void RegisterShutdownFlush()
+        {
+            if (_shutdownFlushHooked) return;
+            _shutdownFlushHooked = true;
+            try
+            {
+                System.AppDomain.CurrentDomain.ProcessExit += (_, __) =>
+                {
+                    try { int n = Maintenance.KmhDataFlush.FlushAll(); ServerLog.Info($"Shutdown flush: {n} store(s) saved."); }
+                    catch { /* shutting down anyway */ }
+                };
+            }
+            catch (System.Exception ex) { ServerLog.Verbose($"Could not register shutdown flush: {ex.Message}"); }
         }
     }
 }

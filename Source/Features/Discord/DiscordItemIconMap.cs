@@ -1,17 +1,8 @@
 namespace KMHServerAddon.Features.Discord
 {
-    // Single-emoji prefix per item def, a pure substring heuristic on the defName. Cheap, no DefDatabase access
-    // needed (the server doesn't load RimWorld defs), and the result reads as a thematic icon even for items the
-    // player doesn't recognize by name.
-    //
-    // Used to prefix item labels in market browse / showcase / WTB output, so the embed reads as a compact
-    // at-a-glance table rather than a wall of similar-looking rows.
-    //
-    // CDN icon URL support (TryGetIconUrl) is intentionally deferred - it needs config wiring + a hosted asset
-    // bucket not worth the v1 surface.
-    //
-    // Lookup cache: the result for a given defName is immutable, so we memoize after the first scan. A busy
-    // !kmh-market render touches the same defNames repeatedly; caching makes later renders O(1) per row.
+    // Single-emoji prefix per item def, a pure substring heuristic on the defName (no DefDatabase - the server
+    // doesn't load RimWorld defs). Prefixes item labels in market browse / showcase / WTB so embeds read as a compact
+    // table. Result per defName is immutable, so it's memoized after the first scan. (CDN icon URLs are deferred.)
     internal static class DiscordItemIconMap
     {
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _cache

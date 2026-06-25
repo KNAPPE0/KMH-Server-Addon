@@ -5,22 +5,20 @@ using KMHServerAddon.Persistence;
 
 namespace KMHServerAddon.Features.ItemLabels
 {
-    // Server-side cache of defName -> human label, populated from connected clients at handshake completion
-    //
-    // Why server-side? The server is headless and doesn't load RimWorld defs, so it has no built-in way to know
-    // "MealSurvivalPack" displays as "packaged survival meal". Discord commands (`!kmh-sell plasteel ...`,
-    // `!kmh-market` listing labels) need this mapping to show readable text and accept friendly-name input
-    //
-    // The patch has the local DefDatabase; at handshake it sends its catalog and we cache the union across clients.
-    // Players with different mods each contribute their slice, so the server shows items it has no def for
-    //
-    // Persistence: cache saves to KMH-Data/Catalog/ItemLabels.json so a server restart doesn't blank the cache
-    // until the first client reconnects. First-run / fresh server starts with an empty cache
+    // Server-side cache of defName -> human label, built from connected clients at handshake. The server is headless
+    // (no RimWorld defs), so it relies on clients' DefDatabase: each sends its catalog and we cache the union, so
+    // Discord commands/listings show readable text and accept friendly names even for items the server has no def for.
+    // Persisted to KMH-Data/Catalog/ItemLabels.json so a restart doesn't blank it until clients reconnect.
     internal static class ItemLabelCache
     {
         private static readonly object _lock = new object();
         private static Dictionary<string, string> _labels
             = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        // defName -> RimWorld BaseMarketValue, contributed by clients (the live game economy). Lets the World Engine
+        // value-scale quest rewards to what the requested goods are actually worth.
+        private static Dictionary<string, long> _values
+            = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
 
         // Merge an incoming label set into the cache. Last-writer-wins on collisions - newest contributor's
         // spelling/case wins. Saves to disk only if at least one entry was new (cheap dirty check avoids spamming
@@ -47,6 +45,40 @@ namespace KMHServerAddon.Features.ItemLabels
                 SaveToDisk();
                 ServerLog.Verbose($"ItemLabels: cache updated ({added} new/changed, {_labels.Count} total)");
             }
+        }
+
+        // Merge an incoming defName -> base market value set. Last-writer-wins; saves only when something changed.
+        public static void ApplyValues(Dictionary<string, long> incoming)
+        {
+            if (incoming == null || incoming.Count == 0) return;
+            int added = 0;
+            lock (_lock)
+            {
+                foreach (KeyValuePair<string, long> kv in incoming)
+                {
+                    if (string.IsNullOrEmpty(kv.Key) || kv.Value <= 0) continue;
+                    if (!_values.TryGetValue(kv.Key, out long existing) || existing != kv.Value)
+                    {
+                        _values[kv.Key] = kv.Value;
+                        added++;
+                    }
+                }
+            }
+            if (added > 0)
+            {
+                SaveToDisk();
+                ServerLog.Verbose($"ItemLabels: value cache updated ({added} new/changed, {_values.Count} total)");
+            }
+        }
+
+        // RimWorld base market value for a defName (bare or composed key), or 0 when no client has reported it yet.
+        public static long BaseValue(string defName)
+        {
+            if (string.IsNullOrEmpty(defName)) return 0;
+            if (defName.IndexOf(Util.ItemKey.Sep) >= 0)
+                Util.ItemKey.Split(defName, out defName, out _, out _);
+            lock (_lock)
+                return _values.TryGetValue(defName, out long v) ? v : 0;
         }
 
         // Returns the label for a defName, or the defName itself when unknown. Same fallback behavior as the
@@ -214,8 +246,10 @@ namespace KMHServerAddon.Features.ItemLabels
                 lock (_lock)
                 {
                     _labels = new Dictionary<string, string>(state.Labels, StringComparer.OrdinalIgnoreCase);
+                    if (state.Values != null)
+                        _values = new Dictionary<string, long>(state.Values, StringComparer.OrdinalIgnoreCase);
                 }
-                ServerLog.Info($"ItemLabels: loaded {state.Labels.Count} label(s) from disk");
+                ServerLog.Info($"ItemLabels: loaded {state.Labels.Count} label(s), {state.Values?.Count ?? 0} value(s) from disk");
             }
         }
 
@@ -225,6 +259,7 @@ namespace KMHServerAddon.Features.ItemLabels
             lock (_lock)
             {
                 state.Labels = new Dictionary<string, string>(_labels, StringComparer.OrdinalIgnoreCase);
+                state.Values = new Dictionary<string, long>(_values, StringComparer.OrdinalIgnoreCase);
             }
             JsonFileStore.Save(KmhDataPaths.ItemLabelsFile, state);
         }
@@ -232,6 +267,7 @@ namespace KMHServerAddon.Features.ItemLabels
         private class PersistedState
         {
             public Dictionary<string, string> Labels { get; set; } = new Dictionary<string, string>();
+            public Dictionary<string, long>   Values { get; set; } = new Dictionary<string, long>();
         }
     }
 }

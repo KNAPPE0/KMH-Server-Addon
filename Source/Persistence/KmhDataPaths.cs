@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.IO;
 using GameServer.Core;
 
@@ -11,9 +12,62 @@ namespace KMHServerAddon.Persistence
 
         public static string Folder => Path.Combine(Master.MainPath ?? Directory.GetCurrentDirectory(), FolderName);
 
+        // One catalog of every KMH JSON file, shared by the integrity scan, the diag report, and the force-save flush
+        // so they never drift out of sync. Regenerable = rebuilds from defaults/clients if lost (configs, caches);
+        // the rest is irreplaceable runtime state worth shouting about if it goes corrupt
+        public readonly struct DataFile
+        {
+            public readonly string Label;
+            public readonly string Path;
+            public readonly bool   Regenerable;
+            public DataFile(string label, string path, bool regenerable) { Label = label; Path = path; Regenerable = regenerable; }
+        }
+
+        public static IReadOnlyList<DataFile> KnownDataFiles => new[]
+        {
+            // Irreplaceable runtime state
+            new DataFile("Players/PlayerStats", PlayerStatsFile,    false),
+            new DataFile("Players/Colonists",   ColonistsFile,      false),
+            new DataFile("Treasury",            TreasuryFile,       false),
+            new DataFile("Marketplace",         MarketplaceFile,    false),
+            new DataFile("Quests",              QuestsFile,         false),
+            new DataFile("Guilds",              GuildsFile,         false),
+            new DataFile("Reputation",          ReputationFile,     false),
+            new DataFile("Sites",               SitesFile,          false),
+            new DataFile("World",               WorldFile,          false),
+            new DataFile("Auctions",            AuctionsFile,       false),
+            new DataFile("WantBoard",           WantsFile,          false),
+            new DataFile("Notifications",       NotificationsFile,  false),
+            new DataFile("Seasons",             SeasonsFile,        false),
+            new DataFile("Accounts",            LinkedAccountsFile, false),
+            // Regenerable - rebuilt from clients/defaults on the next run if lost
+            new DataFile("Catalog/ItemLabels",  ItemLabelsFile,           true),
+            new DataFile("Discord/UserState",   DiscordUserStateFile,     true),
+            new DataFile("Config/Economy",      EconomyConfigFile,        true),
+            new DataFile("Config/Sites",        SitesConfigFile,          true),
+            new DataFile("Config/Reputation",   ReputationConfigFile,     true),
+            new DataFile("Config/Quests",       QuestsConfigFile,         true),
+            new DataFile("Config/Enforcement",  EnforcementConfigFile,    true),
+            new DataFile("Config/World",        WorldConfigFile,          true),
+            new DataFile("Config/Maintenance",  MaintenanceConfigFile,    true),
+            new DataFile("Config/Transport",    TransportConfigFile,      true),
+            new DataFile("Config/Discord",      DiscordConfigFile,        true),
+        };
+
         // The folder containing KMHServerAddon.exe (binary-rooted, vs Folder which is data-rooted at the RWT cwd).
         // Extensions find their drop-folder here
         public static string AddonDir => System.AppContext.BaseDirectory;
+
+        // Backups live in a SIBLING folder, never inside KMH-Data, so a backup pass never recurses into itself and a
+        // wipe of KMH-Data leaves the backups standing
+        public static string BackupRoot => Path.Combine(Master.MainPath ?? Directory.GetCurrentDirectory(), "KMH-Data-Backups");
+
+        // Data-format stamp + last-run marker (dotfile so it sorts/hides out of the way). Drives the migration guard
+        public static string MetaFile => Path.Combine(Folder, ".kmh-meta.json");
+
+        // Append-only economy audit trail (daily JSONL files). Not in KnownDataFiles - JSONL isn't a single JSON doc,
+        // so the integrity scan (which JToken-parses whole files) skips it by design
+        public static string LedgerDir => Sub("Ledger");
 
         private static string Sub(params string[] parts)
         {
@@ -29,6 +83,9 @@ namespace KMHServerAddon.Persistence
         public static string ReputationConfigFile  => Path.Combine(Sub("Config"), "Reputation.json");
         public static string QuestsConfigFile       => Path.Combine(Sub("Config"), "Quests.json");
         public static string EnforcementConfigFile  => Path.Combine(Sub("Config"), "Enforcement.json");
+        public static string WorldConfigFile        => Path.Combine(Sub("Config"), "World.json");
+        public static string MaintenanceConfigFile  => Path.Combine(Sub("Config"), "Maintenance.json");
+        public static string TransportConfigFile     => Path.Combine(Sub("Config"), "Transport.json");
         public static string DiscordConfigFile      => Path.Combine(Sub("Config", "Discord"), "DiscordConfig.json");
 
         // Hard enforcement: the owner drops the exact mod-config (.xml) files to enforce into
@@ -42,7 +99,13 @@ namespace KMHServerAddon.Persistence
         public static string GuildsFile          => Path.Combine(Sub("Guilds"),      "Guilds.json");
         public static string ReputationFile      => Path.Combine(Sub("Reputation"),  "Reputation.json");
         public static string SitesFile           => Path.Combine(Sub("Sites"),       "Sites.json");
+        public static string WorldFile           => Path.Combine(Sub("World"),       "World.json");
+        public static string AuctionsFile        => Path.Combine(Sub("Auctions"),    "Auctions.json");
+        public static string NotificationsFile   => Path.Combine(Sub("Notifications"), "Notifications.json");
+        public static string WantsFile           => Path.Combine(Sub("WantBoard"),   "Wants.json");
+        public static string SeasonsFile         => Path.Combine(Sub("Seasons"),     "Seasons.json");
         public static string PlayerStatsFile     => Path.Combine(Sub("Players"),     "PlayerStats.json");
+        public static string ColonistsFile       => Path.Combine(Sub("Players"),     "Colonists.json");
         public static string LinkedAccountsFile  => Path.Combine(Sub("Accounts"),    "LinkedAccounts.json");
         public static string ItemLabelsFile      => Path.Combine(Sub("Catalog"),     "ItemLabels.json");
         public static string DiscordUserStateFile        => Path.Combine(Sub("Discord"), "UserState.json");
@@ -59,7 +122,8 @@ namespace KMHServerAddon.Persistence
             "Config", Path.Combine("Config", "Discord"),
             "Treasury", "Marketplace", "Quests", "Guilds",
             "Reputation", "Sites", "Players", "Accounts", "Catalog", "Discord",
-            "Enforcement", Path.Combine("Enforcement", "Profile"), "Icons",
+            "Enforcement", Path.Combine("Enforcement", "Profile"), "Icons", "Notifications", "WantBoard", "Seasons",
+            "Ledger",
         };
 
         // Idempotent - safe to call repeatedly. Creates KMH-Data/ and every domain subfolder, and drops the Icons

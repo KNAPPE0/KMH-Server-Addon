@@ -11,9 +11,11 @@ Then run KMHServerAddon.exe (NOT GameServer.exe).
 
 KMHServerAddon.exe is a single file. It works with the GameServer.exe you put
 next to it, adds the KMH features, and starts the server. It detects which
-server version it sits next to (26.5.24.1 or 26.6.9.1+) and uses the matching
-build automatically. On first run it creates KMH-Data/ (configs + state),
-kmh-extensions/, and a small .rwt-runtime/ cache next to itself.
+server version it sits next to (RWT 26.5.24.1 or 26.6.9.1) and uses the matching
+build automatically. Recommended RWT version: 26.6.9.1. RWT 26.6.23.1 and newer
+is experimental / compatibility-in-progress - don't update to it yet. On first
+run it creates KMH-Data/ (configs + state), kmh-extensions/, and a small
+.rwt-runtime/ cache next to itself.
 
 Requirement
 -----------
@@ -27,14 +29,27 @@ If GameServer.exe isn't in the folder, KMH says so and stops.
 
 Config (KMH-Data/Config/)
 -------------------------
-  Economy.json          marketplace tax, listing caps, price floors
+  Economy.json          marketplace/auction/want tax, caps, price floors
   Sites.json            custom-site pricing, worker XP, cycle rate
   Reputation.json       score deltas + tier cutoffs
   Quests.json           per-poster caps, expiry
+  World.json            server event + global-quest scheduler / reward tuning
   Enforcement.json      config-enforcement state + safe-mods list
+  Maintenance.json      automatic-backup + boot integrity-scan settings
   Discord/DiscordConfig.json   paste a bot token to enable the Discord bridge
 All are generated with defaults on first boot. Reload economy/site config live
 (in-game chat or server console):  kmh reload-economy
+
+Backups & recovery
+------------------
+KMH backs up KMH-Data/ on every boot (into a sibling KMH-Data-Backups/ folder)
+and scans it for problems at startup. Owner commands (console or /kmh server):
+  kmh verify              read-only integrity scan
+  kmh backup [reason]     snapshot KMH-Data now    |  kmh backups   list them
+  kmh inspect <system>    dump auctions/wants/quests/... with ids
+  kmh cancel <auction|want|quest> <id>   refund + remove a stuck entry
+  kmh ledger [user]       recent economy audit-trail entries
+  kmh smoketest           non-mutating self-check of every subsystem
 
 Extensions
 ----------

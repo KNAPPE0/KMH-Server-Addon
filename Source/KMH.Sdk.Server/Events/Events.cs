@@ -118,4 +118,76 @@ namespace KMH.Sdk.Server.Events
         public string OwnerUsername { get; init; } = "";
         public string Reason        { get; init; } = "";   // "built" / "worker_joined" / "worker_left" / "removed" / "reward"
     }
+
+    public sealed class AuctionPostedEvent
+    {
+        public long   AuctionId      { get; init; }
+        public string SellerUsername { get; init; } = "";
+        public string ItemDefName    { get; init; } = "";
+        public int    Qty            { get; init; }
+        public long   StartingBid    { get; init; }
+        public long   BuyoutSilver   { get; init; }
+        public string Visibility     { get; init; } = "public";
+    }
+
+    public sealed class AuctionBidEvent
+    {
+        public long   AuctionId       { get; init; }
+        public string BidderUsername  { get; init; } = "";
+        public long   Amount          { get; init; }
+        public string OutbidUsername  { get; init; } = "";   // previous high bidder we refunded, empty if first bid
+    }
+
+    public sealed class AuctionSettledEvent
+    {
+        public long   AuctionId      { get; init; }
+        public bool   Sold           { get; init; }          // false = ended with no bids, item returned to seller
+        public string WinnerUsername { get; init; } = "";
+        public string SellerUsername { get; init; } = "";
+        public string ItemDefName    { get; init; } = "";
+        public int    Qty            { get; init; }
+        public long   FinalBid       { get; init; }
+        public long   SellerNet      { get; init; }          // bid minus house tax
+    }
+
+    public sealed class WorldEventFiredEvent
+    {
+        public string Type         { get; init; } = "";
+        public string Title        { get; init; } = "";
+        public double Magnitude    { get; init; }
+        public string Target       { get; init; } = "";
+        public long   EndsUtcTicks { get; init; }            // 0 = instantaneous
+    }
+
+    public sealed class WorldEventEndedEvent
+    {
+        public string Type  { get; init; } = "";
+        public string Title { get; init; } = "";
+    }
+
+    public sealed class GlobalQuestCreatedEvent
+    {
+        public long   QuestId       { get; init; }
+        public string Kind          { get; init; } = "";   // cooperative / competitive
+        public string Objective     { get; init; } = "";   // hunt / build / deliver
+        public string TargetDefName { get; init; } = "";
+        public int    GoalQty       { get; init; }
+        public long   RewardPool    { get; init; }
+    }
+
+    public sealed class GlobalQuestCompletedEvent
+    {
+        public long   QuestId          { get; init; }
+        public string Kind             { get; init; } = "";
+        public string Objective        { get; init; } = "";
+        public string Winner           { get; init; } = "";   // competitive only, empty for cooperative
+        public int    ContributorCount { get; init; }
+        public long   RewardPool       { get; init; }
+    }
+
+    public sealed class GlobalQuestExpiredEvent
+    {
+        public long   QuestId { get; init; }
+        public string Title   { get; init; } = "";
+    }
 }

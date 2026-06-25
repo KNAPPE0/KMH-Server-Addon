@@ -2,11 +2,9 @@ using KMHServerAddon.Diagnostics;
 
 namespace KMHServerAddon.SubProtocol
 {
-    // Server-side handshake: sends kmh.hello on connect (driven by Patch_PM_Chat_KmhSendHello, a Harmony postfix on
-    // PM_Chat. SendLoginChatMessages) and handles the client's kmh.hello.ack reply
-    //
-    // Successful handshake = client has KMH-Patch loaded. Feature code can gate per-client pushes on this in the
-    // future (skip sending treasury snapshots to stock-RWT clients that would render the JSON in their chat log)
+    // Server-side handshake: sends kmh.hello on connect (via Patch_PM_Chat_KmhSendHello, a postfix on
+    // PM_Chat.SendLoginChatMessages) and handles the client's kmh.hello.ack. A successful handshake means the client
+    // has KMH-Patch loaded.
     internal static class KmhHandshakeHandler
     {
         public static void Register()
@@ -22,14 +20,24 @@ namespace KMHServerAddon.SubProtocol
         {
             string username = client?.GetData<UserFile>()?.Username ?? "?";
 
+            // When the API transport is on, advertise it + mint this user's one-time token (sent only over this
+            // authenticated channel, never logged). Off by default -> fields are empty and inert.
+            Features.Transport.TransportConfig tcfg = Features.Transport.TransportConfig.Current;
+            bool   apiOn    = tcfg.EnableKmhApiTransport;
+            string apiToken = apiOn ? Features.Transport.KmhApiServer.IssueToken(username) : "";
+
             bool sent = KmhRouter.SendTo(client, KmhProtocol.Kind.Hello, new
             {
-                v = KmhProtocol.CurrentVersion,
+                v           = KmhProtocol.CurrentVersion,
+                build       = KmhProtocol.BuildVersion,
+                api_enabled = apiOn,
+                api_port    = apiOn ? tcfg.KmhApiPort : 0,
+                api_token   = apiToken,
             });
 
             if (sent)
             {
-                ServerLog.Verbose($"Sent kmh.hello (v{KmhProtocol.CurrentVersion}) to {username}");
+                ServerLog.Verbose($"Sent kmh.hello (v{KmhProtocol.CurrentVersion}{(apiOn ? ", api" : "")}) to {username}");
             }
         }
 
@@ -51,6 +59,11 @@ namespace KMHServerAddon.SubProtocol
                     Features.LinkedAccounts.LinkedAccountsHandler.SendSnapshotTo(client);
                     Features.Reputation.ReputationHandler.SendSnapshotTo(client);
                     Features.Enforcement.EnforcementHandler.SendSnapshotTo(client);
+                    Features.World.WorldHandler.SendSnapshotTo(client);
+                    Features.Auctions.AuctionHandler.SendSnapshotTo(client);
+                    Features.WantBoard.WantHandler.SendSnapshotTo(client);
+                    // Deliver anything that piled up while they were offline (auction/marketplace outcomes).
+                    Features.Notifications.NotificationHandler.DeliverQueuedTo(client);
                 }
                 catch (System.Exception ex)
                 {
@@ -64,9 +77,7 @@ namespace KMHServerAddon.SubProtocol
             }
         }
 
-        // Diagnostic round-trip - client sends Ping, we reply with Pong. First real handler beyond the lifecycle
-        // handshake; useful both as a "is the protocol alive?" check and as the template for every feature handler
-        // we'll add later
+        // Diagnostic round-trip - client sends Ping, server replies Pong ("is the protocol alive?").
         private static void OnPing(ServerClient client, KmhEnvelope env)
         {
             KmhRouter.SendTo(client, KmhProtocol.Kind.Pong, null);

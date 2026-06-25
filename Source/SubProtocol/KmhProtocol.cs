@@ -1,22 +1,20 @@
 namespace KMHServerAddon.SubProtocol
 {
-    // KMH sub-protocol constants - MUST stay byte-identical to the patch mod's KMHPatch.SubProtocol.KmhProtocol on
-    // the client side. Drift here = silent handshake failure or feature data going unparsed
-    //
-    // The ​ (zero-width space) prefix on the usernames is what makes them collision-proof against real player names
-    // - RWT lets players pick anything, but no legitimate username can start with a non-printable Unicode control
-    // character
+    // Keep byte-identical with client KmhProtocol; zero-width username prefix prevents player-name collisions.
     internal static class KmhProtocol
     {
-        // Bump when the wire format changes incompatibly. Handshake refuses to enable KMH features for sessions
-        // where client and server disagree
+        // Wire compatibility version; client/server mismatch blocks KMH feature activation.
         public const int CurrentVersion = 1;
+
+        // Human-readable release version, carried in kmh.hello purely so each side can DETECT a version gap and
+        // nudge the player. It never gates the connection (that's CurrentVersion's job) and stays additive: a
+        // pre-1.1.0 server omits it, so an empty value received by a client reliably means "older server".
+        public const string BuildVersion = "1.1.0";
 
         public const string SystemUsername = "​[KMH-SYS]"; // server -> client
         public const string ClientUsername = "​[KMH-CLI]"; // client -> server
 
-        // Well-known envelope kinds. Add more as features land - each new kind below also needs its handler
-        // registered in KmhBootstrap (or wherever the feature initializes itself)
+        // Known packet kinds. Add new ones here only when their handlers are registered.
         public static class Kind
         {
             // Connection lifecycle
@@ -27,13 +25,26 @@ namespace KMHServerAddon.SubProtocol
             public const string Ping         = "kmh.ping";
             public const string Pong         = "kmh.pong";
 
-            // Transient server -> client toast. Payload { level, text } where level is positive/negative/neutral.
-            // Used for action feedback that doesn't warrant a full snapshot (e.g. "guild is invite-only")
+            // Transient server-to-client toast: { level, text } for lightweight action feedback.
             public const string Notice       = "kmh.notice";                  // server -> client
+
+            // Batch of notices that piled up while the player was offline; delivered once on login as letters.
+            public const string NotifyQueued = "kmh.notify.queued";           // server -> client
 
             // Player stats / leaderboard
             public const string PlayerStatsRequest      = "kmh.player_stats.request";    // client -> server
             public const string PlayerStatsSnapshot     = "kmh.player_stats.snapshot";   // server -> client
+            // Client uploads its colony summary + top colonist (display-only leaderboard data).
+            public const string ColonyReport            = "kmh.colony.report";           // client -> server
+            // Full top-colonist profile fetched on demand when a player card opens.
+            public const string ColonistRequest         = "kmh.colonist.request";        // client -> server
+            public const string ColonistProfile         = "kmh.colonist.profile";        // server -> client
+            // Flattened roster of every colony's reported colonists, for the per-skill Colonist Records boards.
+            public const string ColonistRosterRequest   = "kmh.records.colonists.request"; // client -> server
+            public const string ColonistRoster          = "kmh.records.colonists";         // server -> client
+            // Season archive: current/past season leaders + all-time server records.
+            public const string SeasonArchiveRequest    = "kmh.archive.season.request";    // client -> server
+            public const string SeasonArchive           = "kmh.archive.season";            // server -> client
 
             // Treasury - caller's vault (guild or personal). Server resolves which one from authenticated identity
             public const string TreasuryRequest         = "kmh.treasury.request";        // client -> server
@@ -82,13 +93,11 @@ namespace KMHServerAddon.SubProtocol
             public const string GuildSetOpenJoin        = "kmh.guild.set_open_join";      // client -> server (admin toggles open join)
             public const string GuildJoin               = "kmh.guild.join";               // client -> server (join an open or invited guild)
 
-            // Cross-guild leaderboard - separate from GuildSnapshot which is caller-scoped (caller's own guild).
-            // This carries every guild on the server in a leaderboard-friendly shape
+            // Cross-guild leaderboard payload containing every guild in leaderboard form.
             public const string GuildLeaderboardRequest = "kmh.guild_leaderboard.request"; // client -> server
             public const string GuildLeaderboardSnapshot = "kmh.guild_leaderboard.snapshot"; // server -> client
 
-            // Linked accounts - in-game username -> Discord display name map. Server pushes after handshake + on
-            // every link/unlink so the patch mod doesn't have to poll
+            // Linked account map pushed after handshake and on every Discord link/unlink.
             public const string LinkedAccountsRequest   = "kmh.linked_accounts.request";  // client -> server
             public const string LinkedAccountsSnapshot  = "kmh.linked_accounts.snapshot"; // server -> client
 
@@ -96,7 +105,28 @@ namespace KMHServerAddon.SubProtocol
             public const string ReputationRequest      = "kmh.reputation.request";      // client -> server
             public const string ReputationSnapshot     = "kmh.reputation.snapshot";     // server -> client
 
-            // KMH custom sites - player-built production nodes with workers.
+            // Custom Sites and World Engine payloads for production nodes, global events, and server-owned quests.
+            public const string WorldRequest           = "kmh.world.request";           // client -> server
+            public const string WorldSnapshot          = "kmh.world.snapshot";          // server -> client
+            // Payload: { quest_id, total }; server stores the max tally per user.
+            public const string WorldContribute        = "kmh.world.contribute";        // client -> server
+            // Additive deliver credit; no item refund, only counts toward an active matching quest.
+            public const string WorldDeliver           = "kmh.world.deliver";           // client -> server
+
+            // Marketplace auctions - timed bidding on treasury items.
+            public const string AuctionRequest         = "kmh.auction.request";         // client -> server
+            public const string AuctionSnapshot        = "kmh.auction.snapshot";        // server -> client
+            public const string AuctionPost            = "kmh.auction.post";            // client -> server
+            public const string AuctionBid             = "kmh.auction.bid";             // client -> server (bid silver from treasury)
+            public const string AuctionCancel          = "kmh.auction.cancel";          // client -> server (seller, pre-bid only)
+
+            // Want-to-buy board - buyers escrow silver, sellers fulfill from treasury.
+            public const string WantRequest            = "kmh.want.request";            // client -> server
+            public const string WantSnapshot           = "kmh.want.snapshot";           // server -> client
+            public const string WantPost               = "kmh.want.post";               // client -> server (escrow silver)
+            public const string WantFulfill            = "kmh.want.fulfill";            // client -> server (deliver items for payout)
+            public const string WantCancel             = "kmh.want.cancel";             // client -> server (buyer, refund escrow)
+
             public const string SiteRequest            = "kmh.site.request";            // client -> server
             public const string SiteSnapshot           = "kmh.site.snapshot";           // server -> client
             public const string SiteBuild              = "kmh.site.build";              // client -> server
@@ -105,17 +135,13 @@ namespace KMHServerAddon.SubProtocol
             public const string SiteSetDestination     = "kmh.site.set_destination";    // client -> server
             public const string SiteCancel             = "kmh.site.cancel";             // client -> server (owner removes)
 
-            // Item label catalog. Patch mod sends a defName -> label map at handshake completion so the server can
-            // resolve friendly names
-            // for Discord-side market commands (`!kmh-sell plasteel ...`)
-            // and show readable item labels in market browse output. Server accumulates the union across all
-            // reporting clients - players with different loaded mods contribute their slice
+            // Clients send defName -> label maps after handshake; server merges them for Discord commands and market output.
             public const string ItemLabels              = "kmh.item_labels";              // client -> server
+            // Clients also send defName -> BaseMarketValue (RimWorld's canonical prices) so the server can value-scale
+            // quest rewards / pricing. Separate envelope so it never bloats the (already near-cap) labels push.
+            public const string ItemValues              = "kmh.item_values";              // client -> server
 
-            // Config enforcement. The server pushes the enforcement snapshot (on/off + admin-bypass + safe-mods
-            // allowlist) on handshake and on change; the patch locks the Mod Options screen for non-admins
-            // accordingly. The full config profile (hard enforcement) rides on the chunked profile.* kinds, and
-            // restore clears it
+            // Pushes enforcement state and config profiles so clients can lock Mod Options and restore when cleared.
             public const string EnforcementSnapshot     = "kmh.enforcement.snapshot";      // server -> client
             public const string EnforcementSnapshotRequest = "kmh.enforcement.snapshot.request"; // client -> server (refresh on dialog open, e.g. after being op'd mid-session)
             public const string EnforcementProfileRequest = "kmh.enforcement.profile.request"; // client -> server (only when the local hash differs)

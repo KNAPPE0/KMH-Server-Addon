@@ -147,7 +147,7 @@ namespace KMHServerAddon.Features.Discord
                     sb.Append("`").Append(itemRaw).Append("` matches multiple items - be more specific:\n");
                     foreach (string c in candidates)
                     {
-                        sb.Append("• **").Append(ItemLabelCache.LabelFor(c))
+                        sb.Append("• **").Append(DiscordText.Escape(ItemLabelCache.LabelFor(c)))
                           .Append("** _(").Append(c).Append(")_\n");
                     }
                     await raw.Channel.SendMessageAsync(sb.ToString()).ConfigureAwait(false);
@@ -167,7 +167,7 @@ namespace KMHServerAddon.Features.Discord
             }
             string label = ItemLabelCache.LabelFor(defName);
             await raw.Channel.SendMessageAsync(
-                $"Added WTB: **{qty:N0}× {label}** @ `≤{price:N0}s`/ea. Run `!kmh-wtb` to refresh your board.")
+                $"Added WTB: **{qty:N0}× {DiscordText.Escape(label)}** @ `≤{price:N0}s`/ea. Run `!kmh-wtb` to refresh your board.")
                 .ConfigureAwait(false);
         }
 
@@ -193,8 +193,8 @@ namespace KMHServerAddon.Features.Discord
             int removed = DiscordUserState.RemoveWtb(caller, defName);
             await raw.Channel.SendMessageAsync(
                 removed == 0
-                    ? $"No WTB entry for **{ItemLabelCache.LabelFor(defName)}** found."
-                    : $"Removed WTB for **{ItemLabelCache.LabelFor(defName)}**. Run `!kmh-wtb` to refresh.")
+                    ? $"No WTB entry for **{DiscordText.Escape(ItemLabelCache.LabelFor(defName))}** found."
+                    : $"Removed WTB for **{DiscordText.Escape(ItemLabelCache.LabelFor(defName))}**. Run `!kmh-wtb` to refresh.")
                 .ConfigureAwait(false);
         }
 

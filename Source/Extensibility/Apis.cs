@@ -279,4 +279,109 @@ namespace KMHServerAddon.Extensibility
         public string ResolveDefNameByQuery(string query, out List<string> candidates)
             => Features.ItemLabels.ItemLabelCache.ResolveDefNameByQuery(query, out candidates);
     }
+
+    internal sealed class AuctionApiImpl : IAuctionApi
+    {
+        private static AuctionRecord ToRecord(Features.Auctions.Dto.AuctionDto a) => new AuctionRecord
+        {
+            Id = a.Id, SellerUsername = a.SellerUsername, SellerTreasuryKey = a.SellerTreasuryKey,
+            ItemDefName = a.ItemDefName, StuffDefName = a.StuffDefName, QualityIndex = a.QualityIndex, Qty = a.Qty,
+            StartingBid = a.StartingBid, MinIncrement = a.MinIncrement, BuyoutSilver = a.BuyoutSilver,
+            CurrentBid = a.CurrentBid, HighBidder = a.HighBidder, BidCount = a.BidCount,
+            ListedUtcTicks = a.ListedUtcTicks, EndsUtcTicks = a.EndsUtcTicks, Visibility = a.Visibility,
+        };
+
+        public IReadOnlyList<AuctionRecord> GetOpenAuctions(string callerUsername)
+        {
+            List<AuctionRecord> result = new List<AuctionRecord>();
+            foreach (Features.Auctions.Dto.AuctionDto a in Features.Auctions.AuctionStore.BuildSnapshot(callerUsername).Auctions)
+                result.Add(ToRecord(a));
+            return result;
+        }
+
+        public long Post(string sellerUsername, string itemDefName, string stuffDefName, int quality, int qty,
+                         long startingBid, long minIncrement, long buyoutSilver, int durationHours, string visibility = "public")
+            => Features.Auctions.AuctionStore.Post(sellerUsername, itemDefName, stuffDefName, quality, qty,
+                                                   startingBid, minIncrement, buyoutSilver, durationHours, visibility).id;
+
+        public bool Bid(string bidderUsername, long auctionId, long amount, out string reason)
+        {
+            Features.Auctions.AuctionStore.BidResult r = Features.Auctions.AuctionStore.Bid(bidderUsername, auctionId, amount);
+            reason = r.Reason;
+            return r.Ok;
+        }
+
+        public bool Cancel(string sellerUsername, long auctionId, out string reason)
+        {
+            (bool ok, string why) = Features.Auctions.AuctionStore.Cancel(sellerUsername, auctionId);
+            reason = why;
+            return ok;
+        }
+    }
+
+    internal sealed class WorldApiImpl : IWorldApi
+    {
+        private const string Actor = "extension";
+
+        private static WorldEventRecord ToRecord(Features.World.Dto.WorldEventDto e) => new WorldEventRecord
+        {
+            Id = e.Id, Type = e.Type, Title = e.Title, Description = e.Description, Magnitude = e.Magnitude,
+            Target = e.Target, StartedUtcTicks = e.StartedUtcTicks, EndsUtcTicks = e.EndsUtcTicks,
+        };
+
+        private static ServerQuestRecord ToRecord(Features.World.Dto.ServerQuestDto q) => new ServerQuestRecord
+        {
+            Id = q.Id, Kind = q.Kind, Objective = q.Objective, Title = q.Title, Description = q.Description,
+            TargetDefName = q.TargetDefName, GoalQty = q.GoalQty, ProgressQty = q.ProgressQty,
+            RewardPool = q.RewardPool, State = q.State, Winner = q.Winner, EndsUtcTicks = q.EndsUtcTicks,
+            Contributors = new Dictionary<string, int>(q.Contributors, StringComparer.OrdinalIgnoreCase),
+        };
+
+        public IReadOnlyList<WorldEventRecord> GetActiveEvents()
+        {
+            List<WorldEventRecord> result = new List<WorldEventRecord>();
+            foreach (Features.World.Dto.WorldEventDto e in Features.World.WorldStore.ActiveEvents()) result.Add(ToRecord(e));
+            return result;
+        }
+
+        public IReadOnlyList<ServerQuestRecord> GetServerQuests()
+        {
+            List<ServerQuestRecord> result = new List<ServerQuestRecord>();
+            foreach (Features.World.Dto.ServerQuestDto q in Features.World.WorldStore.BuildSnapshot().ServerQuests) result.Add(ToRecord(q));
+            return result;
+        }
+
+        public bool FireEvent(string type, double magnitude, string target, int durationMinutes, out string reason)
+        {
+            (bool ok, string why) = Features.World.WorldEngine.FireEvent(type, magnitude, target, durationMinutes, Actor);
+            reason = why;
+            return ok;
+        }
+
+        public bool EndEvent(string type, out string reason)
+        {
+            (bool ok, string why) = Features.World.WorldEngine.EndEvent(type);
+            reason = why;
+            return ok;
+        }
+
+        public bool CreateQuest(string kind, string objective, string targetDefName, int goalQty, long reward,
+                                int durationMinutes, string title, string description, out string reason)
+        {
+            (bool ok, string why) = Features.World.WorldEngine.CreateWorldQuest(kind, objective, targetDefName, goalQty,
+                                                                               reward, durationMinutes, title, description, Actor);
+            reason = why;
+            return ok;
+        }
+
+        public bool EndQuest(long questId, out string reason)
+        {
+            (bool ok, string why) = Features.World.WorldEngine.EndWorldQuest(questId, Actor);
+            reason = why;
+            return ok;
+        }
+
+        public bool   IsTaxHoliday()                            => Features.World.WorldStore.IsTaxHoliday();
+        public double MarketPayoutMultiplierFor(string itemDef) => Features.World.WorldStore.MarketPayoutMultiplierFor(itemDef);
+    }
 }

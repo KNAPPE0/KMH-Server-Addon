@@ -126,10 +126,10 @@ namespace KMHServerAddon.Features.Discord
                 Embed eb = new EmbedBuilder()
                     .WithTitle("Purchase complete")
                     .WithDescription(
-                        $"Bought **{boughtQty}× {label}** for `{expected}s`.\n" +
+                        $"Bought **{boughtQty}× {DiscordText.Escape(label)}** for `{expected}s`.\n" +
                         "Items delivered to your treasury.")
                     .AddField("Listing", $"#{listingId}", inline: true)
-                    .AddField("Seller",  sellerUsername,  inline: true)
+                    .AddField("Seller",  DiscordText.Escape(sellerUsername),  inline: true)
                     .WithColor(new Color(0x8C, 0xDC, 0x8C))
                     .WithCurrentTimestamp()
                     .Build();
@@ -251,7 +251,7 @@ namespace KMHServerAddon.Features.Discord
                     sb.Append("`").Append(itemRaw).Append("` matches multiple items - be more specific:\n");
                     foreach (string c in candidates)
                     {
-                        sb.Append("• **").Append(ItemLabelCache.LabelFor(c))
+                        sb.Append("• **").Append(DiscordText.Escape(ItemLabelCache.LabelFor(c)))
                           .Append("** _(").Append(c).Append(")_\n");
                     }
                     await raw.Channel.SendMessageAsync(sb.ToString()).ConfigureAwait(false);
@@ -285,14 +285,14 @@ namespace KMHServerAddon.Features.Discord
                     System.Text.StringBuilder vb = new System.Text.StringBuilder();
                     vb.Append("You have multiple variants of that item - add a quality word (or use the in-game marketplace):\n");
                     foreach (string v in variants)
-                        vb.Append("• **").Append(ItemLabelCache.LabelFor(v)).Append("**\n");
+                        vb.Append("• **").Append(DiscordText.Escape(ItemLabelCache.LabelFor(v))).Append("**\n");
                     await raw.Channel.SendMessageAsync(vb.ToString()).ConfigureAwait(false);
                     return;
                 }
                 else if (requestedQuality > 0)
                 {
                     await raw.Channel.SendMessageAsync(
-                        $"No **{Util.ItemKey.QualityName(requestedQuality)}** {ItemLabelCache.LabelFor(defName)} in your treasury.")
+                        $"No **{Util.ItemKey.QualityName(requestedQuality)}** {DiscordText.Escape(ItemLabelCache.LabelFor(defName))} in your treasury.")
                         .ConfigureAwait(false);
                     return;
                 }
@@ -329,9 +329,9 @@ namespace KMHServerAddon.Features.Discord
                 Embed eb = new EmbedBuilder()
                     .WithTitle("Listed for sale")
                     .WithDescription(
-                        $"**{qty}× {sellLabel}** @ `{price}s`/ea  ·  total `{qty * (long)price}s`")
+                        $"**{qty}× {DiscordText.Escape(sellLabel)}** @ `{price}s`/ea  ·  total `{qty * (long)price}s`")
                     .AddField("Listing", $"#{id}", inline: true)
-                    .AddField("Seller",  caller,  inline: true)
+                    .AddField("Seller",  DiscordText.Escape(caller),  inline: true)
                     .WithColor(new Color(0xFF, 0xC4, 0x61))
                     .WithCurrentTimestamp()
                     .Build();
