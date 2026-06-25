@@ -13,6 +13,9 @@ namespace KMHServerAddon.Features.Enforcement
     // if AdminBypass is on, connected admins.
     internal class EnforcementConfig
     {
+        // Schema version for forward-compatible migrations (absent = 1). Changes so far are additive.
+        public int      SchemaVersion { get; set; } = 1;
+
         public bool     Enabled     { get; set; } = false;
         public bool     AdminBypass { get; set; } = true;
         // On: the client merges each config so the server's gameplay fields win

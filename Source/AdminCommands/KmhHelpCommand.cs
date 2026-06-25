@@ -5,10 +5,9 @@ using KMHServerAddon.Diagnostics;
 
 namespace KMHServerAddon.AdminCommands
 {
-    // Surfaces the KMH command family in RWT's own /help. RWT's /help iterates CMD_Base.ChatCommands; the real KMH
-    // commands are Harmony-intercepted on PM_Chat.Receive (and swallowed before dispatch), so they never register
-    // themselves there. We add a single "/kmh" entry so /help lists it, and a dedicated intercept (below) so bare
-    // "/kmh" and "/kmh help" always print the command list regardless of how RWT matches chat commands
+    // Surfaces the KMH command family in RWT's /help. The real KMH commands are Harmony-intercepted on
+    // PM_Chat.Receive (swallowed before dispatch), so they never self-register; we add one "/kmh" entry for the
+    // listing plus an intercept (below) so bare "/kmh" and "/kmh help" always print the command list.
     internal static class KmhHelpCommand
     {
         private static bool _registered;

@@ -5,13 +5,10 @@ using KMHServerAddon.Diagnostics;
 
 namespace KMHServerAddon.AdminCommands
 {
-    // Runs ANY registered server console command (RWT's own + KMH's) and returns its output as text - so the
-    // Discord console can drive the full server terminal, not just KMH subcommands
-    //
-    // RWT routes console output through Printer's settable OnMessage/OnWarning/ OnError/OnTitle delegates. We
-    // temporarily wrap them to tee output into a buffer (still forwarding to the real console), dispatch the
-    // command the same way RWT's private ParseCommand does (find by Prefix in CMD_Base. Commands, set
-    // CommandParameters, call Action), then restore the delegates
+    // Runs ANY registered server console command (RWT's own + KMH's) and returns its output as text, so the Discord
+    // console can drive the full terminal. We temporarily wrap Printer's OnMessage/Warning/Error/Title delegates to
+    // tee output into a buffer (still forwarding to the real console), dispatch like RWT's private ParseCommand
+    // (match Prefix in CMD_Base.Commands, set CommandParameters, call Action), then restore the delegates.
     internal static class ConsoleExecutor
     {
         // Serialize runs so two Discord console calls don't tangle the capture.

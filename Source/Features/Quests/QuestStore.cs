@@ -374,7 +374,7 @@ namespace KMHServerAddon.Features.Quests
             }
 
             // Cross-feature: leaderboard + reputation credit on the claimer.
-            PlayerStats.PlayerStatsStore.BumpQuestsCompleted(claimerUsername);
+            PlayerStats.PlayerStatsStore.RecordContractCompleted(claimerUsername, kind);
             Reputation.ReputationStore.RecordCompleted(claimerUsername);
             // Poster's treasury just received the delivered items.
             posterAffected = poster;
@@ -503,6 +503,7 @@ namespace KMHServerAddon.Features.Quests
 
             int bountySilver;
             string claimer;
+            string kind = "";
             Dictionary<string, int> bountyItems;
             lock (_lock)
             {
@@ -515,6 +516,7 @@ namespace KMHServerAddon.Features.Quests
                     return false;
                 bountySilver = q.BountySilver;
                 claimer      = q.ClaimedByUsername;
+                kind         = q.Kind;
                 bountyItems  = new Dictionary<string, int>(q.BountyItems, StringComparer.OrdinalIgnoreCase);
 
                 // Flip to Completed + record the payout atomically with the eligibility check so a concurrent
@@ -536,7 +538,7 @@ namespace KMHServerAddon.Features.Quests
 
             if (!string.IsNullOrEmpty(claimer))
             {
-                PlayerStats.PlayerStatsStore.BumpQuestsCompleted(claimer);
+                PlayerStats.PlayerStatsStore.RecordContractCompleted(claimer, kind);
                 Reputation.ReputationStore.RecordCompleted(claimer);
             }
             claimerAffected = claimer;
@@ -581,6 +583,7 @@ namespace KMHServerAddon.Features.Quests
             if (ok)
             {
                 Reputation.ReputationStore.RecordAbandoned(claimerUsername);
+                PlayerStats.PlayerStatsStore.RecordContractFailed(claimerUsername);
                 SaveToDisk();
                 posterAffected = poster;
                 Extensibility.KmhEventBus.Instance.RaiseQuestClaimed(new KMH.Sdk.Server.Events.QuestClaimedEvent { QuestId = questId, ClaimerUsername = "", PosterUsername = poster ?? "" });
@@ -715,7 +718,7 @@ namespace KMHServerAddon.Features.Quests
                 DepositBountyItems(items, claimer, $"quest #{questId} bounty (reviewed by {posterUsername})");
                 if (!string.IsNullOrEmpty(claimer))
                 {
-                    PlayerStats.PlayerStatsStore.BumpQuestsCompleted(claimer);
+                    PlayerStats.PlayerStatsStore.RecordContractCompleted(claimer, "");
                     Reputation.ReputationStore.RecordCompleted(claimer);
                 }
                 Extensibility.KmhEventBus.Instance.RaiseQuestApproved(new KMH.Sdk.Server.Events.QuestApprovedEvent { QuestId = questId, PosterUsername = posterUsername, ClaimerUsername = claimer ?? "", BountyPaidSilver = bounty });
@@ -723,7 +726,10 @@ namespace KMHServerAddon.Features.Quests
             else
             {
                 if (!string.IsNullOrEmpty(claimer))
+                {
                     Reputation.ReputationStore.RecordProofRejected(claimer);
+                    PlayerStats.PlayerStatsStore.RecordContractFailed(claimer);
+                }
                 // Poster eats a small penalty to discourage frivolous rejection.
                 Reputation.ReputationStore.RecordRejectedAsPoster(posterUsername);
             }
@@ -761,6 +767,7 @@ namespace KMHServerAddon.Features.Quests
         public static void SaveToDisk()
         {
             PersistedState state = new PersistedState();
+            long seq;
             lock (_lock)
             {
                 state.Quests                    = new List<QuestEntry>(_byId.Values);
@@ -768,8 +775,9 @@ namespace KMHServerAddon.Features.Quests
                 state.LifetimeQuestsPosted      = _lifetimeQuestsPosted;
                 state.LifetimeQuestsCompleted   = _lifetimeQuestsCompleted;
                 state.LifetimeBountySilverPaid  = _lifetimeBountySilverPaid;
+                seq = JsonFileStore.NextSequence(); // ticket under the lock = snapshot order, so an older save can't clobber a newer
             }
-            JsonFileStore.Save(KmhDataPaths.QuestsFile, state);
+            JsonFileStore.Save(KmhDataPaths.QuestsFile, state, seq);
         }
 
         private class PersistedState

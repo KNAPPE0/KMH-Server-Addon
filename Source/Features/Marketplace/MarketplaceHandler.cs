@@ -3,14 +3,9 @@ using KMHServerAddon.SubProtocol;
 
 namespace KMHServerAddon.Features.Marketplace
 {
-    // Server-side handler for kmh.marketplace.* - counterpart to the patch mod's
-    // KMHPatch.Features.Marketplace.MarketplaceHandler
-    //
-    // Snapshot strategy:
-    //   - On Request, send caller-scoped snapshot.
-    //   - On any mutation (post / buy / cancel), broadcast a fresh
-    // snapshot to EVERY verified client so all open marketplace dialogs refresh immediately. Cheap - listings list
-    // is small
+    // Server-side handler for kmh.marketplace.* (counterpart to the client's MarketplaceHandler). On Request, send a
+    // caller-scoped snapshot; on any mutation (post/buy/cancel), broadcast a fresh snapshot to every verified client
+    // so all open dialogs refresh (cheap - the listings list is small).
     internal static class MarketplaceHandler
     {
         public static void Register()
@@ -75,6 +70,10 @@ namespace KMHServerAddon.Features.Marketplace
                 // Seller's treasury also changed - push if they're online so their Treasury dialog updates
                 // immediately rather than after the 8s auto-refresh tick
                 PushTreasuryTo(sellerUsername);
+                // Tell the seller their listing sold (toast if online, queued letter if not) - skip on self-buy.
+                if (!string.Equals(sellerUsername, username, System.StringComparison.OrdinalIgnoreCase))
+                    Features.Notifications.KmhMail.ToUser(sellerUsername, "positive", "Marketplace sale",
+                        "One of your marketplace listings sold - the silver is in your treasury.");
             }
             else
             {

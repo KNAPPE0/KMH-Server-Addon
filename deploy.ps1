@@ -41,15 +41,35 @@ if (-not (Test-Path $exe)) { throw "Published exe not found at $exe" }
 $leaked = Get-ChildItem $pub -File | Where-Object { $_.Name -in @("GameServer.dll","Shared.dll","TCPNetwork.dll","MessagePack.dll","Mono.Nat.dll") }
 if ($leaked) { throw "RWT assemblies leaked into the publish: $($leaked.Name -join ', ') - check Private=False on the RWT references." }
 
-# --- assemble the release folder: just the exe + setup + templates ---
+# --- assemble the release folder: the exe + setup + KMH-Data templates (incl. icons) ---
 if (Test-Path $Deploy) { Remove-Item -Recurse -Force "$Deploy\*" } else { New-Item -ItemType Directory -Path $Deploy -Force | Out-Null }
 Copy-Item $exe $Deploy -Force
 
+# Stage the KMH-Data starter folder. The source is tracked lowercase (Templates/kmh-data)
+# so git stays clean on case-insensitive Windows; the release always ships it PascalCase
+# (KMH-Data) to match what the addon reads at runtime (KmhDataPaths), so a case-sensitive
+# host (Linux) finds it too. Copy contents into an explicit KMH-Data folder rather than
+# copying the folder by name, so the case is fixed regardless of the source's tracked case.
+$DataDst = Join-Path $Deploy "KMH-Data"
+New-Item -ItemType Directory -Path $DataDst -Force | Out-Null
 $TemplateData = Join-Path $PSScriptRoot "Templates\kmh-data"
 if (Test-Path $TemplateData) {
-    Write-Host "[deploy] Staging kmh-data/ templates"
-    Copy-Item $TemplateData $Deploy -Recurse -Force
+    Write-Host "[deploy] Staging KMH-Data/ templates"
+    Copy-Item (Join-Path $TemplateData "*") $DataDst -Recurse -Force
 }
+
+# Bundled Discord embed icons go inside KMH-Data/Icons - the exact folder the addon
+# reads at runtime (KmhDataPaths.IconsDir). It's auto-created on first boot, but
+# pre-filling it here means embeds have art out of the box and owners see the folder
+# they're meant to customize. Sourced from the committed Source/Assets/Icons set.
+$IconsSrc = Join-Path $PSScriptRoot "Source\Assets\Icons"
+if (Test-Path $IconsSrc) {
+    $IconsDst = Join-Path $DataDst "Icons"
+    New-Item -ItemType Directory -Path $IconsDst -Force | Out-Null
+    Copy-Item (Join-Path $IconsSrc "*") $IconsDst -Recurse -Force
+    Write-Host "[deploy] Staging KMH-Data/Icons (bundled embed icons)"
+}
+
 $Setup = Join-Path $PSScriptRoot "SETUP.txt"
 if (Test-Path $Setup) { Copy-Item $Setup $Deploy -Force }
 

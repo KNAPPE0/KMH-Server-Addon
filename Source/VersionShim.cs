@@ -24,9 +24,24 @@ namespace KMHServerAddon
     internal static class RwtCompat
     {
 #if RWT_NEW
-        public const PacketHeader ChatHeader = PacketHeader.Chat;
+        private const string       ChatHeaderName     = "Chat";
+        private const PacketHeader ChatHeaderFallback = PacketHeader.Chat;
 #else
-        public const PacketHeader ChatHeader = PacketHeader.ChatManager;
+        private const string       ChatHeaderName     = "ChatManager";
+        private const PacketHeader ChatHeaderFallback = PacketHeader.ChatManager;
 #endif
+        private static PacketHeader? _chatHeader;
+
+        // Resolve by name at runtime; RWT renumbers PacketHeader between builds so a baked ordinal mis-tags KMH chat
+        public static PacketHeader ChatHeader
+        {
+            get
+            {
+                if (_chatHeader.HasValue) return _chatHeader.Value;
+                try { _chatHeader = (PacketHeader)System.Enum.Parse(typeof(PacketHeader), ChatHeaderName); }
+                catch { _chatHeader = ChatHeaderFallback; }
+                return _chatHeader.Value;
+            }
+        }
     }
 }

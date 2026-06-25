@@ -187,7 +187,7 @@ namespace KMHServerAddon.Features.Discord
 
             string label = ItemLabelCache.LabelFor(listing.ItemDefName, listing.StuffDefName, listing.QualityIndex);
             await component.FollowupAsync(
-                $"Bought **{boughtQty}× {label}** for `{expected}s`. Items delivered to your treasury.",
+                $"Bought **{boughtQty}× {DiscordText.Escape(label)}** for `{expected}s`. Items delivered to your treasury.",
                 ephemeral: true).ConfigureAwait(false);
             ServerLog.Info(
                 $"Discord: {caller} bought x{boughtQty} of listing #{listingId} from {sellerUsername} via button");

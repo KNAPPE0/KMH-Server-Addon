@@ -68,6 +68,7 @@ namespace KMHServerAddon.Features.Discord
         {
             public bool Allow       { get; set; } = false;  // /kmh console run usable at all
             public bool RequireRole { get; set; } = true;   // ...and only for a ConsoleAccess role
+            public bool LiveFeed    { get; set; } = true;   // stream the live server console into the Admin channel
         }
 
         // ---- flat accessors the features read ----
@@ -104,6 +105,8 @@ namespace KMHServerAddon.Features.Discord
         // console gating
         [JsonIgnore] public bool AllowConsoleCommands => Console?.Allow       ?? false;
         [JsonIgnore] public bool RequireConsoleRole   => Console?.RequireRole ?? true;
+        // Live console feed only runs when its toggle is on AND an Admin channel is set (no channel = no feed).
+        [JsonIgnore] public bool ConsoleLiveFeed      => (Console?.LiveFeed ?? true) && AdminChannelId != 0;
 
         // leaderboard / showcase cadence - sensible fixed defaults (kept out of the config to keep it lean; change
         // here if a server ever needs to)
@@ -173,7 +176,8 @@ namespace KMHServerAddon.Features.Discord
 
   ""Console"": {
     ""Allow"": false,
-    ""RequireRole"": true
+    ""RequireRole"": true,
+    ""LiveFeed"": true
   },
 
   ""UseBundledIcons"": true

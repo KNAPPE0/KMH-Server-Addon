@@ -223,6 +223,23 @@ namespace KMHServerAddon.Features.Quests
             }
         }
 
+        // Admin recovery for a stuck quest: force-expire it (refunds the poster's escrowed bounty), push the poster's
+        // treasury + an offline-safe notice, rebroadcast. Returns a console/chat-ready summary line.
+        public static string AdminCancel(long id)
+        {
+            if (!QuestStore.ExpireQuest(id, out string poster))
+                return $"Quest #{id} not found.";
+            ServerLog.Info($"Quest #{id} cancelled by admin (bounty refunded to {poster}).");
+            BroadcastSnapshot();
+            if (!string.IsNullOrEmpty(poster))
+            {
+                SendTreasurySnapshotToUsername(poster);
+                Notifications.KmhMail.ToUser(poster, "neutral", "Quest cancelled",
+                    "An admin cancelled your posted quest - any escrowed bounty was refunded to your treasury.");
+            }
+            return $"Quest #{id} cancelled - bounty refunded to {(string.IsNullOrEmpty(poster) ? "(poster)" : poster)}.";
+        }
+
         // Send a fresh treasury snapshot to a specific username if online. Caller-scoped so the recipient's
         // CanDeposit/CanWithdraw reflect their own permissions on their own vault
         private static void SendTreasurySnapshotToUsername(string username)

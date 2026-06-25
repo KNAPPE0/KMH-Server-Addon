@@ -5,19 +5,11 @@ using System.Runtime.Loader;
 
 namespace KMHServerAddon
 {
-    // Entry point + launcher (StartupObject in csproj).
-    //
-    // KMH does NOT ship or modify RimWorld Together. The server owner drops KMHServerAddon.exe next to the official
-    // single-file GameServer.exe and runs the addon. We extract RWT's managed assemblies out of GameServer.exe at
-    // runtime, load them into THIS process, Harmony-patch them, then invoke RWT's own Main. We redistribute nothing
-    // of RWT's
-    //
-    // Two things make Harmony work against the official build:
-    //   1. We run framework-dependent (on the system .NET 8 runtime), so
-    // Harmony/MonoMod can find clrjit normally - it cannot inside a self-contained single-file process
-    //   2. RWT's official assemblies are ReadyToRun (precompiled native) images
-    // that MonoMod can't patch, so we re-launch ourselves once with DOTNET_ReadyToRun=0, which makes the runtime
-    // JIT plain IL instead
+    // Entry point + launcher (StartupObject). KMH ships nothing of RimWorld Together: the owner drops
+    // KMHServerAddon.exe next to the official GameServer.exe; we extract RWT's assemblies at runtime, Harmony-patch
+    // them, then call RWT's own Main. Two requirements make Harmony work on the official build: (1) run
+    // framework-dependent so MonoMod can find clrjit (it can't inside a self-contained exe), and (2) re-launch once
+    // with DOTNET_ReadyToRun=0 so the runtime JITs plain IL instead of RWT's un-patchable ReadyToRun images.
     internal static class Bootstrap
     {
         private const string ReExecMarker = "KMH_REEXEC";
@@ -31,15 +23,9 @@ namespace KMHServerAddon
 
             string dir = AppContext.BaseDirectory;
             string cache = Path.Combine(dir, ".rwt-runtime");
-            // Windows ships GameServer.exe; Linux/macOS ship a GameServer binary.
-            string gameServerExe = File.Exists(Path.Combine(dir, "GameServer.exe"))
-                ? Path.Combine(dir, "GameServer.exe")
-                : Path.Combine(dir, "GameServer");
-
-            // Resolve RWT (and its deps) from the extraction cache when the runtime asks for them. Newtonsoft is
-            // intentionally not extracted - we use the copy bundled with us, so there's only one in-process.
-            // Single-file hosts don't probe loose DLLs next to the exe, so check both the server folder and the
-            // extraction cache
+            // Real RWT binary to load assemblies from. If this launcher is named GameServer, skip self and use GameServer.real / GameServer.rwt / RwtServer instead.
+            string gameServerExe = FindRwtServerFile(dir);
+            // Resolve RWT/deps from the server folder or extraction cache. Keep Newtonsoft bundled with us to avoid duplicate in-process copies.
             AssemblyLoadContext.Default.Resolving += (ctx, name) =>
             {
                 try
@@ -70,10 +56,6 @@ namespace KMHServerAddon
                     }
                 }
             }
-
-            // Hand off to the build matching the server generation found. This exe is compiled against the old API
-            // (Shared/TCPNetwork); a new server (RTShared/RTNetwork) runs the embedded payload compiled against the
-            // new API instead. Same source either way
             string gen = DetectGeneration(dir, cache);
             if (gen == null) { PrintNeedGameServer(dir); return 1; }
             if (gen == "old")
@@ -82,6 +64,22 @@ namespace KMHServerAddon
                 return Main_.RunAndStartServer(args);
             }
             return RunNewGenerationPayload(args);
+        }
+        private static string FindRwtServerFile(string dir)
+        {
+            string self = "";
+            try { self = Path.GetFullPath(Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule?.FileName ?? ""); }
+            catch { /* best effort */ }
+
+            foreach (string name in new[] { "GameServer.exe", "GameServer", "GameServer.real", "GameServer.rwt", "RwtServer" })
+            {
+                string p = Path.Combine(dir, name);
+                if (!File.Exists(p)) continue;
+                if (!string.IsNullOrEmpty(self) && string.Equals(Path.GetFullPath(p), self, StringComparison.OrdinalIgnoreCase))
+                    continue; // that's us, not RWT
+                return p;
+            }
+            return Path.Combine(dir, "GameServer.exe"); // doesn't exist - surfaces the "need GameServer" message
         }
 
         // "old" = Shared/TCPNetwork (26.5.24.1), "new" = RTShared/RTNetwork (26.6.9.1+), null = no usable server

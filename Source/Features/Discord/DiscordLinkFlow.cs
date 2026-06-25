@@ -4,22 +4,10 @@ using System.Security.Cryptography;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // Short-lived, single-use codes for binding an in-game username to a Discord identity
-    //
-    // Flow:
-    //   1. In-game player runs /kmh link in chat. Patch_PM_Chat_LinkCommands
-    // calls IssueCodeFor(username); server echoes the code back to the player via PM_Chat.SendConsoleMessage. TTL =
-    // 10 minutes
-    //   2. Player runs `!kmh-link <code>` in Discord (DM or allowed guild).
-    //      DiscordBridge.OnMessage calls TryConsume(code, out username).
-    //   3. On consume, LinkedAccountsStore.SetLink is fired and the
-    //      snapshot broadcasts to every connected patch-mod client.
-    //
-    // Single-use: TryConsume removes the entry. Stale codes are reaped lazily on every Issue / Consume call - the
-    // pending map stays small, so a background timer would be overkill
-    //
-    // Issuing a new code for a username already in flight invalidates the previous one. Player gets exactly one
-    // outstanding code at a time
+    // Short-lived, single-use codes for binding an in-game username to a Discord identity. Flow: /kmh link issues a
+    // code (10-min TTL); `!kmh-link <code>` in Discord consumes it, which fires LinkedAccountsStore.SetLink and
+    // broadcasts the snapshot. Single-use (TryConsume removes it); stale codes are reaped lazily on Issue/Consume;
+    // a new code for the same username invalidates the previous one (one outstanding code per player).
     internal static class DiscordLinkFlow
     {
         private static readonly object _lock = new object();

@@ -1,9 +1,11 @@
 KMH Discord embed icons
 =======================
 
-This is the dedicated folder for the icons the bot attaches to its Discord
-embeds. It ships next to the addon exe (copied on build), so the icons travel
-with the server - no external image hosting needed.
+This is KMH-Data/Icons - the one folder the bot reads its embed icons from. It
+ships pre-filled (this set is generated into KMH-Data/Icons on every build and
+packaged in every release) and the addon reads straight from here, so the icons
+travel with the server - no external image hosting needed. Drop your own PNGs
+here to override any of them.
 
 How it works
 ------------

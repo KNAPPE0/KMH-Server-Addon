@@ -4,19 +4,11 @@ using KMHServerAddon.Diagnostics;
 
 namespace KMHServerAddon.SubProtocol
 {
-    // Server-side router for KMH sub-protocol traffic - counterpart to the patch mod's
-    // KMHPatch.SubProtocol.KmhDispatcher
-    //
-    // Inbound flow: Patch_PM_Chat_KmhIntercept (Harmony Prefix on PM_Chat.Receive) identifies KMH-tagged chat by
-    // Username and calls HandleInbound; we parse the envelope and dispatch to the registered handler. Handlers
-    // receive both the ServerClient (for authenticated identity + reply target) and the envelope
-    //
-    // Outbound flow: feature code calls SendTo(client, kind, data); we serialize an envelope, wrap it in PKT_Chat
-    // tagged with SystemUsername, and enqueue on that client's listener
-    //
-    // Security note: handlers must trust ServerClient.UserFile.Username as the authenticated identity, NOT anything
-    // inside the envelope. A malicious client could fake KMH-tagged chat but they can only ever operate as
-    // themselves - the protocol routing doesn't grant impersonation
+    // Server-side router for KMH sub-protocol traffic (counterpart to the client's KmhDispatcher). Inbound:
+    // Patch_PM_Chat_KmhIntercept identifies KMH-tagged chat and calls HandleInbound, which parses the envelope and
+    // dispatches to the registered handler. Outbound: SendTo serializes an envelope into a PKT_Chat tagged with
+    // SystemUsername. Security: handlers must trust ServerClient.UserFile.Username as identity, never an envelope
+    // field - a client can fake KMH chat but only ever as themselves (no impersonation).
     public static class KmhRouter
     {
         private static readonly Dictionary<string, Action<ServerClient, KmhEnvelope>> Handlers
@@ -67,6 +59,13 @@ namespace KMHServerAddon.SubProtocol
                 ServerLog.Warn($"Malformed envelope from {client?.GetData<UserFile>()?.Username ?? "?"}");
                 return;
             }
+            HandleInbound(client, env);
+        }
+
+        // Dispatch a parsed envelope - shared by the chat path and the KMH API transport. Never throws.
+        public static void HandleInbound(ServerClient client, KmhEnvelope env)
+        {
+            if (env == null || string.IsNullOrEmpty(env.Kind)) return;
 
             if (!Handlers.TryGetValue(env.Kind, out Action<ServerClient, KmhEnvelope> handler))
             {
@@ -97,7 +96,12 @@ namespace KMHServerAddon.SubProtocol
             try
             {
                 KmhEnvelope env = new KmhEnvelope(kind, data);
-                PKT_Chat    pkt = new PKT_Chat
+
+                // prefer the API transport if this client is on it; else chat
+                if (Features.Transport.KmhApiServer.TrySend(client.GetData<UserFile>()?.Username, env))
+                    return true;
+
+                PKT_Chat pkt = new PKT_Chat
                 {
                     Username  = KmhProtocol.SystemUsername,
                     Message   = env.Serialize(),
@@ -126,14 +130,21 @@ namespace KMHServerAddon.SubProtocol
         // mid-session)
         public static bool SendToUsername(string username, string kind, object data)
         {
-            if (string.IsNullOrEmpty(username)) return false;
+            ServerClient c = ResolveClient(username);
+            return c != null && SendTo(c, kind, data);
+        }
+
+        // verified online client by username, or null. Used by SendToUsername and the KMH API transport.
+        public static ServerClient ResolveClient(string username)
+        {
+            if (string.IsNullOrEmpty(username)) return null;
             foreach (ServerClient c in Network.ServerClients.Keys)
             {
                 if (c?.IsVerified != true) continue;
                 if (string.Equals(c.GetData<UserFile>()?.Username, username, System.StringComparison.OrdinalIgnoreCase))
-                    return SendTo(c, kind, data);
+                    return c;
             }
-            return false;
+            return null;
         }
     }
 }

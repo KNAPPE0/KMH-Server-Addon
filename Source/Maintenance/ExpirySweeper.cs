@@ -7,12 +7,7 @@ using KMHServerAddon.SubProtocol;
 
 namespace KMHServerAddon.Maintenance
 {
-    // Background sweeper that auto-cancels expired marketplace listings and open quests once per minute. Runs on a
-    // fire-and-forget Task, cancellable via CancellationTokenSource if we ever want a clean shutdown hook (RWT's
-    // own server doesn't have one - process just exits - so cancellation lives here mostly as defensive plumbing)
-    //
-    // Sweep cost is bounded by the count of items in each store; the typical "fewer than a hundred open listings +
-    // quests" case completes in microseconds. Heavy servers would still complete in single-digit milliseconds
+    // Sweeps expired marketplace listings and open quests once per minute; fire-and-forget, lightweight, and cancellable for safety.
     internal static class ExpirySweeper
     {
         private static readonly TimeSpan SweepInterval = TimeSpan.FromMinutes(1);
@@ -28,8 +23,7 @@ namespace KMHServerAddon.Maintenance
             ServerLog.Verbose($"ExpirySweeper started (interval {SweepInterval.TotalSeconds:F0}s)");
         }
 
-        // Defensive - not currently called (RWT exits without cleanup), but useful if a future host wants graceful
-        // shutdown
+        // Defensive - not currently called (RWT exits without cleanup), but useful if a future host wants graceful shutdown
         public static void Stop()
         {
             _cts?.Cancel();
@@ -56,8 +50,7 @@ namespace KMHServerAddon.Maintenance
             }
         }
 
-        // One full sweep. Iterates each store's expired-ids list outside the store lock, then calls Expire* per id.
-        // Pushes secondary- party treasury snapshots if the affected party is online
+        // Sweeps expired IDs outside store locks, expires each item, and pushes affected online treasury snapshots.
         private static void Tick()
         {
             long now = DateTime.UtcNow.Ticks;
@@ -99,6 +92,32 @@ namespace KMHServerAddon.Maintenance
                 foreach (string u in sitePaid) PushTreasuryTo(u);
                 Features.Sites.SiteHandler.BroadcastSnapshot();
             }
+
+            // --- auctions ---
+            bool auctionsChanged = false;
+            foreach (long id in Features.Auctions.AuctionStore.CollectEndedIds(now))
+            {
+                Features.Auctions.AuctionStore.SettleOutcome o = Features.Auctions.AuctionStore.SettleNow(id);
+                if (!o.Done) continue;
+                auctionsChanged = true;
+                foreach (string u in o.Affected) PushTreasuryTo(u);
+                Features.Auctions.AuctionHandler.NotifySettled(o);   // won / sold / no-bid notices
+            }
+            if (auctionsChanged) Features.Auctions.AuctionHandler.BroadcastSnapshot();
+
+            // --- want-to-buy board ---
+            bool wantsChanged = false;
+            foreach (long id in Features.WantBoard.WantStore.CollectEndedIds(now))
+            {
+                Features.WantBoard.WantStore.ExpireOutcome o = Features.WantBoard.WantStore.ExpireRefund(id);
+                if (!o.Done) continue;
+                wantsChanged = true;
+                PushTreasuryTo(o.Buyer);
+                if (o.Refunded > 0)
+                    Features.Notifications.KmhMail.ToUser(o.Buyer, "neutral", "Want expired",
+                        $"Your want expired - {Util.SilverFmt.Format(o.Refunded)} of unspent escrow was refunded to your treasury.");
+            }
+            if (wantsChanged) Features.WantBoard.WantHandler.BroadcastSnapshot();
         }
 
         private static void PushTreasuryTo(string username)

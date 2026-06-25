@@ -5,8 +5,8 @@ using KMHServerAddon.Persistence;
 namespace KMHServerAddon.Features.Reputation
 {
     // Server-authoritative player reputation for the quest economy. Persisted to
-    // KMH-Data/Reputation/Reputation.json.3
-    // fork documented on UserFile but never finished implementing.
+    // KMH-Data/Reputation/Reputation.json. (Supersedes a reputation concept the RWT
+    // fork documented on UserFile but never finished implementing.)
     //
     // Score is a running total re-derived from the raw event counters, so the weighting can change later and
     // Recompute() will reprice every player

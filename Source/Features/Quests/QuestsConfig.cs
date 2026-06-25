@@ -8,6 +8,9 @@ namespace KMHServerAddon.Features.Quests
     // - restart after editing.
     internal sealed class QuestsConfig
     {
+        // Schema version for forward-compatible migrations (absent = 1). Changes so far are additive.
+        public int SchemaVersion       { get; set; } = 1;
+
         public int MaxOpenPerUser      { get; set; } = 10;
         public int MaxTitleLength      { get; set; } = 80;
         public int MaxDescriptionLength { get; set; } = 1024;

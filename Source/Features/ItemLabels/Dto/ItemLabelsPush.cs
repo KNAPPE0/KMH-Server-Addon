@@ -10,5 +10,9 @@ namespace KMHServerAddon.Features.ItemLabels.Dto
     {
         [JsonProperty("labels")]
         public Dictionary<string, string> Labels { get; set; } = new Dictionary<string, string>();
+
+        // defName -> RimWorld BaseMarketValue. Mirror of the patch DTO. Additive: a pre-1.1.0 client omits it.
+        [JsonProperty("values")]
+        public Dictionary<string, long> Values { get; set; } = new Dictionary<string, long>();
     }
 }

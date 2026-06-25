@@ -28,6 +28,8 @@ namespace KMHServerAddon.Extensibility
             ItemLabels      = new ItemLabelsApiImpl();
             Reputation      = new ReputationApiImpl();
             Sites           = new SitesApiImpl();
+            Auctions        = new AuctionApiImpl();
+            World           = new WorldApiImpl();
             Events          = KmhEventBus.Instance;
         }
 
@@ -44,6 +46,8 @@ namespace KMHServerAddon.Extensibility
         public IItemLabelsApi     ItemLabels      { get; }
         public IReputationApi     Reputation      { get; }
         public ISitesApi          Sites           { get; }
+        public IAuctionApi        Auctions        { get; }
+        public IWorldApi          World           { get; }
         public IServerLog         Log             { get; }
         public IKmhEvents         Events          { get; }
 

@@ -15,17 +15,10 @@ using KMHServerAddon.Features.Treasury.Dto;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // Read-only browse commands for the Discord bridge - the surfaces that don't need cross-feature mutations:
-    //
-    // !kmh-market [page|mine|<query>] - paginated open listings. !kmh-quests [page] - paginated open quests.
-    // !kmh-treasury - caller's treasury (needs link).
-    //
-    // Mutating commands (!buy, !sell, !cancel, !showcase, !wtb, button-driven Buy) live in DiscordTradeCommands.cs
-    // - they need an ItemLabelCache for friendly-name resolution and a Discord-snowflake store on
-    // LinkedAccountsStore.
-    //
-    // All commands are visibility-aware: unlinked callers see only public listings/quests; linked callers also see
-    // guild-only items posted by their guildmates or allies.
+    // Read-only browse commands for the Discord bridge (no cross-feature mutation): !kmh-market [page|mine|<query>],
+    // !kmh-quests [page], !kmh-treasury (needs link). Mutating commands (!buy/!sell/!cancel/!showcase/!wtb, buy
+    // buttons) live in DiscordTradeCommands.cs. All commands are visibility-aware: unlinked callers see only public
+    // listings/quests; linked callers also see guild-only items posted by their guildmates or allies.
     internal static class DiscordBrowseCommands
     {
         private const int PageSize = 8;
@@ -140,9 +133,9 @@ namespace KMHServerAddon.Features.Discord
                 string label  = ItemLabelCache.LabelFor(l.ItemDefName, l.StuffDefName, l.QualityIndex);
                 string emoji  = DiscordItemIconMap.EmojiFor(l.ItemDefName);
                 eb.AddField(
-                    $"{emoji} #{l.Id} · {label}",
+                    $"{emoji} #{l.Id} · {DiscordText.Escape(label)}",
                     $"**{l.RemainingQty}**× @ `{SilverFmt.Format(l.UnitPriceSilver)}/ea` · total `{SilverFmt.Format((long)l.UnitPriceSilver * l.RemainingQty)}`\n" +
-                    $"by **{l.SellerUsername}** · {expiry}",
+                    $"by **{DiscordText.Escape(l.SellerUsername)}** · {expiry}",
                     inline: false);
             }
 
@@ -198,10 +191,10 @@ namespace KMHServerAddon.Features.Discord
                 QuestEntry q = open[i];
                 string kindLabel = q.Kind == QuestEntry.KindBounty ? "Bounty" : "Deliver";
                 string title     = string.IsNullOrEmpty(q.Title) ? "(no title)" : q.Title;
-                string body      = $"**{kindLabel}** · bounty `{SilverFmt.Format(q.BountySilver)}` · by **{q.PosterUsername}**";
+                string body      = $"**{kindLabel}** · bounty `{SilverFmt.Format(q.BountySilver)}` · by **{DiscordText.Escape(q.PosterUsername)}**";
                 if (q.Kind == QuestEntry.KindDeliverItem && !string.IsNullOrEmpty(q.TargetItemDefName))
                 {
-                    body += $"\nTarget: **{q.TargetItemQty}**× {ItemLabelCache.LabelFor(q.TargetItemDefName)}";
+                    body += $"\nTarget: **{q.TargetItemQty}**× {DiscordText.Escape(ItemLabelCache.LabelFor(q.TargetItemDefName))}";
                 }
                 if (!string.IsNullOrEmpty(q.Description))
                 {
@@ -249,7 +242,7 @@ namespace KMHServerAddon.Features.Discord
                 return;
             }
 
-            string ownerLabel = t.IsGuildOwned ? $"guild ({t.OwnerKey})" : "personal vault";
+            string ownerLabel = t.IsGuildOwned ? $"guild ({DiscordText.Escape(t.OwnerKey)})" : "personal vault";
             eb.WithDescription(
                 $"Owner: **{ownerLabel}**\n" +
                 $"Silver: **{t.SilverBalance:N0}s** _(lifetime in: {t.LifetimeSilverIn:N0}, out: {t.LifetimeSilverOut:N0})_");
@@ -329,8 +322,8 @@ namespace KMHServerAddon.Features.Discord
             {
                 MarketplaceListing l = hits[i];
                 eb.AddField(
-                    $"{DiscordItemIconMap.EmojiFor(l.ItemDefName)} #{l.Id} · {ItemLabelCache.LabelFor(l.ItemDefName, l.StuffDefName, l.QualityIndex)}",
-                    $"**{l.RemainingQty}**× @ `{SilverFmt.Format(l.UnitPriceSilver)}/ea` · by **{l.SellerUsername}** · {FormatExpiry(l.ExpiresUtcTicks)}",
+                    $"{DiscordItemIconMap.EmojiFor(l.ItemDefName)} #{l.Id} · {DiscordText.Escape(ItemLabelCache.LabelFor(l.ItemDefName, l.StuffDefName, l.QualityIndex))}",
+                    $"**{l.RemainingQty}**× @ `{SilverFmt.Format(l.UnitPriceSilver)}/ea` · by **{DiscordText.Escape(l.SellerUsername)}** · {FormatExpiry(l.ExpiresUtcTicks)}",
                     inline: false);
             }
             eb.WithFooter(hits.Count > max
@@ -366,7 +359,7 @@ namespace KMHServerAddon.Features.Discord
                     sb.Append("`").Append(query).Append("` matches multiple items - be more specific:\n");
                     foreach (string c in candidates)
                     {
-                        sb.Append("• **").Append(ItemLabelCache.LabelFor(c))
+                        sb.Append("• **").Append(DiscordText.Escape(ItemLabelCache.LabelFor(c)))
                           .Append("** _(").Append(c).Append(")_\n");
                     }
                     await raw.Channel.SendMessageAsync(sb.ToString()).ConfigureAwait(false);
@@ -395,7 +388,7 @@ namespace KMHServerAddon.Features.Discord
 
             if (matches.Count == 0)
             {
-                eb.WithDescription($"_No active listings for **{label}**._");
+                eb.WithDescription($"_No active listings for **{DiscordText.Escape(label)}**._");
                 await raw.Channel.SendMessageAsync(embed: eb.Build()).ConfigureAwait(false);
                 return;
             }
@@ -415,7 +408,7 @@ namespace KMHServerAddon.Features.Discord
                 MarketplaceListing l = matches[i];
                 eb.AddField(
                     $"#{l.Id} · `{SilverFmt.Format(l.UnitPriceSilver)}/ea",
-                    $"**{l.RemainingQty}**× · total `{(long)l.UnitPriceSilver * l.RemainingQty}s` · by **{l.SellerUsername}** · `!kmh-buy {l.Id}`",
+                    $"**{l.RemainingQty}**× · total `{(long)l.UnitPriceSilver * l.RemainingQty}s` · by **{DiscordText.Escape(l.SellerUsername)}** · `!kmh-buy {l.Id}`",
                     inline: false);
             }
 
@@ -469,7 +462,7 @@ namespace KMHServerAddon.Features.Discord
                 string by = string.IsNullOrEmpty(tx.Username) ? "-" : tx.Username;
                 sb.Append(when).Append(" · **").Append(tx.Kind).Append("** · ").Append(what);
                 if (!string.Equals(by, callerUser, StringComparison.OrdinalIgnoreCase))
-                    sb.Append(" · _by ").Append(by).Append('_');
+                    sb.Append(" · _by ").Append(DiscordText.Escape(by)).Append('_');
                 if (!string.IsNullOrEmpty(tx.Note))
                     sb.Append(" · `").Append(tx.Note).Append('`');
                 sb.Append('\n');

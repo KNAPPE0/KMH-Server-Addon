@@ -212,7 +212,8 @@ namespace KMHServerAddon.Features.Sites
         {
             HashSet<string> touched = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             long now = DateTime.UtcNow.Ticks;
-            double xpMult = SitesConfig.Current.WorkerXpMultiplier;
+            // World event: a double-XP event multiplies the configured worker XP rate.
+            double xpMult = SitesConfig.Current.WorkerXpMultiplier * World.WorldStore.WorkerXpMultiplier();
 
             // Plan everything that touches site state (LastReward, XP, shares) UNDER the lock, so we never
             // enumerate a site's workers while a join/leave on another thread mutates them. The actual delivery I/O

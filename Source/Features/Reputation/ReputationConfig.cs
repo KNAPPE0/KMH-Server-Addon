@@ -7,6 +7,9 @@ namespace KMHServerAddon.Features.Reputation
     // with defaults on first boot and clamped on load; applied at startup, so restart after editing
     internal sealed class ReputationConfig
     {
+        // Schema version for forward-compatible migrations (absent = 1). Changes so far are additive.
+        public int SchemaVersion { get; set; } = 1;
+
         // Score deltas per event: reward completing, punish abandoning hardest, then rejected proof, then
         // poster-side rejection.
         public int CompletedWeight        { get; set; } =  1;

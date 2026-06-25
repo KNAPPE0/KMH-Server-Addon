@@ -5,15 +5,9 @@ using KMHServerAddon.Persistence;
 
 namespace KMHServerAddon.Features.Guilds
 {
-    // Server-side guild ledger. Same lock-guarded in-memory pattern as the other feature stores
-    //
-    // Public API includes both wire-side mutations (called from the handler) AND admin entry points (CreateGuild,
-    // AddMember, etc.) for external bootstrap tooling. The patch mod's UI doesn't currently surface a "create
-    // guild" or "join guild" path - those are admin tools / chat commands that live outside the handler
-    //
-    // For v1, the wire mutations operate against existing guild state and reject gracefully when the caller isn't
-    // in any guild. Admins set up guilds via the public Create/Add methods called from a future chat-command
-    // handler or development scripts
+    // Server-side guild ledger, same lock-guarded in-memory pattern as the other stores. Public API covers both the
+    // wire mutations (from the handler) and admin/bootstrap entry points (CreateGuild, AddMember). Wire mutations
+    // operate on existing guild state and reject gracefully when the caller isn't in a guild.
     internal static class GuildStore
     {
         private static readonly object _lock = new object();

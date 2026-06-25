@@ -32,6 +32,14 @@ namespace KMHServerAddon.Extensibility
         public event Action<GuildChangedEvent>     GuildChanged;
         public event Action<ReputationChangedEvent> ReputationChanged;
         public event Action<SiteChangedEvent>      SiteChanged;
+        public event Action<AuctionPostedEvent>    AuctionPosted;
+        public event Action<AuctionBidEvent>       AuctionBid;
+        public event Action<AuctionSettledEvent>   AuctionSettled;
+        public event Action<WorldEventFiredEvent>  WorldEventFired;
+        public event Action<WorldEventEndedEvent>  WorldEventEnded;
+        public event Action<GlobalQuestCreatedEvent>   GlobalQuestCreated;
+        public event Action<GlobalQuestCompletedEvent> GlobalQuestCompleted;
+        public event Action<GlobalQuestExpiredEvent>   GlobalQuestExpired;
 
         // Raise helpers called by KMH internals. Each one walks the delegate chain manually so one throwing
         // subscriber doesn't stop the others - Action<T>.Invoke would short-circuit on first exception
@@ -51,6 +59,14 @@ namespace KMHServerAddon.Extensibility
         internal void RaiseGuildChanged    (GuildChangedEvent     e) => SafeRaise(GuildChanged,    e, nameof(GuildChanged));
         internal void RaiseReputationChanged(ReputationChangedEvent e) => SafeRaise(ReputationChanged, e, nameof(ReputationChanged));
         internal void RaiseSiteChanged     (SiteChangedEvent      e) => SafeRaise(SiteChanged,     e, nameof(SiteChanged));
+        internal void RaiseAuctionPosted   (AuctionPostedEvent    e) => SafeRaise(AuctionPosted,   e, nameof(AuctionPosted));
+        internal void RaiseAuctionBid      (AuctionBidEvent       e) => SafeRaise(AuctionBid,      e, nameof(AuctionBid));
+        internal void RaiseAuctionSettled  (AuctionSettledEvent   e) => SafeRaise(AuctionSettled,  e, nameof(AuctionSettled));
+        internal void RaiseWorldEventFired (WorldEventFiredEvent  e) => SafeRaise(WorldEventFired, e, nameof(WorldEventFired));
+        internal void RaiseWorldEventEnded (WorldEventEndedEvent  e) => SafeRaise(WorldEventEnded, e, nameof(WorldEventEnded));
+        internal void RaiseGlobalQuestCreated  (GlobalQuestCreatedEvent   e) => SafeRaise(GlobalQuestCreated,   e, nameof(GlobalQuestCreated));
+        internal void RaiseGlobalQuestCompleted(GlobalQuestCompletedEvent e) => SafeRaise(GlobalQuestCompleted, e, nameof(GlobalQuestCompleted));
+        internal void RaiseGlobalQuestExpired  (GlobalQuestExpiredEvent   e) => SafeRaise(GlobalQuestExpired,   e, nameof(GlobalQuestExpired));
 
         private static void SafeRaise<T>(Action<T> evt, T payload, string name)
         {

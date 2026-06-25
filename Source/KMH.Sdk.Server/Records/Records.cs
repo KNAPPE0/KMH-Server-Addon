@@ -2,15 +2,9 @@ using System.Collections.Generic;
 
 namespace KMH.Sdk.Server.Records
 {
-    // Read-only record types returned by the API facades. All fields are init-only so handlers can't mutate the
-    // snapshot they were handed. If you need to evolve state, call the corresponding mutation API - don't reach
-    // into a record
-    //
-    // These are intentionally NOT the same types KMH stores internally. The internal store types have wire-DTO
-    // concerns that change
-    // shape across releases. The records here are the SDK contract
+    // Immutable SDK record contracts; use mutation APIs to change state, not the returned snapshots.
 
-    /// <summary>Snapshot of one open marketplace listing.</summary>
+    // Snapshot of one open marketplace listing.
     public sealed class MarketplaceListingRecord
     {
         public long   Id                { get; init; }
@@ -25,7 +19,7 @@ namespace KMH.Sdk.Server.Records
         public string Visibility        { get; init; } = "public";
     }
 
-    /// <summary>One entry in a treasury's recent-transaction log.</summary>
+    // One treasury recent-transaction entry.
     public sealed class TreasuryTransactionRecord
     {
         public long   UtcTicks    { get; init; }
@@ -36,7 +30,7 @@ namespace KMH.Sdk.Server.Records
         public string Note        { get; init; } = "";
     }
 
-    /// <summary>Snapshot of one quest on the board.</summary>
+    // Snapshot of one quest on the board.
     public sealed class QuestRecord
     {
         public long   Id                { get; init; }
@@ -55,7 +49,7 @@ namespace KMH.Sdk.Server.Records
         public long   ExpiresUtcTicks   { get; init; }
     }
 
-    /// <summary>One guild's basic stats for leaderboards / browsing.</summary>
+    // Basic guild stats for leaderboards and browsing.
     public sealed class GuildSummaryRecord
     {
         public string Name           { get; init; } = "";
@@ -63,7 +57,7 @@ namespace KMH.Sdk.Server.Records
         public long   TreasurySilver { get; init; }
     }
 
-    /// <summary>One player's quest reputation: score + tier (Trusted / Neutral / Unreliable).</summary>
+    // Player quest reputation score and tier.
     public sealed class ReputationRecord
     {
         public string Username { get; init; } = "";
@@ -71,7 +65,7 @@ namespace KMH.Sdk.Server.Records
         public string Tier     { get; init; } = "Neutral";
     }
 
-    /// <summary>One custom site: who owns it, what it makes, and its live production.</summary>
+    // Custom site ownership, production type, and live output state.
     public sealed class SiteRecord
     {
         public int    Tile                  { get; init; }
@@ -79,7 +73,7 @@ namespace KMH.Sdk.Server.Records
         public string OwnerGuild            { get; init; } = "";
         public string ItemDefName           { get; init; } = "";
         public int    BaseAmountPerCycle     { get; init; }
-        public string AccessMode            { get; init; } = "";   // guild_only / public / private
+        public string AccessMode            { get; init; } = "";    // guild_only / public / private
         public IReadOnlyList<string> Workers { get; init; } = System.Array.Empty<string>();
         public int    MaxWorkers            { get; init; }
         public double ProductionMultiplier  { get; init; }
@@ -87,7 +81,7 @@ namespace KMH.Sdk.Server.Records
         public double TotalSilverGenerated  { get; init; }
     }
 
-    /// <summary>One player's lifetime stats.</summary>
+    // Player lifetime stats.
     public sealed class PlayerStatRecord
     {
         public string Username           { get; init; } = "";
@@ -100,5 +94,58 @@ namespace KMH.Sdk.Server.Records
         public int    SitesBuilt         { get; init; }
         public long   WorkerXp           { get; init; }
         public long   EconomyScore       { get; init; }
+    }
+
+    // Open auction snapshot with escrowed item and live bidding.
+    public sealed class AuctionRecord
+    {
+        public long   Id                { get; init; }
+        public string SellerUsername    { get; init; } = "";
+        public string SellerTreasuryKey { get; init; } = "";
+        public string ItemDefName       { get; init; } = "";
+        public string StuffDefName      { get; init; } = "";
+        public int    QualityIndex      { get; init; }
+        public int    Qty               { get; init; }
+        public long   StartingBid       { get; init; }
+        public long   MinIncrement      { get; init; }
+        public long   BuyoutSilver      { get; init; }   // 0 = no buyout
+        public long   CurrentBid        { get; init; }   // 0 = no bids yet
+        public string HighBidder        { get; init; } = "";
+        public int    BidCount          { get; init; }
+        public long   ListedUtcTicks    { get; init; }
+        public long   EndsUtcTicks      { get; init; }
+        public string Visibility        { get; init; } = "public";
+    }
+
+    // Live World Engine event; magnitude meaning depends on event type.
+    public sealed class WorldEventRecord
+    {
+        public long   Id              { get; init; }
+        public string Type            { get; init; } = "";   // tax_holiday / market_boom / market_crash / ...
+        public string Title           { get; init; } = "";
+        public string Description     { get; init; } = "";
+        public double Magnitude       { get; init; }
+        public string Target          { get; init; } = "";   // optional def the event scopes to
+        public long   StartedUtcTicks { get; init; }
+        public long   EndsUtcTicks    { get; init; }          // 0 = instantaneous
+    }
+
+    // Server-owned global quest funded by the house pool, separate from player quests.
+    public sealed class ServerQuestRecord
+    {
+        public long   Id            { get; init; }
+        public string Kind          { get; init; } = "";   // cooperative / competitive
+        public string Objective     { get; init; } = "";   // hunt / build / deliver
+        public string Title         { get; init; } = "";
+        public string Description   { get; init; } = "";
+        public string TargetDefName { get; init; } = "";
+        public int    GoalQty       { get; init; }
+        public int    ProgressQty   { get; init; }
+        public long   RewardPool    { get; init; }
+        public string State         { get; init; } = "";   // active / completed / expired
+        public string Winner        { get; init; } = "";   // competitive only
+        public long   EndsUtcTicks  { get; init; }
+        public IReadOnlyDictionary<string, int> Contributors { get; init; }
+            = new Dictionary<string, int>();
     }
 }

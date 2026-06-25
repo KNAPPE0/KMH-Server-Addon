@@ -11,14 +11,10 @@ using KMHServerAddon.Util;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // Turns in-game events into branded Discord embeds. Subscribes to the KmhEventBus (which the feature handlers
-    // already raise onto) so nothing in marketplace / sites / quests / guilds needs to know Discord exists - the
-    // wiring lives entirely here. Each post is gated by the matching Embeds.Post* toggle AND the relevant channel
-    // being set; everything is fire-and-forget via DiscordBridge so a slow/Down Discord never stalls the game
-    // thread that raised the event
-    //
-    // Player join/leave stay with DiscordPlayerAnnouncer (it already posts and dedups those), so we don't double up
-    // here
+    // Turns in-game events into branded Discord embeds by subscribing to the KmhEventBus, so no feature needs to know
+    // Discord exists. Each post is gated by its Post* toggle + a configured channel, and is fire-and-forget via
+    // DiscordBridge so a slow/down Discord never stalls the game thread. Player join/leave stay with
+    // DiscordPlayerAnnouncer (it dedups those), so we don't double up here.
     internal static class DiscordEventPublisher
     {
         private static bool _started;
@@ -69,9 +65,9 @@ namespace KMHServerAddon.Features.Discord
                 if (ch == 0) return;
 
                 EmbedBuilder eb = KmhEmbedBuilder.Base(cfg, "🛒 New listing")
-                    .AddField("Item",   $"{e.Qty}× {ItemLabelCache.LabelFor(e.ItemDefName)}", true)
+                    .AddField("Item",   $"{e.Qty}× {DiscordText.Escape(ItemLabelCache.LabelFor(e.ItemDefName))}", true)
                     .AddField("Price",  $"{SilverFmt.Format(e.UnitPriceSilver)}/ea", true)
-                    .AddField("Seller", string.IsNullOrEmpty(e.SellerUsername) ? "?" : e.SellerUsername, true);
+                    .AddField("Seller", Name(e.SellerUsername), true);
                 DiscordBridge.PostEmbedToChannel(ch, eb, DiscordIcons.Marketplace);
             }
             catch (Exception ex) { ServerLog.Verbose($"Discord: marketplace-post embed failed: {ex.Message}"); }
@@ -87,7 +83,7 @@ namespace KMHServerAddon.Features.Discord
                 if (ch == 0) return;
 
                 EmbedBuilder eb = KmhEmbedBuilder.Base(cfg, "🪙 Item sold")
-                    .AddField("Item",  $"{e.QtyBought}× {ItemLabelCache.LabelFor(e.ItemDefName)}", true)
+                    .AddField("Item",  $"{e.QtyBought}× {DiscordText.Escape(ItemLabelCache.LabelFor(e.ItemDefName))}", true)
                     .AddField("Total", SilverFmt.Format(e.TotalSilverPaid), true)
                     .AddField("Buyer → Seller", $"{Name(e.BuyerUsername)} → {Name(e.SellerUsername)}", true);
                 DiscordBridge.PostEmbedToChannel(ch, eb, DiscordIcons.Marketplace);
@@ -113,12 +109,13 @@ namespace KMHServerAddon.Features.Discord
                     return;
                 }
 
-                // built - best-effort lookup so we can name what it produces.
+                // built - name what it produces. Use the unfiltered by-tile lookup, NOT a visibility-scoped snapshot:
+                // a guild-only site is invisible to an empty caller, which used to drop the Produces field entirely.
                 string produces = "";
                 try
                 {
-                    SiteEntry s = SiteStore.BuildSnapshotFor("")?.Sites?.FirstOrDefault(x => x.Tile == e.Tile);
-                    if (s != null) produces = $"{s.BaseAmountPerCycle}× {ItemLabelCache.LabelFor(s.ItemDefName)}";
+                    SiteEntry s = SiteStore.GetForApi(e.Tile);
+                    if (s != null) produces = $"{s.BaseAmountPerCycle}× {DiscordText.Escape(ItemLabelCache.LabelFor(s.ItemDefName))}";
                 }
                 catch { /* lookup is decoration only */ }
 
@@ -159,7 +156,7 @@ namespace KMHServerAddon.Features.Discord
                 if (ch == 0) return;
 
                 DiscordBridge.PostEmbedToChannel(ch, KmhEmbedBuilder.Base(cfg, "🏰 New guild",
-                    $"**{Name(e.Actor)}** founded the guild **{e.GuildName}**."),
+                    $"**{Name(e.Actor)}** founded the guild **{Name(e.GuildName)}**."),
                     DiscordIcons.Guild);
             }
             catch (Exception ex) { ServerLog.Verbose($"Discord: guild embed failed: {ex.Message}"); }
@@ -173,6 +170,7 @@ namespace KMHServerAddon.Features.Discord
         private static bool ServerEventsOn(DiscordConfig cfg)
             => cfg != null && cfg.IsEnabled && cfg.PostServerEvents;
 
-        private static string Name(string s) => string.IsNullOrEmpty(s) ? "?" : s;
+        // Escapes too - these names land in markdown-rendered embed descriptions/fields.
+        private static string Name(string s) => DiscordText.Escape(string.IsNullOrEmpty(s) ? "?" : s);
     }
 }

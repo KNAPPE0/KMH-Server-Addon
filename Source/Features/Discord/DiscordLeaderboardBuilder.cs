@@ -13,10 +13,10 @@ namespace KMHServerAddon.Features.Discord
     // mangled, lines wrap at word boundaries and stay readable on any width
     internal static class DiscordLeaderboardBuilder
     {
-        public const string DefaultSort = "score";
+        public const string DefaultSort = "wealth";
 
         public static readonly string[] SupportedSorts =
-            { "score", "silver", "sales", "spent", "quests", "posted", "sites", "xp" };
+            { "wealth", "kills", "age", "time", "score", "silver", "sales", "spent", "quests", "posted", "sites", "xp" };
 
         public const string DefaultGuildSort = "members";
         public static readonly string[] SupportedGuildSorts = { "members", "treasury" };
@@ -54,13 +54,15 @@ namespace KMHServerAddon.Features.Discord
             for (int i = 0; i < shown; i++)
             {
                 PlayerLeaderboardEntry e = rows[i];
-                sb.Append(Rank(i)).Append(" **").Append(Escape(e.Username)).Append("**");
+                sb.Append(Rank(i)).Append(" **").Append(DiscordText.Escape(e.Username)).Append("**");
                 if (e.IsLinkedToDiscord) sb.Append(" 🔗");
-                sb.Append(" · ").Append(FormatMetric(ReadMetric(e, key), key)).Append('\n');
+                sb.Append(" · ").Append(FormatMetric(ReadMetric(e, key), key));
+                if (!string.IsNullOrEmpty(e.ColonyName)) sb.Append(" · _").Append(DiscordText.Escape(e.ColonyName)).Append('_');
+                sb.Append('\n');
             }
 
             return new EmbedBuilder()
-                .WithTitle($"🏆 Player Leaderboard — top {shown} by {SortLabel(key)}")
+                .WithTitle($"🏆 Player Standings — top {shown} by {SortLabel(key)}")
                 .WithColor(isFinalized ? FinalColor : LiveColor)
                 .WithDescription(sb.ToString())
                 .WithFooter($"Sorts: {string.Join(" · ", SupportedSorts)}  |  !kmh-rank <player> for a stat card")
@@ -84,7 +86,7 @@ namespace KMHServerAddon.Features.Discord
             for (int i = 0; i < shown; i++)
             {
                 GuildStore.GuildSummary g = rows[i];
-                sb.Append(Rank(i)).Append(" **").Append(Escape(g.Name)).Append("** · ")
+                sb.Append(Rank(i)).Append(" **").Append(DiscordText.Escape(g.Name)).Append("** · ")
                   .Append(g.MemberCount).Append(g.MemberCount == 1 ? " member" : " members")
                   .Append(" · ").Append(SilverFmt.Format(g.TreasurySilver)).Append(" vault")
                   .Append('\n');
@@ -114,7 +116,7 @@ namespace KMHServerAddon.Features.Discord
             for (int i = 0; i < shown; i++)
             {
                 Reputation.Dto.ReputationEntryDto e = rows[i];
-                sb.Append(Rank(i)).Append(" **").Append(Escape(e.Username)).Append("** · ")
+                sb.Append(Rank(i)).Append(" **").Append(DiscordText.Escape(e.Username)).Append("** · ")
                   .Append(e.Score.ToString("N0")).Append(" · ").Append(e.Tier ?? "Neutral").Append('\n');
             }
 
@@ -166,13 +168,19 @@ namespace KMHServerAddon.Features.Discord
             (int repScore, string repTier) = Reputation.ReputationStore.Get(me.Username);
 
             string who = me.IsLinkedToDiscord ? "Linked to Discord 🔗" : "Not linked to Discord";
-            string guild = string.IsNullOrEmpty(me.GuildName) ? "No guild" : $"Guild: **{Escape(me.GuildName)}**";
+            string guild = string.IsNullOrEmpty(me.GuildName) ? "No guild" : $"Guild: **{DiscordText.Escape(me.GuildName)}**";
             long firstSeenUnix = TicksToUnix(me.FirstSeenUtcTicks);
 
             return new EmbedBuilder()
                 .WithTitle($"📊 {me.Username} — #{overall} overall")
                 .WithColor(CardColor)
                 .WithDescription($"{guild} · {repTier} ({repScore:N0} rep) · {who}")
+                .AddField("Colony",
+                    (string.IsNullOrEmpty(me.ColonyName) ? "_(not reported yet)_" : $"**{DiscordText.Escape(me.ColonyName)}**") + "\n" +
+                    $"Wealth {SilverFmt.Format(me.Wealth)} (#{RankOf(e => e.Wealth)})\n" +
+                    $"Kills {me.Kills:N0} (#{RankOf(e => e.Kills)})\n" +
+                    $"{me.ColonyAgeDays:N0}d old · {me.TimePlayedHours:N0}h played" +
+                    (string.IsNullOrEmpty(me.TopColonistName) ? "" : $"\nTop colonist: **{DiscordText.Escape(me.TopColonistName)}** ({me.TopColonistKills:N0} kills)"), inline: true)
                 .AddField("Economy",
                     $"Score **{me.EconomyScore:N0}** (#{RankOf(e => e.EconomyScore)})\n" +
                     $"Donated {SilverFmt.Format(me.SilverDonated)} (#{RankOf(e => e.SilverDonated)})\n" +
@@ -216,10 +224,6 @@ namespace KMHServerAddon.Features.Discord
         private static long TicksToUnix(long utcTicks)
             => utcTicks > 0 ? ((DateTimeOffset)new DateTime(utcTicks, DateTimeKind.Utc)).ToUnixTimeSeconds() : 0;
 
-        // Discord markdown specials in player/guild names would break the bold wrapping.
-        private static string Escape(string s)
-            => (s ?? "").Replace("\\", "\\\\").Replace("*", "\\*").Replace("_", "\\_").Replace("`", "\\`").Replace("~", "\\~");
-
         public static string NormalizeSort(string s)
         {
             s = (s ?? "").Trim().ToLowerInvariant();
@@ -229,6 +233,9 @@ namespace KMHServerAddon.Features.Discord
                 case "purchases": return "spent";
                 case "built": return "sites";
                 case "workerxp": return "xp";
+                case "colonyage": case "colony": return "age";
+                case "playtime": case "played": return "time";
+                case "kill": return "kills";
             }
             return Array.IndexOf(SupportedSorts, s) >= 0 ? s : DefaultSort;
         }
@@ -242,6 +249,10 @@ namespace KMHServerAddon.Features.Discord
 
         private static long ReadMetric(PlayerLeaderboardEntry e, string key) => key switch
         {
+            "wealth" => e.Wealth,
+            "kills"  => e.Kills,
+            "age"    => e.ColonyAgeDays,
+            "time"   => e.TimePlayedHours,
             "silver" => e.SilverDonated,
             "sales"  => e.SalesEarned,
             "spent"  => e.PurchasesSpent,
@@ -254,6 +265,10 @@ namespace KMHServerAddon.Features.Discord
 
         private static string SortLabel(string key) => key switch
         {
+            "wealth" => "colony wealth",
+            "kills"  => "kills",
+            "age"    => "colony age",
+            "time"   => "time played",
             "silver" => "silver donated",
             "sales"  => "sales earned",
             "spent"  => "silver spent",
@@ -267,6 +282,10 @@ namespace KMHServerAddon.Features.Discord
         // Silver metrics get the $ formatting, counts a plain unit, so a row reads as a sentence fragment
         private static string FormatMetric(long v, string key) => key switch
         {
+            "wealth" => $"{SilverFmt.Format(v)} wealth",
+            "kills"  => $"{v:N0} kill{(v == 1 ? "" : "s")}",
+            "age"    => $"{v:N0}d old",
+            "time"   => $"{v:N0}h played",
             "silver" => $"{SilverFmt.Format(v)} donated",
             "sales"  => $"{SilverFmt.Format(v)} sales",
             "spent"  => $"{SilverFmt.Format(v)} spent",
