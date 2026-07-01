@@ -9,7 +9,7 @@ namespace KMHServerAddon.SubProtocol
         // Human-readable release version, carried in kmh.hello purely so each side can DETECT a version gap and
         // nudge the player. It never gates the connection (that's CurrentVersion's job) and stays additive: a
         // pre-1.1.0 server omits it, so an empty value received by a client reliably means "older server".
-        public const string BuildVersion = "1.1.0";
+        public const string BuildVersion = "1.1.1";
 
         public const string SystemUsername = "​[KMH-SYS]"; // server -> client
         public const string ClientUsername = "​[KMH-CLI]"; // client -> server
@@ -92,6 +92,7 @@ namespace KMHServerAddon.SubProtocol
             public const string GuildInvite             = "kmh.guild.invite";             // client -> server (admin/mod invites a player)
             public const string GuildSetOpenJoin        = "kmh.guild.set_open_join";      // client -> server (admin toggles open join)
             public const string GuildJoin               = "kmh.guild.join";               // client -> server (join an open or invited guild)
+            public const string GuildCreate             = "kmh.guild.create";             // client -> server (create a guild + join as admin)
 
             // Cross-guild leaderboard payload containing every guild in leaderboard form.
             public const string GuildLeaderboardRequest = "kmh.guild_leaderboard.request"; // client -> server
@@ -100,6 +101,8 @@ namespace KMHServerAddon.SubProtocol
             // Linked account map pushed after handshake and on every Discord link/unlink.
             public const string LinkedAccountsRequest   = "kmh.linked_accounts.request";  // client -> server
             public const string LinkedAccountsSnapshot  = "kmh.linked_accounts.snapshot"; // server -> client
+            public const string LinkRequest             = "kmh.link.request";             // client -> server (mint a Discord link code)
+            public const string LinkCode                = "kmh.link.code";                // server -> client (the minted code + ttl)
 
             // Player reputation roster (username -> score + tier) for badges.
             public const string ReputationRequest      = "kmh.reputation.request";      // client -> server

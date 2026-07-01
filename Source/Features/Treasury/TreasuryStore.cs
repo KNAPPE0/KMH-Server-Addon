@@ -265,6 +265,38 @@ namespace KMHServerAddon.Features.Treasury
 
         // --- persistence ---
 
+        // Admin anti-exploit reset: drop a player's personal vault. Returns the silver it held, or -1 if it had none.
+        // Guild vaults are untouched. Caller backs up + logs (see the treasury-reset admin command).
+        public static long ResetPersonal(string username)
+        {
+            string key = PersonalKeyFor(username);
+            long had;
+            lock (_lock)
+            {
+                if (!_vaults.TryGetValue(key, out TreasurySnapshot v)) return -1;
+                had = v.SilverBalance;
+                _vaults.Remove(key);
+            }
+            SaveToDisk();
+            return had;
+        }
+
+        // Admin reset: drop every personal vault (guild vaults kept). Returns how many were removed.
+        public static int ResetAllPersonal()
+        {
+            int removed;
+            lock (_lock)
+            {
+                var keys = new List<string>();
+                foreach (string k in _vaults.Keys)
+                    if (k.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase)) keys.Add(k);
+                foreach (string k in keys) _vaults.Remove(k);
+                removed = keys.Count;
+            }
+            if (removed > 0) SaveToDisk();
+            return removed;
+        }
+
         public static void LoadFromDisk()
         {
             if (JsonFileStore.TryLoad(KmhDataPaths.TreasuryFile, out PersistedState state) && state?.Vaults != null)

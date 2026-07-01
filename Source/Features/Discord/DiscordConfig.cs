@@ -46,6 +46,7 @@ namespace KMHServerAddon.Features.Discord
             public string Marketplace   { get; set; } = "";
             public string SiteEvents    { get; set; } = "";
             public string Admin         { get; set; } = "";
+            public string Commands      { get; set; } = "";   // where !kmh-* commands are allowed; blank = any configured channel
         }
 
         internal class RoleSettings
@@ -96,6 +97,21 @@ namespace KMHServerAddon.Features.Discord
         [JsonIgnore] public ulong SiteEventsChannelId      => ParseId(Channels?.SiteEvents);
         [JsonIgnore] public ulong AdminChannelId           => ParseId(Channels?.Admin);
         [JsonIgnore] public ulong ConsoleCommandsChannelId => ParseId(Channels?.Admin);
+        [JsonIgnore] public ulong CommandsChannelId        => ParseId(Channels?.Commands);
+
+        // True if !kmh-* commands may run from here. DMs always (linking). A set Commands channel locks them to it;
+        // otherwise any configured KMH channel works - never an unrelated one like #general.
+        public bool CommandsAllowedIn(ulong channelId, bool isDm)
+        {
+            if (isDm) return true;
+            if (CommandsChannelId != 0) return channelId == CommandsChannelId;
+            return channelId != 0 && (channelId == MarketplaceChannelId
+                                   || channelId == LeaderboardChannelId
+                                   || channelId == AdminChannelId
+                                   || channelId == ChatBridgeChannelId
+                                   || channelId == AnnouncementsChannelId
+                                   || channelId == SiteEventsChannelId);
+        }
 
         // event toggles
         [JsonIgnore] public bool PostServerEvents      => Events?.Server      ?? true;

@@ -27,6 +27,39 @@ That's the one thing the owner installs once.)
 
 If GameServer.exe isn't in the folder, KMH says so and stops.
 
+No .NET 8 on your host (managed panels often pin an older one)? Grab the
+"-selfcontained" zip instead - it bundles .NET 8, so there's nothing to install.
+Extract the WHOLE folder and run the exe from inside it - the self-contained
+build ships loose files (the runtime plus Newtonsoft.Json.dll) that must sit
+next to the exe. Copying only the executable will fail to start.
+
+Managed / panel hosts (Bisect, Pterodactyl, etc.)
+-------------------------------------------------
+These run a fixed launcher (usually GameServer.exe) every start, so they never
+run KMHServerAddon.exe. Two ways to fix it:
+
+  - If the panel lets you edit the start command, point it at
+    KMHServerAddon.exe. Done - survives RWT updates.
+
+  - If the start button is locked to GameServer.exe, swap KMH into that slot
+    (KMH detects the real server under a renamed name and boots it):
+        rename  GameServer.exe      ->  GameServer.rwt
+        rename  KMHServerAddon.exe   ->  GameServer.exe
+    Linux (no .exe):  GameServer -> GameServer.rwt ,  KMHServerAddon -> GameServer
+    (then: chmod +x GameServer)
+    Redo the two renames after any RWT update - it restores the stock launcher.
+    On a host without .NET 8, use the -selfcontained zip for this.
+
+KMH API transport (experimental) - security
+-------------------------------------------
+Off by default (Config/Transport.json EnableKmhApiTransport=false). When you turn
+it on it's secure by default: binds 127.0.0.1 (local only), auth required, and
+connection/auth-flood caps. To allow REMOTE players set BindAddress=0.0.0.0 and
+forward the port - keep RequireKmhApiAuth=true. The server prints a clear warning
+at boot if it's public or auth is off. Tunables in Transport.json: MaxConnections,
+MaxConnectionsPerIp, AuthTimeoutSeconds, IdleTimeoutSeconds, MaxFrameKb,
+FailedAuthPerIp/WindowSeconds/BlockSeconds.
+
 Config (KMH-Data/Config/)
 -------------------------
   Economy.json          marketplace/auction/want tax, caps, price floors
@@ -34,9 +67,14 @@ Config (KMH-Data/Config/)
   Reputation.json       score deltas + tier cutoffs
   Quests.json           per-poster caps, expiry
   World.json            server event + global-quest scheduler / reward tuning
+  Features.json         turn major systems on/off (treasury, marketplace, guilds,
+                        quests, auctions, want board, world, standings). All on by
+                        default; off blocks that system server-side and clients show
+                        it as disabled. Stored data is kept - re-enable to restore it.
   Enforcement.json      config-enforcement state + safe-mods list
   Maintenance.json      automatic-backup + boot integrity-scan settings
   Discord/DiscordConfig.json   paste a bot token to enable the Discord bridge
+  (Transport and Discord have their own on/off switch in their files above.)
 All are generated with defaults on first boot. Reload economy/site config live
 (in-game chat or server console):  kmh reload-economy
 
@@ -50,6 +88,25 @@ and scans it for problems at startup. Owner commands (console or /kmh server):
   kmh cancel <auction|want|quest> <id>   refund + remove a stuck entry
   kmh ledger [user]       recent economy audit-trail entries
   kmh smoketest           non-mutating self-check of every subsystem
+
+Anti-cheat & enforcement
+------------------------
+Config enforcement (Enforcement.json): with both the addon and the KMH Patch
+installed you can lock players' Mod Options to a profile you supply and keep a
+safe-mods list. Turn it on with 'kmh enforce on'. This needs the patch on the
+client - stock RWT clients can't be enforced.
+
+Scenario / custom-scenario enforcement is NOT implemented yet. KMH can't force a
+required scenario or block custom scenarios in v1.1.1; treat that as planned.
+Until then, agree a scenario out-of-band and watch for odd starting wealth.
+
+Save-reset economy: KMH-Data outlives a player's RimWorld save, so someone can
+deposit starting resources into their treasury, reset their save, and repeat.
+v1.1.1 ships a manual lever, not automatic detection:
+  kmh treasury-reset <user>    clear one player's personal treasury
+  kmh treasury-reset all       clear every personal treasury (guild vaults kept)
+Both back up KMH-Data first and log what they cleared. Always keep a backup
+before any reset. Automatic new-save detection is planned.
 
 Extensions
 ----------

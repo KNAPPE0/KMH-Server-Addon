@@ -15,6 +15,9 @@ namespace KMHServerAddon.Persistence
         public string LastBuildVersion  { get; set; } = "";
         public string LastRunUtc        { get; set; } = "";
 
+        // Build that last ran, captured before the stamp is refreshed so boot can detect an upgrade. Blank on a fresh server.
+        public static string PreviousBuildVersion { get; private set; } = "";
+
         // Called once on boot, before stores load. Returns a human summary line for the log. Never throws.
         public static string ReconcileOnBoot()
         {
@@ -22,6 +25,7 @@ namespace KMHServerAddon.Persistence
             {
                 string build = typeof(KmhDataMeta).Assembly.GetName().Version?.ToString() ?? "?";
                 bool   had   = JsonFileStore.TryLoad(KmhDataPaths.MetaFile, out KmhDataMeta meta) && meta != null;
+                if (had) PreviousBuildVersion = meta.LastBuildVersion ?? "";
 
                 if (!had)
                 {

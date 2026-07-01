@@ -28,12 +28,16 @@ namespace KMHServerAddon.AdminCommands
                 case "cancel":         Admin(isAdmin, "cancel",  reply, () => CancelCmd(args, reply));    break;
                 case "ledger":         Admin(isAdmin, "ledger",  reply, () => Ledger(args, reply));       break;
                 case "smoketest":      Admin(isAdmin, "smoketest", reply, () => Maintenance.KmhSmokeTest.Run(reply)); break;
+                case "transport-test":
+                case "transporttest":  Admin(isAdmin, "transport-test", reply, () => Maintenance.KmhTransportSecurityTest.Run(reply)); break;
                 case "rebuild-standings": Admin(isAdmin, "rebuild-standings", reply, () => RebuildStandings(reply)); break;
                 case "extensions":     Extensions(reply);                      break;
                 case "give-silver":    Admin(isAdmin, "give-silver",    reply, () => GiveSilver(args, actorName, reply));  break;
+                case "treasury-reset": Admin(isAdmin, "treasury-reset", reply, () => TreasuryReset(args, actorName, reply)); break;
                 case "reload-discord": Admin(isAdmin, "reload-discord", reply, () => ReloadDiscord(actorName, reply));     break;
                 case "reload-economy": Admin(isAdmin, "reload-economy", reply, () => ReloadEconomy(reply));                break;
                 case "reload-world":   Admin(isAdmin, "reload-world",   reply, () => ReloadWorld(reply));                  break;
+                case "reload-features": Admin(isAdmin, "reload-features", reply, () => ReloadFeatures(reply));             break;
                 case "drain-house":    Admin(isAdmin, "drain-house",    reply, () => DrainHouse(args, reply));             break;
                 case "enforce":        Enforce(args, isAdmin, reply);          break;
                 case "event":          Admin(isAdmin, "event",          reply, () => EventCmd(args, actorName, reply));    break;
@@ -355,6 +359,25 @@ namespace KMHServerAddon.AdminCommands
                   $"auto-quests {(cfg.AutoGenerateQuests ? $"every {cfg.QuestGenEveryMinutes}m" : "off")}.");
         }
 
+        // Re-read Features.json and refresh connected clients so a toggle applies without a restart.
+        private static void ReloadFeatures(Action<string> reply)
+        {
+            Features.FeaturesConfig.Reload();
+            System.Collections.Generic.List<string> disabled = Features.FeaturesConfig.Current.DisabledList();
+
+            int refreshed = 0;
+            foreach (ServerClient c in Network.ServerClients.Keys)
+            {
+                if (c?.IsVerified != true) continue;
+                SubProtocol.KmhHandshakeHandler.SendHelloTo(c);
+                refreshed++;
+            }
+
+            string state = disabled.Count == 0 ? "all systems enabled" : "disabled: " + string.Join(", ", disabled);
+            reply($"Features reloaded ({state}). Refreshed {refreshed} client(s).");
+            ServerLog.Info($"Features reloaded by admin ({state})");
+        }
+
         // event <type> [hours] [magnitude] [target] | event end <type> | event list
         private static void EventCmd(string[] args, string actorName, Action<string> reply)
         {
@@ -485,6 +508,49 @@ namespace KMHServerAddon.AdminCommands
             else reply($"Deposit failed for '{target}'. Check the username and server log.");
         }
 
+        // kmh treasury-reset <user|all> - clears personal treasury so a player can't farm silver by depositing
+        // starting resources, resetting their save, and repeating. Backs up KMH-Data first and logs what was cleared.
+        // Guild vaults are left alone. See README (save-reset exploit) for the follow-up on automatic detection.
+        private static void TreasuryReset(string[] args, string actorName, Action<string> reply)
+        {
+            string target = args != null && args.Length > 1 ? args[1].Trim() : "";
+            if (target.Length == 0)
+            {
+                reply("Usage: kmh treasury-reset <user|all>. Clears personal treasury (guild vaults kept). Backs up first.");
+                return;
+            }
+
+            if (!Persistence.KmhDataBackup.TryCreate("pre-treasury-reset", out string dir, out string err))
+            {
+                reply($"Reset aborted - backup failed: {err}");
+                return;
+            }
+            string backup = System.IO.Path.GetFileName(dir);
+
+            if (string.Equals(target, "all", StringComparison.OrdinalIgnoreCase))
+            {
+                int n = Features.Treasury.TreasuryStore.ResetAllPersonal();
+                ServerLog.Warn($"treasury-reset ALL by {actorName}: cleared {n} personal vault(s) (backup {backup})");
+                reply($"Backup {backup}. Reset {n} personal treasury vault(s); guild vaults untouched.");
+                foreach (ServerClient c in Network.ServerClients.Keys)
+                {
+                    if (c?.IsVerified != true) continue;
+                    string u = c.GetData<UserFile>()?.Username;
+                    if (!string.IsNullOrEmpty(u))
+                        SubProtocol.KmhRouter.SendTo(c, SubProtocol.KmhProtocol.Kind.TreasurySnapshot, Features.Treasury.TreasuryStore.GetSnapshotFor(u));
+                }
+                return;
+            }
+
+            long had = Features.Treasury.TreasuryStore.ResetPersonal(target);
+            if (had < 0) { reply($"No personal treasury found for '{target}'."); return; }
+            ServerLog.Warn($"treasury-reset for {target} by {actorName}: cleared vault holding {had}s (backup {backup})");
+            reply($"Backup {backup}. Reset {target}'s personal treasury (held {Util.SilverFmt.Format(had)}).");
+            ServerClient sc = SubProtocol.KmhRouter.ResolveClient(target);
+            if (sc != null)
+                SubProtocol.KmhRouter.SendTo(sc, SubProtocol.KmhProtocol.Kind.TreasurySnapshot, Features.Treasury.TreasuryStore.GetSnapshotFor(target));
+        }
+
         // enforce status | on | off | safe add|remove|list <mod>
         private static void Enforce(string[] args, bool isAdmin, Action<string> reply)
         {
@@ -598,12 +664,15 @@ namespace KMHServerAddon.AdminCommands
             reply("  cancel <auction|want|quest> <id>  (admin) refund + remove a stuck entry");
             reply("  ledger [user] [count]        (admin) recent economy audit-trail entries (disputes)");
             reply("  smoketest                    (admin) non-mutating self-check of every KMH subsystem");
+            reply("  transport-test               (admin) security self-check of the API transport DoS guards + config");
             reply("  rebuild-standings            (admin) reload standings from disk + re-push to clients");
             reply("  extensions                   list loaded extensions");
             reply("  give-silver <user> <amount>  (admin) grant silver to a player");
+            reply("  treasury-reset <user|all>    (admin) clear personal treasury (anti save-reset farming); backs up first");
             reply("  reload-discord               (admin) re-read Config/Discord/DiscordConfig.json");
             reply("  reload-economy               (admin) re-read Config/Economy.json + Sites.json");
             reply("  reload-world                 (admin) re-read Config/World.json");
+            reply("  reload-features              (admin) re-read Config/Features.json + refresh clients");
             reply("  event <type> [minutes] [mag] (admin) fire a world event (see: kmh event help)");
             reply("  worldquest ... | wq ...      (admin) create/list/end a global quest (see: kmh worldquest help)");
             reply("  drain-house <user>           (admin) move the marketplace house pool to a player");

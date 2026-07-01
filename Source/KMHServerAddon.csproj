@@ -12,9 +12,9 @@
     <Nullable>disable</Nullable>
     <LangVersion>latest</LangVersion>
     <ImplicitUsings>enable</ImplicitUsings>
-    <Version>1.1.0</Version>
-    <AssemblyVersion>1.1.0.0</AssemblyVersion>
-    <FileVersion>1.1.0.0</FileVersion>
+    <Version>1.1.1</Version>
+    <AssemblyVersion>1.1.1.0</AssemblyVersion>
+    <FileVersion>1.1.1.0</FileVersion>
     <IntermediateOutputPath>obj\$(RwtFlavor)\$(Configuration)\</IntermediateOutputPath>
 
     <!-- Same RID set the RWT server uses so the addon publishes across
@@ -90,6 +90,14 @@
           SkipUnchangedFiles="true" />
   </Target>
 
+  <!-- Newtonsoft.Json is referenced Private=False (framework-dependent builds get it from RWT's own folder).
+       A self-contained folder build has no RWT beside it at publish time, so stage Newtonsoft here or it starts
+       up missing that dependency. Same DLL RWT ships, so no version drift. -->
+  <Target Name="StageNewtonsoftForSelfContained" AfterTargets="Publish"
+          Condition="'$(RwtFlavor)' == 'Old' and '$(SelfContained)' == 'true' and Exists('$(RwtServerBuildPath)\Newtonsoft.Json.dll')">
+    <Copy SourceFiles="$(RwtServerBuildPath)\Newtonsoft.Json.dll" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" />
+  </Target>
+
   <!-- The SDK project lives at Source/KMH.Sdk.Server/ - a sub-folder
        of this csproj's directory. MSBuild's default Compile glob
        (**/*.cs) would otherwise pull the SDK's source AND its
@@ -113,57 +121,16 @@
     against). Compile-time only - never bundled in our output.
   -->
   <PropertyGroup>
-    <!-- Compile-time path to the RWT server's multi-file build output.
-         The Release build is RID-segregated by default; the Debug build
-         is multi-file under a single net8.0 folder which suits HintPath
-         cleanly - always use the Debug output here.
-
-         TARGET RELEASE: built and verified to RUN against the official
-         RimWorld Together release 26.5.24.1
-         (https://github.com/RimworldTogetherTeam/RimworldTogether - check
-         out tag v26.5.24.1 and run `dotnet build -c Debug` inside
-         Source/Server). When you have 26.5.24.1 built, point this at
-         that build's output folder so the typed references in our
-         Harmony patches line up with the runtime DLLs the player loads.
-
-         Two ways to override the default for your local setup without
-         editing this csproj:
-
-           1) Set the RwtServerBuildPath environment variable before
-              calling `dotnet build`, e.g.:
-                $env:RwtServerBuildPath = "C:\path\to\rwt-26.5.24.1\Source\Server\bin\Debug\net8.0"
-                dotnet build -c Debug
-
-           2) Create Source/Local.props (gitignored) with:
-                <Project>
-                  <PropertyGroup>
-                    <RwtServerBuildPath>C:\your\path\here</RwtServerBuildPath>
-                  </PropertyGroup>
-                </Project>
-              The Import below picks it up automatically.
-
-         The default below points at a from-source build of official
-         RWT 26.5.24.1 (clone the upstream repo, check out the
-         26.5.24.1 tag, run `dotnet build -c Debug` inside Source/
-         Server - output lands at <repo>/Source/Server/bin/Debug/
-         net8.0/). Override via env var or Local.props if your local
-         clone lives elsewhere. -->
+    <!-- Compile-time HintPath root for the RWT server's Debug (multi-file) build output. Point it at your local
+         RWT 26.5.24.1 build. Override without editing this file: set $env:RwtServerBuildPath, or add the path in
+         Source/Local.props (gitignored, imported below). -->
     <RwtServerBuildPath Condition="'$(RwtServerBuildPath)' == ''">E:\RWT Related\rwt-26.5.24.1\Source\Server\bin\Debug\net8.0</RwtServerBuildPath>
   </PropertyGroup>
 
-  <!-- Per-developer override without editing this file. Drop a
-       Source/Local.props alongside this csproj and the import picks
-       it up. Gitignored. -->
   <Import Project="Local.props" Condition="Exists('Local.props')" />
 
-  <!--
-    RWT server assemblies are referenced for COMPILE ONLY (Private=False).
-    They are NEVER copied into our build output or bundled into the published
-    exe - redistributing RWT's DLLs would violate RWT's license. At runtime
-    the KMH exe loads these from the RimWorld Together server folder it's run
-    in (the .NET host resolves them from the exe's directory). So the admin
-    drops KMHServerAddon.exe into their RWT server folder and runs it there.
-  -->
+  <!-- RWT server assemblies, compile-time only (Private=False), never copied into our output. At runtime the exe
+       loads them from the RWT server folder it runs in, so the admin drops KMHServerAddon.exe there and runs it. -->
   <ItemGroup>
     <Reference Include="GameServer">
       <HintPath>$(RwtServerBuildPath)\GameServer.dll</HintPath>

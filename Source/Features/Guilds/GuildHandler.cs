@@ -27,6 +27,7 @@ namespace KMHServerAddon.Features.Guilds
             KmhRouter.RegisterHandler(KmhProtocol.Kind.GuildInvite,            OnInvite);
             KmhRouter.RegisterHandler(KmhProtocol.Kind.GuildSetOpenJoin,       OnSetOpenJoin);
             KmhRouter.RegisterHandler(KmhProtocol.Kind.GuildJoin,              OnJoin);
+            KmhRouter.RegisterHandler(KmhProtocol.Kind.GuildCreate,            OnCreate);
             KmhRouter.RegisterHandler(KmhProtocol.Kind.GuildLeaderboardRequest, OnLeaderboardRequest);
         }
 
@@ -182,6 +183,23 @@ namespace KMHServerAddon.Features.Guilds
             {
                 KmhRouter.Notify(client, "negative", err ?? "Could not join that guild.");
                 SendSnapshotTo(client); // refresh the joiner's no-guild view
+            }
+        }
+
+        private static void OnCreate(ServerClient client, KmhEnvelope env)
+        {
+            string actor = client?.GetData<UserFile>()?.Username;
+            string name  = env?.GetString("name") ?? "";
+            if (GuildStore.CreateGuildAndJoinAsAdmin(actor, name, out string err))
+            {
+                ServerLog.Info($"Guild: {actor} created {name}");
+                KmhRouter.Notify(client, "positive", $"Created guild {name}.");
+                BroadcastToGuildOf(actor); // refreshes the creator into their new guild
+            }
+            else
+            {
+                KmhRouter.Notify(client, "negative", err ?? "Could not create that guild.");
+                SendSnapshotTo(client); // keep the creator's no-guild view in sync
             }
         }
 
