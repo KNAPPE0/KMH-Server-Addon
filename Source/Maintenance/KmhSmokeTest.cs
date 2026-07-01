@@ -22,6 +22,8 @@ namespace KMHServerAddon.Maintenance
             (KmhProtocol.Kind.AuctionRequest,          "Auctions"),
             (KmhProtocol.Kind.WantRequest,             "Want board"),
             (KmhProtocol.Kind.WorldRequest,            "World engine"),
+            (KmhProtocol.Kind.WorldContribute,         "Global quest contribute"),
+            (KmhProtocol.Kind.WorldDeliver,            "Global quest deliver"),
             (KmhProtocol.Kind.SiteRequest,             "Sites"),
             (KmhProtocol.Kind.ReputationRequest,       "Reputation"),
             (KmhProtocol.Kind.LinkedAccountsRequest,   "Linked accounts"),

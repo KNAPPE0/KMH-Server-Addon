@@ -19,7 +19,7 @@ namespace KMHServerAddon.Features.Discord
 
         private static volatile bool _enabled;     // mirrors config each tick; gates the tee cheaply
         private static bool _hooked;
-        private static Action<object, Printer.Verbosity> _msgWrap, _warnWrap, _errWrap;
+        private static Action<object, Printer.Verbosity> _msgWrap, _warnWrap, _errWrap, _titleWrap;
         private static CancellationTokenSource _cts;
 
         public static void Start()
@@ -63,11 +63,12 @@ namespace KMHServerAddon.Features.Discord
             Printer p = Printer.Instance;
             if (p == null) return;
 
-            Action<object, Printer.Verbosity> innerMsg = p.OnMessage, innerWarn = p.OnWarning, innerErr = p.OnError;
-            _msgWrap  = (o, v) => { Enqueue(o, "",        v); innerMsg?.Invoke(o, v); };
-            _warnWrap = (o, v) => { Enqueue(o, "[warn] ", v); innerWarn?.Invoke(o, v); };
-            _errWrap  = (o, v) => { Enqueue(o, "[err]  ", v); innerErr?.Invoke(o, v); };
-            p.OnMessage = _msgWrap; p.OnWarning = _warnWrap; p.OnError = _errWrap;
+            Action<object, Printer.Verbosity> innerMsg = p.OnMessage, innerWarn = p.OnWarning, innerErr = p.OnError, innerTitle = p.OnTitle;
+            _msgWrap   = (o, v) => { Enqueue(o, "",        v); innerMsg?.Invoke(o, v); };
+            _warnWrap  = (o, v) => { Enqueue(o, "[warn] ", v); innerWarn?.Invoke(o, v); };
+            _errWrap   = (o, v) => { Enqueue(o, "[err]  ", v); innerErr?.Invoke(o, v); };
+            _titleWrap = (o, v) => { Enqueue(o, "",        v); innerTitle?.Invoke(o, v); };   // KMH lines + RWT command output
+            p.OnMessage = _msgWrap; p.OnWarning = _warnWrap; p.OnError = _errWrap; p.OnTitle = _titleWrap;
             _hooked = true;
             ServerLog.Info("Discord: live console feed hooked");
         }

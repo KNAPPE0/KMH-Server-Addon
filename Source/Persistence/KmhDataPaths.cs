@@ -52,6 +52,7 @@ namespace KMHServerAddon.Persistence
             new DataFile("Config/Maintenance",  MaintenanceConfigFile,    true),
             new DataFile("Config/Transport",    TransportConfigFile,      true),
             new DataFile("Config/Discord",      DiscordConfigFile,        true),
+            new DataFile("Config/Features",     FeaturesConfigFile,       true),
         };
 
         // The folder containing KMHServerAddon.exe (binary-rooted, vs Folder which is data-rooted at the RWT cwd).
@@ -86,6 +87,7 @@ namespace KMHServerAddon.Persistence
         public static string WorldConfigFile        => Path.Combine(Sub("Config"), "World.json");
         public static string MaintenanceConfigFile  => Path.Combine(Sub("Config"), "Maintenance.json");
         public static string TransportConfigFile     => Path.Combine(Sub("Config"), "Transport.json");
+        public static string FeaturesConfigFile      => Path.Combine(Sub("Config"), "Features.json");
         public static string DiscordConfigFile      => Path.Combine(Sub("Config", "Discord"), "DiscordConfig.json");
 
         // Hard enforcement: the owner drops the exact mod-config (.xml) files to enforce into

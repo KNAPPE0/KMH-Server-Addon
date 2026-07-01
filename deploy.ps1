@@ -1,97 +1,183 @@
-# KMH Server Addon - release packaging
+# KMH Server Addon - build one release asset.
 #
-# Produces a SINGLE-FILE KMHServerAddon.exe that contains only KMH code + our
-# own deps (Harmony, Discord.Net, the SDK). It does NOT bundle RimWorld
-# Together - redistributing RWT would break its license. At runtime the exe
-# loads RWT's DLLs from the folder it runs in (the admin's RWT server folder).
-#
-# The exe is framework-dependent: the server needs the .NET 8 runtime
-# installed. A self-contained single-file isn't possible for a Harmony addon -
-# Harmony's runtime patching can't locate clrjit inside a self-contained bundle.
-#
-# Usage:  .\deploy.ps1            # win-x64
-#         .\deploy.ps1 -Rid linux-x64
+# Usage:
+#   .\deploy.ps1
+#   .\deploy.ps1 -Rid linux-x64
+#   .\deploy.ps1 -Rid linux-x64 -SelfContained
+#   .\deploy.ps1 -Rid win-x64 -SkipPack
 param(
-    [string]$Rid    = "win-x64",
+    [string]$Rid = "win-x64",
+    [switch]$SelfContained,
+    [switch]$SkipPack,
     [string]$Deploy = (Join-Path $PSScriptRoot "Deploy")
 )
+
 $ErrorActionPreference = "Stop"
 
-$Proj = Join-Path $PSScriptRoot "Source\KMHServerAddon.csproj"
-$ext  = if ($Rid -like "win*") { ".exe" } else { "" }
+function Get-ProjectVersion {
+    param([string]$ProjectPath)
 
-# --- read version from csproj for the zip name ---
-$ver = "0.0.0"
-$m = Select-String -Path $Proj -Pattern "<Version>([^<]+)</Version>" -List
-if ($m -and $m.Matches.Count -gt 0) { $ver = $m.Matches[0].Groups[1].Value }
+    $match = Select-String -Path $ProjectPath -Pattern "<Version>([^<]+)</Version>" -List
+    if ($match -and $match.Matches.Count -gt 0) {
+        return $match.Matches[0].Groups[1].Value
+    }
 
-# --- publish the single-file, KMH-only exe ---
-Write-Host "[deploy] Publishing single-file KMHServerAddon ($Rid, framework-dependent, no RWT bundled)"
-$pub = Join-Path $PSScriptRoot "Source\bin\publish\$Rid"
-if (Test-Path $pub) { Remove-Item -Recurse -Force $pub }
-& dotnet publish "$Proj" -c Release -r $Rid --self-contained false `
-    -p:PublishSingleFile=true -p:DebugType=none -p:AllowedReferenceRelatedFileExtensions=none `
-    -o $pub | Out-Host
-if ($LASTEXITCODE -ne 0) { throw "Publish failed (exit $LASTEXITCODE)" }
-
-$exe = Join-Path $pub "KMHServerAddon$ext"
-if (-not (Test-Path $exe)) { throw "Published exe not found at $exe" }
-
-# Safety net: make sure we did NOT accidentally bundle any RWT assembly.
-$leaked = Get-ChildItem $pub -File | Where-Object { $_.Name -in @("GameServer.dll","Shared.dll","TCPNetwork.dll","MessagePack.dll","Mono.Nat.dll") }
-if ($leaked) { throw "RWT assemblies leaked into the publish: $($leaked.Name -join ', ') - check Private=False on the RWT references." }
-
-# --- assemble the release folder: the exe + setup + KMH-Data templates (incl. icons) ---
-if (Test-Path $Deploy) { Remove-Item -Recurse -Force "$Deploy\*" } else { New-Item -ItemType Directory -Path $Deploy -Force | Out-Null }
-Copy-Item $exe $Deploy -Force
-
-# Stage the KMH-Data starter folder. The source is tracked lowercase (Templates/kmh-data)
-# so git stays clean on case-insensitive Windows; the release always ships it PascalCase
-# (KMH-Data) to match what the addon reads at runtime (KmhDataPaths), so a case-sensitive
-# host (Linux) finds it too. Copy contents into an explicit KMH-Data folder rather than
-# copying the folder by name, so the case is fixed regardless of the source's tracked case.
-$DataDst = Join-Path $Deploy "KMH-Data"
-New-Item -ItemType Directory -Path $DataDst -Force | Out-Null
-$TemplateData = Join-Path $PSScriptRoot "Templates\kmh-data"
-if (Test-Path $TemplateData) {
-    Write-Host "[deploy] Staging KMH-Data/ templates"
-    Copy-Item (Join-Path $TemplateData "*") $DataDst -Recurse -Force
+    return "0.0.0"
 }
 
-# Bundled Discord embed icons go inside KMH-Data/Icons - the exact folder the addon
-# reads at runtime (KmhDataPaths.IconsDir). It's auto-created on first boot, but
-# pre-filling it here means embeds have art out of the box and owners see the folder
-# they're meant to customize. Sourced from the committed Source/Assets/Icons set.
-$IconsSrc = Join-Path $PSScriptRoot "Source\Assets\Icons"
-if (Test-Path $IconsSrc) {
-    $IconsDst = Join-Path $DataDst "Icons"
-    New-Item -ItemType Directory -Path $IconsDst -Force | Out-Null
-    Copy-Item (Join-Path $IconsSrc "*") $IconsDst -Recurse -Force
-    Write-Host "[deploy] Staging KMH-Data/Icons (bundled embed icons)"
+# Package guard: RWT and its native deps are referenced Private=False, so they must never appear in our output.
+function Assert-NoUnexpectedBinaries {
+    param([string]$Path)
+
+    $blocked = @(
+        "GameServer", "GameClient", "RTServer", "RTClient",
+        "Shared", "RTShared", "TCPNetwork", "RTNetwork",
+        "MessagePack", "Mono.Nat"
+    )
+
+    $found = Get-ChildItem $Path -Recurse -File -Include *.dll,*.exe -ErrorAction SilentlyContinue |
+        Where-Object { $blocked -contains [System.IO.Path]::GetFileNameWithoutExtension($_.Name) }
+
+    if ($found) {
+        throw "Unexpected binary in publish: $(($found | ForEach-Object Name) -join ', ')."
+    }
+
+    Write-Host "[deploy] Package guard OK - no unexpected binaries."
 }
 
-$Setup = Join-Path $PSScriptRoot "SETUP.txt"
-if (Test-Path $Setup) { Copy-Item $Setup $Deploy -Force }
+# Self-contained runs with no RWT beside it at publish time, so it must carry Newtonsoft.Json itself.
+function Assert-NewtonsoftPresent {
+    param([string]$Path)
 
-# --- pack the SDK (NuGet + standalone bundle) for extension authors ---
-$SdkProj = Join-Path $PSScriptRoot "Source\KMH.Sdk.Server\KMH.Sdk.Server.csproj"
-$Releases = Join-Path $PSScriptRoot "Releases"
-if (-not (Test-Path $Releases)) { New-Item -ItemType Directory -Path $Releases -Force | Out-Null }
-if (Test-Path $SdkProj) {
-    Write-Host "[deploy] Packing KMH.Sdk.Server NuGet package"
-    & dotnet pack "$SdkProj" -c Release -o $Releases | Out-Host
+    if (-not (Test-Path (Join-Path $Path "Newtonsoft.Json.dll"))) {
+        throw "Self-contained package is missing Newtonsoft.Json.dll."
+    }
+
+    Write-Host "[deploy] Dependency OK - Newtonsoft.Json.dll included."
 }
 
-# --- zip the release ---
-$Zip = Join-Path $Releases "KMHServerAddon-v$ver-$Rid.zip"
-if (Test-Path $Zip) { Remove-Item $Zip -Force }
-Compress-Archive -Path (Join-Path $Deploy "*") -DestinationPath $Zip -Force
-$mb = [Math]::Round(((Get-Item $Zip).Length / 1MB), 2)
-$exeMb = [Math]::Round(((Get-Item $exe).Length / 1MB), 2)
+$project = Join-Path $PSScriptRoot "Source\KMHServerAddon.csproj"
+$sdkProject = Join-Path $PSScriptRoot "Source\KMH.Sdk.Server\KMH.Sdk.Server.csproj"
+$releases = Join-Path $PSScriptRoot "Releases"
+
+if (-not (Test-Path $project)) {
+    throw "Project not found: $project"
+}
+
+if (-not (Test-Path $releases)) {
+    New-Item -ItemType Directory -Path $releases -Force | Out-Null
+}
+
+$version = Get-ProjectVersion -ProjectPath $project
+$ext = if ($Rid.StartsWith("win")) { ".exe" } else { "" }
+$publishName = if ($SelfContained) { "$Rid-selfcontained" } else { $Rid }
+$publish = Join-Path $PSScriptRoot "Source\bin\publish\$publishName"
+
+if (Test-Path $publish) {
+    Remove-Item $publish -Recurse -Force
+}
+
+if ($SelfContained) {
+    Write-Host "[deploy] Publishing KMHServerAddon v$version for $Rid, self-contained folder, no RWT bundled."
+
+    & dotnet publish $project `
+        -c Release `
+        -r $Rid `
+        --self-contained true `
+        -p:PublishSingleFile=false `
+        -p:CopyLocalLockFileAssemblies=true `
+        -p:DebugType=none `
+        -o $publish | Out-Host
+}
+else {
+    Write-Host "[deploy] Publishing KMHServerAddon v$version for $Rid, framework-dependent single-file, no RWT bundled."
+
+    & dotnet publish $project `
+        -c Release `
+        -r $Rid `
+        --self-contained false `
+        -p:PublishSingleFile=true `
+        -p:CopyLocalLockFileAssemblies=true `
+        -p:DebugType=none `
+        -p:AllowedReferenceRelatedFileExtensions=none `
+        -o $publish | Out-Host
+}
+
+if ($LASTEXITCODE -ne 0) {
+    throw "Publish failed for $Rid$(if ($SelfContained) { ' self-contained' } else { '' }) with exit code $LASTEXITCODE."
+}
+
+$exe = Join-Path $publish "KMHServerAddon$ext"
+if (-not (Test-Path $exe)) {
+    throw "Published executable not found: $exe"
+}
+
+Assert-NoUnexpectedBinaries -Path $publish
+
+if ($SelfContained) {
+    Assert-NewtonsoftPresent -Path $publish
+}
+
+if (Test-Path $Deploy) {
+    Remove-Item (Join-Path $Deploy "*") -Recurse -Force -ErrorAction SilentlyContinue
+}
+else {
+    New-Item -ItemType Directory -Path $Deploy -Force | Out-Null
+}
+
+if ($SelfContained) {
+    Copy-Item (Join-Path $publish "*") $Deploy -Recurse -Force
+}
+else {
+    Copy-Item $exe $Deploy -Force
+}
+
+$template = Join-Path $PSScriptRoot "Templates\kmh-data"
+if (Test-Path $template) {
+    $dataOut = Join-Path $Deploy "KMH-Data"
+    if (Test-Path $dataOut) {
+        Remove-Item $dataOut -Recurse -Force
+    }
+    Copy-Item $template $dataOut -Recurse -Force
+}
+
+$setup = Join-Path $PSScriptRoot "SETUP.txt"
+if (Test-Path $setup) {
+    Copy-Item $setup $Deploy -Force
+}
+
+$readme = Join-Path $PSScriptRoot "README.md"
+if (Test-Path $readme) {
+    Copy-Item $readme $Deploy -Force
+}
+
+if (-not $SkipPack -and (Test-Path $sdkProject)) {
+    Write-Host "[deploy] Packing KMH.Sdk.Server NuGet package."
+    & dotnet pack $sdkProject -c Release -o $releases | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        throw "SDK pack failed with exit code $LASTEXITCODE."
+    }
+}
+
+$assetName = "KMHServerAddon-v$version-$Rid$(if ($SelfContained) { '-selfcontained' } else { '' }).zip"
+$zip = Join-Path $releases $assetName
+if (Test-Path $zip) {
+    Remove-Item $zip -Force
+}
+
+Compress-Archive -Path (Join-Path $Deploy "*") -DestinationPath $zip -Force
+
+$zipMb = [Math]::Round((Get-Item $zip).Length / 1MB, 2)
+$exeMb = [Math]::Round((Get-Item $exe).Length / 1MB, 2)
 
 Write-Host ""
-Write-Host "[deploy] Done."
-Write-Host "[deploy] Single exe:   $Deploy\KMHServerAddon$ext  (${exeMb} MB, KMH only - no RWT)"
-Write-Host "[deploy] Release zip:  $Zip  (${mb} MB)"
-Write-Host "[deploy] Install: drop KMHServerAddon$ext next to the official GameServer.exe and"
-Write-Host "[deploy]          run KMHServerAddon$ext (not GameServer.exe). Needs .NET 8."
+Write-Host "[deploy] Done." -ForegroundColor Green
+Write-Host "[deploy] Release asset: $zip ($zipMb MB)"
+Write-Host "[deploy] App:           $exe ($exeMb MB)"
+
+if ($SelfContained) {
+    Write-Host "[deploy] Install: extract the full zip beside the official GameServer$ext and run KMHServerAddon$ext."
+}
+else {
+    Write-Host "[deploy] Install: place KMHServerAddon$ext beside the official GameServer$ext and run KMHServerAddon$ext. Requires .NET 8."
+}

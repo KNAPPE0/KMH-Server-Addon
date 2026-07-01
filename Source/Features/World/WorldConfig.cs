@@ -15,7 +15,13 @@ namespace KMHServerAddon.Features.World
         public int SchemaVersion { get; set; } = 2;
 
         // events
-        public bool   EventsEnabled         { get; set; } = true;  // gates auto-roll; manual triggers always work
+        public bool   EventsEnabled         { get; set; } = true;  // master switch for all events (manual + auto)
+        // Event types owners allow to fire at all (manual + auto). Remove one to block it entirely.
+        public string[] AllowedEventTypes   { get; set; } = new[]
+        {
+            "tax_holiday", "market_boom", "market_crash", "resource_shortage",
+            "double_worker_xp", "house_stipend", "bounty_target",
+        };
         public bool   AutoRollEvents        { get; set; } = false;
         public int    EventRollEveryMinutes { get; set; } = 360;   // how often auto-roll considers an event (6h)
         public int    EventDefaultMinutes   { get; set; } = 180;   // event length when the command gives none (3h)
@@ -34,7 +40,11 @@ namespace KMHServerAddon.Features.World
         public int StipendSilver         { get; set; } = 100;
 
         // server quests
+        public bool QuestsEnabled          { get; set; } = true;   // master switch; off blocks all global quests (manual + auto)
+        // Objective types owners allow. Removing one blocks it for manual creation and auto-gen. Values: hunt/build/deliver.
+        public string[] AllowedObjectives  { get; set; } = new[] { "hunt", "build", "deliver" };
         public bool AutoGenerateQuests     { get; set; } = false;
+        public int  MaxActiveAutoQuests    { get; set; } = 1;      // how many auto-gen quests may run at once
         public int  QuestGenEveryMinutes   { get; set; } = 720;    // how often auto-gen considers a quest (12h)
         public int  QuestDefaultMinutes    { get; set; } = 1440;   // quest length when the command gives none (24h)
         public int  QuestRewardHousePoolPercent { get; set; } = 50; // auto-gen reward = this % of the house pool
@@ -140,6 +150,9 @@ namespace KMHServerAddon.Features.World
             MarketSwingPercent  = Clamp(MarketSwingPercent, 1, 90);
             WorkerXpMultPercent = Clamp(WorkerXpMultPercent, 100, 1000);
             StipendSilver       = Clamp(StipendSilver, 0, 1_000_000);
+            MaxActiveAutoQuests  = Clamp(MaxActiveAutoQuests, 1, 50);
+            AllowedObjectives    = NormalizeObjectives(AllowedObjectives);
+            AllowedEventTypes    = NormalizeEventTypes(AllowedEventTypes);
             QuestGenEveryMinutes = Clamp(QuestGenEveryMinutes, 1, 43200);
             QuestDefaultMinutes  = Clamp(QuestDefaultMinutes, 1, 43200);
             QuestRewardHousePoolPercent = Clamp(QuestRewardHousePoolPercent, 0, 100);
@@ -159,5 +172,55 @@ namespace KMHServerAddon.Features.World
         }
 
         private static int Clamp(int v, int lo, int hi) => v < lo ? lo : (v > hi ? hi : v);
+
+        // True if owners allow this objective. Unknown/blank -> blocked.
+        public bool ObjectiveAllowed(string objective)
+        {
+            if (string.IsNullOrWhiteSpace(objective) || AllowedObjectives == null) return false;
+            foreach (string o in AllowedObjectives)
+                if (string.Equals(o, objective, System.StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+
+        // Keep only the known objective tags (lowercased); an empty/garbage list falls back to all three.
+        private static string[] NormalizeObjectives(string[] raw)
+        {
+            var keep = new System.Collections.Generic.List<string>();
+            if (raw != null)
+                foreach (string s in raw)
+                {
+                    string o = (s ?? "").Trim().ToLowerInvariant();
+                    if ((o == "hunt" || o == "build" || o == "deliver") && !keep.Contains(o)) keep.Add(o);
+                }
+            return keep.Count > 0 ? keep.ToArray() : new[] { "hunt", "build", "deliver" };
+        }
+
+        // True if owners allow this event type to fire. Unknown/blank -> blocked.
+        public bool EventTypeAllowed(string type)
+        {
+            if (string.IsNullOrWhiteSpace(type) || AllowedEventTypes == null) return false;
+            foreach (string t in AllowedEventTypes)
+                if (string.Equals(t, type, System.StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+
+        private static readonly string[] KnownEventTypes =
+        {
+            "tax_holiday", "market_boom", "market_crash", "resource_shortage",
+            "double_worker_xp", "house_stipend", "bounty_target",
+        };
+
+        // Keep only known event tags (lowercased); an empty/garbage list falls back to all of them.
+        private static string[] NormalizeEventTypes(string[] raw)
+        {
+            var keep = new System.Collections.Generic.List<string>();
+            if (raw != null)
+                foreach (string s in raw)
+                {
+                    string t = (s ?? "").Trim().ToLowerInvariant();
+                    if (System.Array.IndexOf(KnownEventTypes, t) >= 0 && !keep.Contains(t)) keep.Add(t);
+                }
+            return keep.Count > 0 ? keep.ToArray() : (string[])KnownEventTypes.Clone();
+        }
     }
 }

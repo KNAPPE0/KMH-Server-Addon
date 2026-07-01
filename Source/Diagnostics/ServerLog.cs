@@ -2,21 +2,23 @@ using System;
 
 namespace KMHServerAddon.Diagnostics
 {
-    // Thin wrapper around RWT's Printer that prepends [KMH-Addon]. Our bootstrap runs BEFORE RWT initializes the
-    // logger, so each call is try-caught and falls back to Console.WriteLine until normal logging is up.
+    // Wrapper around RWT's Printer that prepends [KMH-Addon]. Normal KMH lines go through Printer.Title so they render
+    // GREEN on the console (RWT's only spare file-safe colour - it's Console.ForegroundColor, so the log file stays
+    // plain), standing out from RWT's white spam; warn/error keep RWT's yellow/red. Bootstrap runs before RWT's logger
+    // is up, so each call is try-caught and falls back to a coloured Console.WriteLine until then.
     internal static class ServerLog
     {
         public static void Info(string message)
         {
             string line = $"{Constants.LogPrefix} {message}";
-            try { Printer.Message(line); }
-            catch { Console.WriteLine(line); }
+            try { Printer.Title(line); }
+            catch { WriteColored(ConsoleColor.Green, line); }
         }
 
         public static void Verbose(string message)
         {
             string line = $"{Constants.LogPrefix} {message}";
-            try { Printer.Message(line, Printer.Verbosity.Verbose); }
+            try { Printer.Title(line, Printer.Verbosity.Verbose); }
             catch { /* verbose drops silently when the logger isn't up */ }
         }
 
@@ -24,7 +26,7 @@ namespace KMHServerAddon.Diagnostics
         {
             string line = $"{Constants.LogPrefix} {message}";
             try { Printer.Warning(line); }
-            catch { Console.WriteLine($"[WARN] {line}"); }
+            catch { WriteColored(ConsoleColor.Yellow, line); }
         }
 
         public static void Error(string message)
@@ -39,11 +41,11 @@ namespace KMHServerAddon.Diagnostics
             Error($"{message}: {ex}");
         }
 
-        // milestone; green only on the pre-logger console fallback
+        // milestone
         public static void Success(string message)
         {
             string line = $"{Constants.LogPrefix} {message}";
-            try { Printer.Message(line); }
+            try { Printer.Title(line); }
             catch { WriteColored(ConsoleColor.Green, line); }
         }
 
@@ -52,7 +54,7 @@ namespace KMHServerAddon.Diagnostics
         {
             if (!DebugEnabled) return;
             string line = $"{Constants.LogPrefix} [debug] {message}";
-            try { Printer.Message(line, Printer.Verbosity.Verbose); }
+            try { Printer.Title(line, Printer.Verbosity.Verbose); }
             catch { /* drops until the logger is up */ }
         }
 
@@ -61,7 +63,7 @@ namespace KMHServerAddon.Diagnostics
         {
             if (!DebugEnabled) return;
             string line = $"{Constants.LogPrefix} [proto] {message}";
-            try { Printer.Message(line, Printer.Verbosity.Verbose); }
+            try { Printer.Title(line, Printer.Verbosity.Verbose); }
             catch { Console.WriteLine(line); }
         }
 

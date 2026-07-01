@@ -67,6 +67,15 @@ namespace KMHServerAddon.SubProtocol
         {
             if (env == null || string.IsNullOrEmpty(env.Kind)) return;
 
+            // Owner feature switches: drop a disabled feature's requests. The client is told at handshake and shows it
+            // as disabled, so a normal client won't reach here; this is the server-side block behind that.
+            string feature = Features.FeaturesConfig.FeatureForKind(env.Kind);
+            if (feature != null && !Features.FeaturesConfig.Current.IsEnabled(feature))
+            {
+                ServerLog.Verbose($"Blocked '{env.Kind}' - {feature} disabled by server config");
+                return;
+            }
+
             if (!Handlers.TryGetValue(env.Kind, out Action<ServerClient, KmhEnvelope> handler))
             {
                 ServerLog.Verbose($"No handler for kind '{env.Kind}' from {client?.GetData<UserFile>()?.Username ?? "?"}");

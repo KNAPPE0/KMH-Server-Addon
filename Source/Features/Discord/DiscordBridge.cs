@@ -420,6 +420,10 @@ namespace KMHServerAddon.Features.Discord
                     if (!allowed) return;
                 }
 
+                // Commands only in their designated channels (DMs always allowed for linking) - never spam #general.
+                if (!_config.CommandsAllowedIn(message.Channel?.Id ?? 0, !(message.Channel is SocketGuildChannel)))
+                    return;
+
                 string   body  = text.Substring(prefix.Length).Trim();
                 string[] parts = body.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
                 if (parts.Length == 0) return;

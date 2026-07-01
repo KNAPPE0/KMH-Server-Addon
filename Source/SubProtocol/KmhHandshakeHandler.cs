@@ -33,6 +33,7 @@ namespace KMHServerAddon.SubProtocol
                 api_enabled = apiOn,
                 api_port    = apiOn ? tcfg.KmhApiPort : 0,
                 api_token   = apiToken,
+                disabled    = string.Join(",", Features.FeaturesConfig.Current.DisabledList()),
             });
 
             if (sent)
@@ -56,12 +57,13 @@ namespace KMHServerAddon.SubProtocol
                 // first 8s auto-refresh tick
                 try
                 {
+                    Features.FeaturesConfig f = Features.FeaturesConfig.Current;
                     Features.LinkedAccounts.LinkedAccountsHandler.SendSnapshotTo(client);
                     Features.Reputation.ReputationHandler.SendSnapshotTo(client);
                     Features.Enforcement.EnforcementHandler.SendSnapshotTo(client);
-                    Features.World.WorldHandler.SendSnapshotTo(client);
-                    Features.Auctions.AuctionHandler.SendSnapshotTo(client);
-                    Features.WantBoard.WantHandler.SendSnapshotTo(client);
+                    if (f.LivingWorld) Features.World.WorldHandler.SendSnapshotTo(client);
+                    if (f.Auctions)    Features.Auctions.AuctionHandler.SendSnapshotTo(client);
+                    if (f.WantBoard)   Features.WantBoard.WantHandler.SendSnapshotTo(client);
                     // Deliver anything that piled up while they were offline (auction/marketplace outcomes).
                     Features.Notifications.NotificationHandler.DeliverQueuedTo(client);
                 }

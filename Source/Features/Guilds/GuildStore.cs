@@ -94,6 +94,7 @@ namespace KMHServerAddon.Features.Guilds
                 errorReason = "Both creator and guild name are required.";
                 return false;
             }
+            guildName = Util.KmhSafe.Cap(guildName.Trim(), 48);   // bound client-supplied name (also the dict key)
             bool ok = false;
             lock (_lock)
             {

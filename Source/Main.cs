@@ -80,13 +80,22 @@ namespace KMHServerAddon
                 // Loads persisted feature state from KMH-Data/, warning and using empty stores when files are missing or invalid.
                 Persistence.KmhDataPaths.EnsureFolder();
 
+                // Name a missing dependency plainly - a self-contained build shipped without Newtonsoft.Json.dll would
+                // otherwise fail later with a confusing "storage failed" error.
+                try { _ = Newtonsoft.Json.JsonConvert.SerializeObject(new { ok = true }); }
+                catch (System.Exception depEx)
+                {
+                    Diagnostics.ServerLog.Error($"Missing dependency: KMH could not load Newtonsoft.Json ({depEx.GetType().Name}). " +
+                        "For a self-contained/folder build, extract the whole package so Newtonsoft.Json.dll sits next to the exe.");
+                }
+
                 // Prove storage actually works before we rely on it: a read-only/locked KMH-Data or bad perms would
                 // otherwise make every save fail silently and look like a data-collection bug. Loud if it fails.
                 if (Persistence.JsonFileStore.SelfTest(out string storageDetail))
                     Diagnostics.ServerLog.Info($"Persistence self-test: OK - {storageDetail}");
                 else
                     Diagnostics.ServerLog.Error($"Persistence SELF-TEST FAILED - KMH data will NOT save! ({storageDetail}) " +
-                                                "Check folder permissions / free disk space for KMH-Data.");
+                                                "Check folder permissions / free disk space for KMH-Data, or a missing dependency (see above).");
 
                 // Release-safety pass, all BEFORE any store loads so it sees/preserves the pristine on-disk state:
                 // (1) reconcile the data-format stamp (backs up + migrates only if a format change shipped),
@@ -125,6 +134,7 @@ namespace KMHServerAddon
                 Features.Quests.QuestsConfig.EnsureGenerated();
                 Features.Enforcement.EnforcementConfig.EnsureGenerated();
                 Features.World.WorldConfig.EnsureGenerated();
+                Features.FeaturesConfig.EnsureGenerated();
                 Features.Enforcement.EnforcementProfile.Reload();
 
                 // Loads each feature's saved state from KMH-Data/.
@@ -194,6 +204,12 @@ namespace KMHServerAddon
 
                 int patchCount = HarmonyInstance.GetPatchedMethods().Count();
                 ServerLog.Info($"Bootstrap complete - {patchCount} method(s) patched, KMH handlers registered, {Extensibility.ExtensionLoader.Loaded.Count} extension(s) loaded");
+
+                // Show the what's-new banner once when the build changed since the last run.
+                string prevBuild = Persistence.KmhDataMeta.PreviousBuildVersion;
+                string curBuild  = typeof(Persistence.KmhDataMeta).Assembly.GetName().Version?.ToString() ?? "";
+                if (!string.IsNullOrEmpty(prevBuild) && prevBuild != curBuild)
+                    Maintenance.KmhWhatsNewBanner.Print(prevBuild);
             }
             catch (System.Exception ex)
             {

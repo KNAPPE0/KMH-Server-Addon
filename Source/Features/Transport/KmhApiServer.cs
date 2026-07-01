@@ -11,7 +11,8 @@ using KMHServerAddon.SubProtocol;
 
 namespace KMHServerAddon.Features.Transport
 {
-    // Server-side KMH API transport: optional TCP listener using handshake tokens and framed KMH envelopes.
+    // Server-side KMH API transport: optional TCP listener using handshake tokens and framed KMH envelopes. Secure by
+    // default (loopback bind, auth, caps, throttle); all limits come from TransportConfig.
     internal static class KmhApiServer
     {
         // transport-internal kinds (not in KmhProtocol.Kind)
@@ -20,10 +21,12 @@ namespace KMHServerAddon.Features.Transport
         private const string KindPing        = "kmh.ping";
         private const string KindPong        = "kmh.pong";
 
-        private const int    MaxFrameBytes   = 64 * 1024;
-        private const int    HandshakeReadTimeoutMs = 10_000;
-        private const int    IdleTimeoutMs   = 45_000;   // drop a socket silent for 3x the client's 15s heartbeat
         private static readonly TimeSpan TokenTtl = TimeSpan.FromMinutes(10);
+
+        // Limits snapshotted from TransportConfig at Start (reload = restart). Defaults match the config defaults.
+        private static int _maxFrameBytes  = 64 * 1024;
+        private static int _authTimeoutMs  = 10_000;
+        private static int _idleTimeoutMs  = 45_000;
 
         private static TcpListener _listener;
         private static CancellationTokenSource _cts;
@@ -35,6 +38,12 @@ namespace KMHServerAddon.Features.Transport
         // username -> live authed connection
         private static readonly ConcurrentDictionary<string, ApiConn> _conns
             = new ConcurrentDictionary<string, ApiConn>(StringComparer.OrdinalIgnoreCase);
+
+        // DoS guards, rebuilt from config at Start (see TransportGuards.cs).
+        private static ConnectionLimiter _limiter = new ConnectionLimiter(200, 6);
+        private static AuthFailThrottle  _throttle = new AuthFailThrottle(10, 60, 300);
+
+        private static int _failBlockSeconds = 300;   // for the throttle log line
 
         public static bool Running => _running;
         public static int  ConnectedCount => _conns.Count;
@@ -50,18 +59,45 @@ namespace KMHServerAddon.Features.Transport
             }
             try
             {
-                IPAddress bind = IPAddress.TryParse(cfg.BindAddress, out IPAddress a) ? a : IPAddress.Any;
+                _maxFrameBytes  = cfg.MaxFrameKb * 1024;
+                _authTimeoutMs  = cfg.AuthTimeoutSeconds * 1000;
+                _idleTimeoutMs  = cfg.IdleTimeoutSeconds * 1000;
+                _failBlockSeconds = cfg.FailedAuthBlockSeconds;
+                _limiter  = new ConnectionLimiter(cfg.MaxConnections, cfg.MaxConnectionsPerIp);
+                _throttle = new AuthFailThrottle(cfg.FailedAuthPerIp, cfg.FailedAuthWindowSeconds, cfg.FailedAuthBlockSeconds);
+
+                IPAddress bind = IPAddress.TryParse(cfg.BindAddress, out IPAddress a) ? a : IPAddress.Loopback; // bad value -> safe
                 _listener = new TcpListener(bind, cfg.KmhApiPort);
                 _listener.Start();
                 _cts = new CancellationTokenSource();
                 _running = true;
                 Task.Run(() => AcceptLoop(_cts.Token));
                 ServerLog.Success($"KMH API transport: listening on {bind}:{cfg.KmhApiPort} (auth {(cfg.RequireKmhApiAuth ? "required" : "OFF")}).");
+                WarnOnUnsafeConfig(cfg);
             }
             catch (Exception ex)
             {
                 _running = false;
                 ServerLog.Error($"KMH API transport: could not bind {cfg.BindAddress}:{cfg.KmhApiPort} - staying on chat transport. ({ex.Message})");
+            }
+        }
+
+        // Boot validation: shout about a config that exposes the port or disables auth, so owners can't drift into it unknowingly.
+        private static void WarnOnUnsafeConfig(TransportConfig cfg)
+        {
+            if (cfg.IsPublicBind && !cfg.RequireKmhApiAuth)
+            {
+                ServerLog.Warn("=== KMH API SECURITY WARNING: PUBLIC BIND + AUTH OFF ===");
+                ServerLog.Warn($"The KMH API is reachable from other machines ({cfg.BindAddress}:{cfg.KmhApiPort}) AND auth is OFF -");
+                ServerLog.Warn("anyone who can reach the port can act as any player. Set RequireKmhApiAuth=true or BindAddress=127.0.0.1.");
+            }
+            else if (!cfg.RequireKmhApiAuth)
+            {
+                ServerLog.Warn("KMH API: auth is OFF (testing only) - any client can claim any player. Set RequireKmhApiAuth=true.");
+            }
+            else if (cfg.IsPublicBind)
+            {
+                ServerLog.Warn($"KMH API: public bind ({cfg.BindAddress}) - reachable by remote players. If unintended set BindAddress=127.0.0.1; only forward port {cfg.KmhApiPort} if you want remote KMH.");
             }
         }
 
@@ -102,12 +138,33 @@ namespace KMHServerAddon.Features.Transport
             {
                 TcpClient client;
                 try { client = await _listener.AcceptTcpClientAsync().ConfigureAwait(false); }
-                catch { if (!_running) break; continue; }
-                _ = Task.Run(() => HandleClient(client, ct));
+                catch { if (!_running) break; try { await Task.Delay(200, ct).ConfigureAwait(false); } catch { break; } continue; }
+                string ip = (client.Client?.RemoteEndPoint as IPEndPoint)?.Address?.ToString() ?? "?";
+                if (!Admit(ip)) { try { client.Close(); } catch { } ServerLog.Protocol($"API: refused {ip} (cap or auth block)."); continue; }
+                _ = Task.Run(() => HandleClient(client, ip, ct));
             }
         }
 
-        private static async Task HandleClient(TcpClient client, CancellationToken ct)
+        // Admit a socket only when it's not auth-blocked and under the global + per-IP caps; HandleClient must Release().
+        private static bool Admit(string ip)
+        {
+            if (_throttle.IsBlocked(ip)) return false;
+            return _limiter.TryAdmit(ip);
+        }
+
+        private static void Release(string ip) => _limiter.Release(ip);
+
+        // Record an auth failure; the throttle trips a temporary block once an IP exceeds the configured rate in-window.
+        private static void NoteAuthFail(string ip)
+        {
+            if (_throttle.NoteFailure(ip, out int total))
+            {
+                ServerLog.Warn($"KMH API: an IP tripped the failed-auth throttle - blocked for {_failBlockSeconds}s (enable transport debug to see which).");
+                ServerLog.Protocol($"KMH API: blocked {ip} for {_failBlockSeconds}s after {total} failed auths.");
+            }
+        }
+
+        private static async Task HandleClient(TcpClient client, string ip, CancellationToken ct)
         {
             ApiConn conn = null;
             string user = null;
@@ -117,7 +174,7 @@ namespace KMHServerAddon.Features.Transport
                 NetworkStream stream = client.GetStream();
 
                 // first frame must be an authenticated hello, bounded (async reads ignore NetworkStream.ReadTimeout)
-                KmhEnvelope hello = await ReadFrameWithin(stream, HandshakeReadTimeoutMs, ct).ConfigureAwait(false);
+                KmhEnvelope hello = await ReadFrameWithin(stream, _authTimeoutMs, ct).ConfigureAwait(false);
                 if (hello == null || hello.Kind != KindApiHello)
                 {
                     ServerLog.Protocol("API: first frame was not kmh.api.hello - dropping.");
@@ -137,6 +194,7 @@ namespace KMHServerAddon.Features.Transport
                     {
                         await WriteFrame(stream, KindApiHelloAck, new { ok = false, reason = "auth" }, ct).ConfigureAwait(false);
                         ServerLog.Protocol($"API: hello rejected for '{claimed}' (no valid token, no matching RWT session/IP).");
+                        NoteAuthFail(ip);
                         return;
                     }
                 }
@@ -147,16 +205,17 @@ namespace KMHServerAddon.Features.Transport
                 }
 
                 // ack before registering, so no other thread writes this socket mid-handshake
-                await WriteFrame(stream, KindApiHelloAck, new { ok = true, v = KmhProtocol.CurrentVersion, build = KmhProtocol.BuildVersion }, ct).ConfigureAwait(false);
+                await WriteFrame(stream, KindApiHelloAck, new { ok = true, v = KmhProtocol.CurrentVersion, build = KmhProtocol.BuildVersion, disabled = string.Join(",", FeaturesConfig.Current.DisabledList()) }, ct).ConfigureAwait(false);
                 conn = new ApiConn(client, stream, user);
                 if (_conns.TryGetValue(user, out ApiConn prev)) prev.Close();   // one live socket per user
                 _conns[user] = conn;
+                _throttle.Clear(ip);   // a clean auth clears this IP's failure streak
                 ServerLog.Success($"API: {user} connected over the KMH transport.");
 
-                // steady state: heartbeat + feature traffic; drop after IdleTimeoutMs of silence
+                // steady state: heartbeat + feature traffic; drop after the idle timeout of silence
                 while (_running && !ct.IsCancellationRequested)
                 {
-                    KmhEnvelope env = await ReadFrameWithin(stream, IdleTimeoutMs, ct).ConfigureAwait(false);
+                    KmhEnvelope env = await ReadFrameWithin(stream, _idleTimeoutMs, ct).ConfigureAwait(false);
                     if (env == null) break; // closed or idle
                     if (env.Kind == KindPing) { conn.TrySend(new KmhEnvelope(KindPong, null)); continue; }
                     // feature envelope -> shared router, using the authenticated identity (never the envelope)
@@ -172,6 +231,7 @@ namespace KMHServerAddon.Features.Transport
                     _conns.TryRemove(user, out _);
                 conn?.Close();
                 try { client.Close(); } catch { }
+                Release(ip);
             }
         }
 
@@ -237,7 +297,7 @@ namespace KMHServerAddon.Features.Transport
             byte[] lenBuf = await ReadExactly(stream, 4, ct).ConfigureAwait(false);
             if (lenBuf == null) return null;
             int len = (lenBuf[0] << 24) | (lenBuf[1] << 16) | (lenBuf[2] << 8) | lenBuf[3];
-            if (len <= 0 || len > MaxFrameBytes) return null;
+            if (len <= 0 || len > _maxFrameBytes) return null;
             byte[] body = await ReadExactly(stream, len, ct).ConfigureAwait(false);
             if (body == null) return null;
             return KmhEnvelope.TryParse(Encoding.UTF8.GetString(body));
@@ -296,7 +356,7 @@ namespace KMHServerAddon.Features.Transport
                 try
                 {
                     byte[] body = Encoding.UTF8.GetBytes(env.Serialize());
-                    if (body.Length > MaxFrameBytes) return false;
+                    if (body.Length > _maxFrameBytes) return false;
                     byte[] frame = FrameOf(body);
                     lock (_sendLock) { Stream.Write(frame, 0, frame.Length); }
                     return true;

@@ -107,6 +107,9 @@ namespace KMHServerAddon.Features.World
                 (WorldEventDto.DoubleWorkerXp, cfg.WeightDoubleWorkerXp),
                 (WorldEventDto.HouseStipend,   cfg.WeightHouseStipend),
             };
+            // A disabled event type never auto-rolls, regardless of its weight.
+            for (int i = 0; i < weighted.Count; i++)
+                if (!cfg.EventTypeAllowed(weighted[i].type)) weighted[i] = (weighted[i].type, 0);
             int total = 0;
             foreach (var (_, w) in weighted) total += Math.Max(0, w);
             if (total <= 0) return null;
@@ -123,9 +126,12 @@ namespace KMHServerAddon.Features.World
         public static (bool ok, string reason) FireEvent(string type, double magnitude, string target,
                                                          int durationMinutes, string actor)
         {
+            if (!FeaturesConfig.Current.LivingWorld) return (false, "Living World is disabled in Features.json.");
             WorldConfig cfg = WorldConfig.Current;
             if (!cfg.EventsEnabled) return (false, "Events are disabled in World.json.");
             type = (type ?? "").Trim().ToLowerInvariant();
+            if (!cfg.EventTypeAllowed(type))
+                return (false, $"The '{type}' event is disabled in World.json (AllowedEventTypes).");
 
             // A bounty is really a quest ("first to slay X"), so route it through the quest system.
             if (type == WorldEventDto.BountyTarget)
@@ -220,10 +226,15 @@ namespace KMHServerAddon.Features.World
         public static (bool ok, string reason) CreateWorldQuest(string kind, string objective, string targetDef,
             int goalQty, long requestedReward, int durationMinutes, string title, string description, string actor)
         {
+            if (!FeaturesConfig.Current.LivingWorld) return (false, "Living World is disabled in Features.json.");
+            WorldConfig qcfg = WorldConfig.Current;
+            if (!qcfg.QuestsEnabled) return (false, "Global quests are disabled in World.json (QuestsEnabled=false).");
             kind      = NormalizeKind(kind);
             objective = (objective ?? "").Trim().ToLowerInvariant();
             if (objective != ServerQuestDto.ObjHunt && objective != ServerQuestDto.ObjBuild && objective != ServerQuestDto.ObjDeliver)
                 return (false, $"Objective must be 'hunt', 'build' or 'deliver' (got '{objective}').");
+            if (!qcfg.ObjectiveAllowed(objective))
+                return (false, $"The '{objective}' objective is disabled in World.json (AllowedObjectives).");
             if (string.IsNullOrWhiteSpace(targetDef))
                 return (false, "A target defName is required (e.g. Muffalo to hunt, Sandbags to build, Steel to deliver).");
             if (goalQty <= 0) return (false, "Goal must be greater than 0.");
@@ -329,14 +340,17 @@ namespace KMHServerAddon.Features.World
         // Auto-generate one quest from the template table when enabled + cadence elapsed (one at a time).
         private static void MaybeAutoGenerateQuest(WorldConfig cfg, long now)
         {
-            if (!cfg.AutoGenerateQuests) return;
+            if (!cfg.QuestsEnabled || !cfg.AutoGenerateQuests) return;
             if (now - _lastQuestGenUtcTicks < TimeSpan.FromMinutes(cfg.QuestGenEveryMinutes).Ticks) return;
             _lastQuestGenUtcTicks = now;
-            if (WorldStore.ActiveQuests().Count > 0) return;
+            if (WorldStore.ActiveQuests().Count >= cfg.MaxActiveAutoQuests) return;
 
+            // Pick a template whose objective the owner still allows.
             string[] tpl = cfg.QuestTemplates;
             if (tpl == null || tpl.Length == 0) return;
-            string[] parts = tpl[_rng.Next(tpl.Length)].Split('|');
+            string chosen = PickAllowedTemplate(cfg, tpl);
+            if (chosen == null) return;
+            string[] parts = chosen.Split('|');
             if (parts.Length < 2) return;
 
             string objective = parts[0].Trim().ToLowerInvariant();
@@ -366,6 +380,18 @@ namespace KMHServerAddon.Features.World
 
             CreateWorldQuest(ServerQuestDto.KindCooperative, objective, defName, goal, reward,
                              cfg.QuestDefaultMinutes, title, desc, "auto");
+        }
+
+        // Random template whose objective the owner currently allows; null if none qualify.
+        private static string PickAllowedTemplate(WorldConfig cfg, string[] tpl)
+        {
+            List<string> ok = new List<string>();
+            foreach (string t in tpl)
+            {
+                int bar = t?.IndexOf('|') ?? -1;
+                if (bar > 0 && cfg.ObjectiveAllowed(t.Substring(0, bar).Trim())) ok.Add(t);
+            }
+            return ok.Count == 0 ? null : ok[_rng.Next(ok.Count)];
         }
 
         // Auto-gen reward target: the largest of (house-pool %), (a per-mille slice of total colony wealth - the

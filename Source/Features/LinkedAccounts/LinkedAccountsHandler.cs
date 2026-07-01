@@ -14,11 +14,27 @@ namespace KMHServerAddon.Features.LinkedAccounts
         public static void Register()
         {
             KmhRouter.RegisterHandler(KmhProtocol.Kind.LinkedAccountsRequest, OnRequest);
+            KmhRouter.RegisterHandler(KmhProtocol.Kind.LinkRequest,           OnLinkRequest);
         }
 
         private static void OnRequest(ServerClient client, KmhEnvelope env)
         {
             SendSnapshotTo(client);
+        }
+
+        // Mint a one-time Discord link code and return it, so the client can show a button instead of /kmh link.
+        private static void OnLinkRequest(ServerClient client, KmhEnvelope env)
+        {
+            string username = client?.GetData<UserFile>()?.Username;
+            if (string.IsNullOrEmpty(username)) return;
+            if (Discord.DiscordBridge.Config?.IsEnabled != true)
+            {
+                KmhRouter.Notify(client, "negative", "Discord linking isn't set up on this server.");
+                return;
+            }
+            string code = Discord.DiscordLinkFlow.IssueCodeFor(username);
+            int    mins = (int)Discord.DiscordLinkFlow.TimeToLive.TotalMinutes;
+            KmhRouter.SendTo(client, KmhProtocol.Kind.LinkCode, new { code = code, ttl_minutes = mins });
         }
 
         // Send the snapshot to a specific client. Used on request + when a freshly-handshaken client first

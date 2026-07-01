@@ -13,7 +13,7 @@ ones who have it.
 
 ## RWT version
 
-Recommended **RWT 26.6.9.1** — KMH v1.1.0 is built and tested around it. It also
+Recommended **RWT 26.6.9.1** — KMH v1.1.1 is built and tested around it. It also
 runs on **RWT 26.5.24.1** (the older RWT generation); the addon auto-detects
 which one it's sitting next to and binds the matching API automatically.
 
@@ -100,6 +100,10 @@ Drop `KMHServerAddon.exe` next to the official `GameServer.exe` and run the
 addon (not `GameServer.exe`). It needs the **.NET 8 runtime** on the server and
 loads RWT's own DLLs from that folder at runtime — it never bundles RimWorld
 Together. Full steps in [SETUP.txt](SETUP.txt).
+
+On a host without .NET 8, or a managed panel (Bisect, Pterodactyl, …) that runs
+a fixed `GameServer` launcher, use the **`-selfcontained`** zip (bundles .NET 8)
+and see the *Managed / panel hosts* section of [SETUP.txt](SETUP.txt).
 
 To **update**, replace `KMHServerAddon.exe` with the new build and restart.
 **Back up your server first** (or at least the `KMH-Data` folder) — KMH also
