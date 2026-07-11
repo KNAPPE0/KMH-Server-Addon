@@ -14,9 +14,24 @@ namespace KMHServerAddon.Persistence
         public int    DataFormatVersion { get; set; } = CurrentFormat;
         public string LastBuildVersion  { get; set; } = "";
         public string LastRunUtc        { get; set; } = "";
+        // Stable per-install id, minted once and kept, so external tooling can tell KMH instances apart on one host.
+        public string ServerId          { get; set; } = "";
+        // Highest recommended-defaults revision applied (see KmhDefaultsUpgrade). 0 = pre-1.2.0 file.
+        public int    DefaultsRevision  { get; set; } = 0;
 
         // Build that last ran, captured before the stamp is refreshed so boot can detect an upgrade. Blank on a fresh server.
         public static string PreviousBuildVersion { get; private set; } = "";
+
+        // This install's stable server id (set during ReconcileOnBoot).
+        public static string InstanceId { get; private set; } = "";
+
+        // Defaults revision loaded from disk; StampDefaultsRevision raises it after an upgrade pass.
+        public static int  AppliedDefaultsRevision { get; private set; }
+
+        // True when this boot found neither a meta stamp nor any irreplaceable data (brand-new server).
+        public static bool IsFreshInstall { get; private set; }
+
+        private static string _bootBuild = "";
 
         // Called once on boot, before stores load. Returns a human summary line for the log. Never throws.
         public static string ReconcileOnBoot()
@@ -24,13 +39,19 @@ namespace KMHServerAddon.Persistence
             try
             {
                 string build = typeof(KmhDataMeta).Assembly.GetName().Version?.ToString() ?? "?";
+                _bootBuild = build;
                 bool   had   = JsonFileStore.TryLoad(KmhDataPaths.MetaFile, out KmhDataMeta meta) && meta != null;
                 if (had) PreviousBuildVersion = meta.LastBuildVersion ?? "";
+                AppliedDefaultsRevision = had ? meta.DefaultsRevision : 0;
+
+                // Keep the existing server id, or mint one now and preserve it on every future write.
+                InstanceId = (had && !string.IsNullOrEmpty(meta.ServerId)) ? meta.ServerId : Guid.NewGuid().ToString("N");
 
                 if (!had)
                 {
                     // No stamp means new server or pre-stamp data; adopt it as current since earlier builds were additive-compatible.
                     bool hasData = HasExistingData();
+                    IsFreshInstall = !hasData;
                     Write(build);
                     return hasData
                         ? $"Data format: adopted existing data as format v{CurrentFormat} (first run with the format stamp)."
@@ -77,6 +98,14 @@ namespace KMHServerAddon.Persistence
             // if (from < 2) { ...reshape...; from = 2; }
         }
 
+        // Raise the applied-defaults marker (never lowers) so the one-shot upgrade doesn't re-run every boot.
+        public static void StampDefaultsRevision(int revision)
+        {
+            if (revision <= AppliedDefaultsRevision) return;
+            AppliedDefaultsRevision = revision;
+            Write(_bootBuild);
+        }
+
         private static void Write(string build)
         {
             try
@@ -86,6 +115,8 @@ namespace KMHServerAddon.Persistence
                     DataFormatVersion = CurrentFormat,
                     LastBuildVersion  = build,
                     LastRunUtc        = DateTime.UtcNow.ToString("o"),
+                    ServerId          = InstanceId,
+                    DefaultsRevision  = AppliedDefaultsRevision,
                 });
             }
             catch { /* stamp is advisory; a failed write just re-adopts next boot */ }

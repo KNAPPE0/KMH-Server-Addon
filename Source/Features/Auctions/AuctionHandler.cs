@@ -24,15 +24,7 @@ namespace KMHServerAddon.Features.Auctions
         }
 
         public static void BroadcastSnapshot()
-        {
-            foreach (ServerClient c in Network.ServerClients.Keys)
-            {
-                if (c?.IsVerified != true) continue;
-                string u = c.GetData<UserFile>()?.Username;
-                if (string.IsNullOrEmpty(u)) continue;
-                KmhRouter.SendTo(c, KmhProtocol.Kind.AuctionSnapshot, AuctionStore.BuildSnapshot(u));
-            }
-        }
+            => KmhRouter.BroadcastToInterested(KmhProtocol.Kind.AuctionSnapshot, u => AuctionStore.BuildSnapshot(u));
 
         private static void OnPost(ServerClient client, KmhEnvelope env)
         {
@@ -48,8 +40,11 @@ namespace KMHServerAddon.Features.Auctions
             long buyout    = env?.GetInt("buyout_silver", 0) ?? 0;
             int hours      = env?.GetInt("hours", 0) ?? 0;
             string vis     = env?.GetString("visibility") ?? "public";
+            string fingerprint = env?.GetString("fingerprint") ?? "";
 
-            (long id, string reason) = AuctionStore.Post(seller, itemDef, stuff, quality, qty, startBid, minInc, buyout, hours, vis);
+            (long id, string reason) = string.IsNullOrEmpty(fingerprint)
+                ? AuctionStore.Post(seller, itemDef, stuff, quality, qty, startBid, minInc, buyout, hours, vis)
+                : AuctionStore.PostPayload(seller, fingerprint, qty, startBid, minInc, buyout, hours, vis);
             KmhRouter.Notify(client, id > 0 ? "positive" : "negative", reason);
             if (id > 0)
             {

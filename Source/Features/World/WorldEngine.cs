@@ -10,9 +10,7 @@ using static KMHServerAddon.Util.KmhSafe;
 
 namespace KMHServerAddon.Features.World
 {
-    // Economy storyteller: a 1-min scheduler that expires events/quests, optionally auto-rolls events + auto-generates
-    // quests, and is the single path (owner command + auto-roll) that fires an event. Firing applies any instant
-    // effect, broadcasts the snapshot, and posts an in-game notice + Discord announce.
+    // Economy storyteller: 1-min scheduler that expires/auto-rolls events + auto-generates quests; single fire path.
     internal static class WorldEngine
     {
         private static readonly TimeSpan TickInterval = TimeSpan.FromMinutes(1);
@@ -24,8 +22,11 @@ namespace KMHServerAddon.Features.World
         public static void Start()
         {
             if (_cts != null) return;
-            _lastRollUtcTicks = DateTime.UtcNow.Ticks;
-            _lastQuestGenUtcTicks = DateTime.UtcNow.Ticks;
+            // Back-date so the first event/quest considers ~15/~30 min after boot, not a full interval later.
+            WorldConfig cfg = WorldConfig.Current;
+            long now = DateTime.UtcNow.Ticks;
+            _lastRollUtcTicks     = now - TimeSpan.FromMinutes(Math.Max(0, cfg.EventRollEveryMinutes - 15)).Ticks;
+            _lastQuestGenUtcTicks = now - TimeSpan.FromMinutes(Math.Max(0, cfg.QuestGenEveryMinutes  - 30)).Ticks;
             _cts = new CancellationTokenSource();
             Task.Run(() => RunLoop(_cts.Token));
             ServerLog.Verbose("World: engine started");
@@ -106,6 +107,7 @@ namespace KMHServerAddon.Features.World
                 (WorldEventDto.MarketCrash,    cfg.WeightMarketCrash),
                 (WorldEventDto.DoubleWorkerXp, cfg.WeightDoubleWorkerXp),
                 (WorldEventDto.HouseStipend,   cfg.WeightHouseStipend),
+                (WorldEventDto.WorldWeather,   cfg.WeightWorldWeather),
             };
             // A disabled event type never auto-rolls, regardless of its weight.
             for (int i = 0; i < weighted.Count; i++)
@@ -183,8 +185,31 @@ namespace KMHServerAddon.Features.World
                         ? $"Demand spikes server-wide for {FmtDuration(minutes)}."
                         : $"Demand spikes for {target} for {FmtDuration(minutes)}.";
                     break;
+                case WorldEventDto.WorldWeather:
+                {
+                    // Random pick from the pool (configured + discovered), or honor an explicit target defName.
+                    string[] pool = BuildWeatherPool(cfg);
+                    if (pool.Length == 0) return (false, "No WeatherConditionDefs configured in World.json.");
+                    string entry = null;
+                    if (!string.IsNullOrWhiteSpace(target))
+                    {
+                        foreach (string p in pool)
+                            if (string.Equals(p.Split('|')[0].Trim(), target.Trim(), StringComparison.OrdinalIgnoreCase))
+                            { entry = p; break; }
+                        if (entry == null) return (false, $"'{target}' is not in World.json WeatherConditionDefs.");
+                    }
+                    else entry = pool[_rng.Next(pool.Length)];
+
+                    string[] wp = entry.Split('|');
+                    target = wp[0].Trim();
+                    mag    = 0;
+                    title  = wp.Length > 1 && !string.IsNullOrWhiteSpace(wp[1]) ? wp[1].Trim() : target;
+                    desc   = (wp.Length > 2 && !string.IsNullOrWhiteSpace(wp[2]) ? wp[2].Trim() + " " : "")
+                           + $"Affects every colony for {FmtDuration(minutes)}.";
+                    break;
+                }
                 default:
-                    return (false, $"Unknown event type '{type}'. Try: tax_holiday, market_boom, market_crash, double_worker_xp, house_stipend, resource_shortage, bounty_target.");
+                    return (false, $"Unknown event type '{type}'. Try: tax_holiday, market_boom, market_crash, double_worker_xp, house_stipend, resource_shortage, bounty_target, world_weather.");
             }
 
             WorldEventDto e = WorldStore.AddEvent(type, title, desc, mag, target, minutes);
@@ -295,8 +320,7 @@ namespace KMHServerAddon.Features.World
             WorldHandler.BroadcastSnapshot();
         }
 
-        // Client item delivery to a deliver quest. Credited only against an active matching quest; otherwise no
-        // give-back (unverifiable removal = mint vector) - we just notify if the quest had ended.
+        // Credit a delivery to an active quest; if it just ended, the goods deposit to the player's treasury instead.
         public static void ApplyDelivery(string user, long questId, string itemDef, int qty)
         {
             if (string.IsNullOrEmpty(user) || qty <= 0) return;
@@ -309,7 +333,13 @@ namespace KMHServerAddon.Features.World
             }
             else if (r.Quest != null)
             {
-                NotifyUser(user, "That global quest just ended - your delivery wasn't applied.");
+                int cap = Economy.EconomyConfig.Current.MaxItemDepositQtyPerTx;
+                if ((cap <= 0 || qty <= cap) && Treasury.TreasuryStore.DepositItem(user, itemDef, qty, "quest-ended delivery refund"))
+                {
+                    ServerLog.Info($"World: quest #{questId} ended mid-delivery - {qty}x {itemDef} from {user} refunded to their treasury");
+                    NotifyUser(user, $"That global quest just ended - your {qty}x {itemDef} was deposited to your treasury instead.");
+                }
+                else NotifyUser(user, "That global quest just ended - your delivery wasn't applied.");
             }
         }
 
@@ -344,33 +374,56 @@ namespace KMHServerAddon.Features.World
             if (now - _lastQuestGenUtcTicks < TimeSpan.FromMinutes(cfg.QuestGenEveryMinutes).Ticks) return;
             _lastQuestGenUtcTicks = now;
             if (WorldStore.ActiveQuests().Count >= cfg.MaxActiveAutoQuests) return;
+            // Don't ask for a big hunt on an empty server.
+            int activePlayers = ActivePlayerCount();
+            if (activePlayers < Math.Max(0, cfg.GlobalQuestMinActivePlayers)) return;
 
-            // Pick a template whose objective the owner still allows.
-            string[] tpl = cfg.QuestTemplates;
-            if (tpl == null || tpl.Length == 0) return;
-            string chosen = PickAllowedTemplate(cfg, tpl);
-            if (chosen == null) return;
-            string[] parts = chosen.Split('|');
-            if (parts.Length < 2) return;
+            // Generated quest from the live item catalog first (owner-tunable chance), else a template.
+            string objective, defName, title, desc;
+            int goal;
+            if (!TryGenerateCatalogQuest(cfg, out objective, out defName, out title, out desc, out goal))
+            {
+                string[] tpl = cfg.QuestTemplates;
+                if (tpl == null || tpl.Length == 0) return;
+                string chosen = PickAllowedTemplate(cfg, tpl);
+                if (chosen == null) return;
+                string[] parts = chosen.Split('|');
+                if (parts.Length < 2) return;
 
-            string objective = parts[0].Trim().ToLowerInvariant();
-            string defName   = parts[1].Trim();
-            string title     = parts.Length > 2 ? parts[2].Trim() : "";
-            string desc      = parts.Length > 3 ? parts[3].Trim() : "";
-            int    goal      = _rng.Next(cfg.QuestAutoGoalMin, cfg.QuestAutoGoalMax + 1);
+                objective = parts[0].Trim().ToLowerInvariant();
+                defName   = parts[1].Trim();
+                title     = parts.Length > 2 ? parts[2].Trim() : "";
+                desc      = parts.Length > 3 ? parts[3].Trim() : "";
+                // Hunt/build goal scales with active players (clamped), so it stays achievable at any population.
+                goal = (cfg.GlobalQuestScaleByActivePlayers
+                        && (objective == ServerQuestDto.ObjHunt || objective == ServerQuestDto.ObjBuild))
+                    ? ScaledTargetCount(cfg, defName, activePlayers)
+                    : _rng.Next(cfg.QuestAutoGoalMin, cfg.QuestAutoGoalMax + 1);
+            }
+
+            // Avoid hammering the same target back-to-back.
+            if (!cfg.GlobalQuestAllowSameTargetRepeat && TargetOnCooldown(defName, cfg.GlobalQuestRepeatTargetCooldownHours))
+            {
+                ServerLog.Verbose($"World: skipped auto-quest - target '{defName}' on repeat cooldown.");
+                return;
+            }
+
             long   target    = ComputeAutoReward(cfg, defName, goal);
 
             long reward;
             if (cfg.AllowMintedRewards)
             {
                 // Central bank tops the reward up to at least the floor, so global quests are always worth doing.
+                // Re-clamp to the max AFTER the floor so QuestMinReward can never bypass QuestRewardMaxReward.
                 reward = Math.Max(target, cfg.QuestMinReward);
+                if (cfg.QuestRewardMaxReward > 0) reward = Math.Min(reward, cfg.QuestRewardMaxReward);
             }
             else
             {
                 // Closed loop: promise only what the house pool can back. Skip rather than post a sub-floor grind.
                 long pool = Marketplace.MarketplaceStore.HousePoolBalance();
                 reward = Math.Min(target, pool);
+                if (cfg.QuestRewardMaxReward > 0) reward = Math.Min(reward, cfg.QuestRewardMaxReward);
                 if (reward < cfg.QuestMinReward)
                 {
                     ServerLog.Info($"World: skipped auto-quest - house pool ({pool}) below the {cfg.QuestMinReward} minimum reward (minting off).");
@@ -378,8 +431,116 @@ namespace KMHServerAddon.Features.World
                 }
             }
 
+            int durationMin = Clamp(cfg.GlobalQuestDefaultDurationHours, cfg.GlobalQuestMinDurationHours, cfg.GlobalQuestMaxDurationHours) * 60;
+            if (durationMin <= 0) durationMin = cfg.QuestDefaultMinutes;   // fallback if hours misconfigured
+            RememberTarget(defName);
             CreateWorldQuest(ServerQuestDto.KindCooperative, objective, defName, goal, reward,
-                             cfg.QuestDefaultMinutes, title, desc, "auto");
+                             durationMin, title, desc, "auto");
+        }
+
+        // Active players = verified online clients (the reliable signal; "recently active" maps to online for now).
+        private static int ActivePlayerCount()
+        {
+            int n = 0;
+            try { foreach (ServerClient c in Network.ServerClients.Keys) if (c?.IsVerified == true) n++; }
+            catch { }
+            return n;
+        }
+
+        // goal = clamp(Base + activePlayers * PerPlayer * targetDifficulty * DifficultyMultiplier, Min, Max).
+        private static int ScaledTargetCount(WorldConfig cfg, string defName, int activePlayers)
+        {
+            double diff = TargetDifficulty(defName) * (cfg.GlobalQuestDifficultyMultiplier <= 0 ? 1.0 : cfg.GlobalQuestDifficultyMultiplier);
+            double raw  = cfg.GlobalQuestBaseTargetCount + Math.Max(0, activePlayers) * cfg.GlobalQuestTargetsPerActivePlayer * diff;
+            return Clamp((int)Math.Round(raw), cfg.GlobalQuestMinTargetCount, cfg.GlobalQuestMaxTargetCount);
+        }
+
+        // Rough difficulty from the target name: small/common animals ask for more, big/dangerous ones fewer.
+        private static double TargetDifficulty(string defName)
+        {
+            string d = (defName ?? "").ToLowerInvariant();
+            if (d.Contains("thrumbo") || d.Contains("megasloth") || d.Contains("rhino") || d.Contains("elephant")
+                || d.Contains("bear") || d.Contains("scaria") || d.Contains("mech")) return 1.5;
+            if (d.Contains("muffalo") || d.Contains("bison") || d.Contains("caribou") || d.Contains("boomalope")
+                || d.Contains("cow") || d.Contains("horse") || d.Contains("deer") || d.Contains("ostrich")) return 1.25;
+            if (d.Contains("rat") || d.Contains("squirrel") || d.Contains("hare") || d.Contains("chicken")
+                || d.Contains("rabbit") || d.Contains("chinchilla")) return 0.75;
+            return 1.0;
+        }
+
+        private static int Clamp(int v, int lo, int hi)
+        {
+            if (lo > hi) { int t = lo; lo = hi; hi = t; }
+            return v < lo ? lo : (v > hi ? hi : v);
+        }
+
+        // Recent auto-quest targets, so the same def isn't chosen again within the cooldown window.
+        private static readonly System.Collections.Generic.Dictionary<string, long> _recentTargets
+            = new System.Collections.Generic.Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        private static bool TargetOnCooldown(string defName, int cooldownHours)
+        {
+            if (string.IsNullOrEmpty(defName) || cooldownHours <= 0) return false;
+            lock (_recentTargets)
+                return _recentTargets.TryGetValue(defName, out long ticks)
+                    && DateTime.UtcNow.Ticks - ticks < TimeSpan.FromHours(cooldownHours).Ticks;
+        }
+        private static void RememberTarget(string defName)
+        {
+            if (string.IsNullOrEmpty(defName)) return;
+            lock (_recentTargets)
+            {
+                _recentTargets[defName] = DateTime.UtcNow.Ticks;
+                if (_recentTargets.Count > 64)   // bound
+                {
+                    string oldest = null; long oldestT = long.MaxValue;
+                    foreach (var kv in _recentTargets) if (kv.Value < oldestT) { oldestT = kv.Value; oldest = kv.Key; }
+                    if (oldest != null) _recentTargets.Remove(oldest);
+                }
+            }
+        }
+
+        // Configured weather entries + (opt-in) client-discovered GameConditionDefs minus the owner's exclusions.
+        private static string[] BuildWeatherPool(WorldConfig cfg)
+        {
+            List<string> pool = new List<string>(cfg.WeatherConditionDefs ?? Array.Empty<string>());
+            if (cfg.AutoDiscoverWeather)
+            {
+                HashSet<string> have = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (string p in pool) have.Add(p.Split('|')[0].Trim());
+                foreach (KeyValuePair<string, string> kv in ItemLabels.WeatherDefCache.All())
+                {
+                    if (have.Contains(kv.Key) || !cfg.WeatherDefAllowed(kv.Key)) continue;
+                    pool.Add($"{kv.Key}|{kv.Value}|A wave of {kv.Value.ToLowerInvariant()} sweeps every colony.");
+                }
+            }
+            return pool.ToArray();
+        }
+
+        // Deliver quest from the live item catalog; false when the chance misses, deliver is off, or no item fits.
+        private static bool TryGenerateCatalogQuest(WorldConfig cfg, out string objective, out string defName,
+                                                    out string title, out string desc, out int goal)
+        {
+            objective = ServerQuestDto.ObjDeliver; defName = null; title = null; desc = null; goal = 0;
+            if (cfg.GeneratedQuestChance <= 0 || _rng.Next(100) >= cfg.GeneratedQuestChance) return false;
+            if (!cfg.ObjectiveAllowed(ServerQuestDto.ObjDeliver)) return false;
+
+            var pick = ItemLabels.ItemLabelCache.RandomDeliverable(cfg.GeneratedItemMinValue, cfg.GeneratedItemMaxValue, _rng);
+            if (pick == null) return false;
+            (string def, string label, long value) = pick.Value;
+
+            defName = def;
+            goal    = (int)Math.Max(1, Math.Min(cfg.GeneratedQuestGoalValue / Math.Max(1, value), cfg.QuestAutoGoalMax));
+            switch (_rng.Next(3))
+            {
+                case 0:  title = $"Supply Run: {label}";
+                         desc  = $"The realm requisitions {label} - every delivery counts toward the shared reward."; break;
+                case 1:  title = $"Shortage: {label}";
+                         desc  = $"Stockpiles of {label} are running dry across the realm. Deliver what you can spare."; break;
+                default: title = $"Requisition: {label}";
+                         desc  = $"A standing order for {label} has been posted. Fill it before it expires."; break;
+            }
+            ServerLog.Info($"World: generated deliver quest from the live catalog ({goal}x {def}, unit value {value})");
+            return true;
         }
 
         // Random template whose objective the owner currently allows; null if none qualify.
@@ -394,18 +555,16 @@ namespace KMHServerAddon.Features.World
             return ok.Count == 0 ? null : ok[_rng.Next(ok.Count)];
         }
 
-        // Auto-gen reward target: the largest of (house-pool %), (a per-mille slice of total colony wealth - the
-        // live server economy), and (the real RimWorld value of the requested goods: goal x reported BaseMarketValue),
-        // clamped to the configured cap. This is the DESIRED reward; how much of it is pool-backed vs minted is
-        // decided by the caller + CreateWorldQuest. The value term is 0 until a client has reported the target's price.
+        // Desired reward = max(house-pool %, wealth per-mille, goal x reported item value), clamped to the cap.
         private static long ComputeAutoReward(WorldConfig cfg, string targetDef, int goal)
         {
             long pool   = Marketplace.MarketplaceStore.HousePoolBalance();
             long wealth = PlayerStats.PlayerStatsStore.TotalReportedWealth();
             long unit   = ItemLabels.ItemLabelCache.BaseValue(targetDef);
             long byValue = unit > 0 ? unit * Math.Max(1, goal) * cfg.QuestRewardValuePercent / 100 : 0;
+            long perTarget = (long)Math.Max(0, cfg.GlobalQuestRewardPerTarget) * Math.Max(1, goal);   // bigger quest -> bigger pool
             long target = Math.Max(pool * cfg.QuestRewardHousePoolPercent / 100,
-                          Math.Max(wealth * cfg.QuestRewardWealthPermille / 1000, byValue));
+                          Math.Max(wealth * cfg.QuestRewardWealthPermille / 1000, Math.Max(byValue, perTarget)));
             if (target > cfg.QuestRewardMaxReward) target = cfg.QuestRewardMaxReward;
             return target;
         }

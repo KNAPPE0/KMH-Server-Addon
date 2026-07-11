@@ -4,13 +4,11 @@ using KMHServerAddon.Persistence;
 
 namespace KMHServerAddon.Features
 {
-    // Owner switches for the major KMH systems (KMH-Data/Config/Features.json). All default on, so an existing server
-    // keeps every feature. Turning one off blocks its requests server-side (see KmhRouter) and tells the client to show
-    // it as disabled; stored data is never touched, so re-enabling brings everything back.
-    //
-    // Transport and Discord aren't here - they keep their own configs (Config/Transport.json, Config/Discord).
+    // Owner on/off switches for the major KMH systems (all default on). Turning one off blocks its requests server-side
+    // and shows it disabled client-side; stored data is untouched, so re-enabling restores everything.
     internal sealed class FeaturesConfig
     {
+        public int  SchemaVersion { get; set; } = 1;
         public bool Treasury    { get; set; } = true;
         public bool Marketplace { get; set; } = true;
         public bool Guilds      { get; set; } = true;

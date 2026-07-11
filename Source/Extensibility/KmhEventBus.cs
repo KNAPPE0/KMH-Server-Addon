@@ -5,12 +5,8 @@ using KMHServerAddon.Diagnostics;
 
 namespace KMHServerAddon.Extensibility
 {
-    // Single-instance event hub that extensions subscribe to and KMH
-    // internals raise events on. Implements IKmhEvents so every host
-    // instance hands extensions the same singleton - subscribing on one host wires you up to all events
-    //
-    // Subscriber-throw protection: each event handler is called inside a try/catch so a misbehaving extension can't
-    // break dispatch for other extensions
+    // Singleton event hub extensions subscribe to. Each handler runs in a try/catch so one misbehaving extension can't
+    // break dispatch for the others.
     internal sealed class KmhEventBus : IKmhEvents
     {
         public static KmhEventBus Instance { get; } = new KmhEventBus();
@@ -40,6 +36,10 @@ namespace KMHServerAddon.Extensibility
         public event Action<GlobalQuestCreatedEvent>   GlobalQuestCreated;
         public event Action<GlobalQuestCompletedEvent> GlobalQuestCompleted;
         public event Action<GlobalQuestExpiredEvent>   GlobalQuestExpired;
+        public event Action<BackupCreatedEvent>        BackupCreated;
+        public event Action<RestoreAppliedEvent>       RestoreApplied;
+        public event Action<SnapshotCreatedEvent>      SnapshotCreated;
+        public event Action<SeasonRolledEvent>         SeasonRolled;
 
         // Raise helpers called by KMH internals. Each one walks the delegate chain manually so one throwing
         // subscriber doesn't stop the others - Action<T>.Invoke would short-circuit on first exception
@@ -67,6 +67,10 @@ namespace KMHServerAddon.Extensibility
         internal void RaiseGlobalQuestCreated  (GlobalQuestCreatedEvent   e) => SafeRaise(GlobalQuestCreated,   e, nameof(GlobalQuestCreated));
         internal void RaiseGlobalQuestCompleted(GlobalQuestCompletedEvent e) => SafeRaise(GlobalQuestCompleted, e, nameof(GlobalQuestCompleted));
         internal void RaiseGlobalQuestExpired  (GlobalQuestExpiredEvent   e) => SafeRaise(GlobalQuestExpired,   e, nameof(GlobalQuestExpired));
+        internal void RaiseBackupCreated       (BackupCreatedEvent        e) => SafeRaise(BackupCreated,        e, nameof(BackupCreated));
+        internal void RaiseRestoreApplied      (RestoreAppliedEvent       e) => SafeRaise(RestoreApplied,       e, nameof(RestoreApplied));
+        internal void RaiseSnapshotCreated     (SnapshotCreatedEvent      e) => SafeRaise(SnapshotCreated,      e, nameof(SnapshotCreated));
+        internal void RaiseSeasonRolled        (SeasonRolledEvent         e) => SafeRaise(SeasonRolled,         e, nameof(SeasonRolled));
 
         private static void SafeRaise<T>(Action<T> evt, T payload, string name)
         {

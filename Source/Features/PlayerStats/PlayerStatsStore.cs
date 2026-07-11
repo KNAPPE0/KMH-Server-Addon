@@ -75,6 +75,25 @@ namespace KMHServerAddon.Features.PlayerStats
             }
         }
 
+        // Season reset: clear the leaderboard, colonist profiles, and rosters for a fresh season.
+        public static void ClearForNewSeason()
+        {
+            lock (_lock) { _entries.Clear(); _colonists.Clear(); _rosters.Clear(); }
+            SaveToDisk();
+            SaveColonistsToDisk();
+        }
+
+        // Admin player-cleanup: drop one player's standings/colonist/roster data. Returns true if anything was removed.
+        public static bool RemoveUser(string username)
+        {
+            if (string.IsNullOrEmpty(username)) return false;
+            bool removed;
+            lock (_lock)
+                removed = _entries.Remove(username) | _colonists.Remove(username) | _rosters.Remove(username);
+            if (removed) { SaveToDisk(); SaveColonistsToDisk(); }
+            return removed;
+        }
+
         // Snapshot under lock, write outside lock (disk I/O can be slow;
         // shouldn't block concurrent mutations).
         public static void SaveToDisk()
@@ -376,7 +395,7 @@ namespace KMHServerAddon.Features.PlayerStats
             {
                 if (_entries.TryGetValue(username, out PlayerLeaderboardEntry e))
                 {
-                    e.SilverDonated += delta;
+                    e.SilverDonated = Math.Max(0, e.SilverDonated + delta); // never negative (withdraw nets it down)
                     RecomputeEconomyScoreLocked(e);
                 }
             }

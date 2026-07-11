@@ -12,10 +12,11 @@ Then run KMHServerAddon.exe (NOT GameServer.exe).
 KMHServerAddon.exe is a single file. It works with the GameServer.exe you put
 next to it, adds the KMH features, and starts the server. It detects which
 server version it sits next to (RWT 26.5.24.1 or 26.6.9.1) and uses the matching
-build automatically. Recommended RWT version: 26.6.9.1. RWT 26.6.23.1 and newer
-is experimental / compatibility-in-progress - don't update to it yet. On first
-run it creates KMH-Data/ (configs + state), kmh-extensions/, and a small
-.rwt-runtime/ cache next to itself.
+build automatically. Recommended RWT version: 26.6.9.1. On RWT 26.6.23.1 and
+newer, RWT chat is not a reliable KMH carrier - keep the KMH API transport
+enabled (the default since v1.2.0); it's the recommended/required path there.
+On first run it creates KMH-Data/ (configs + state), kmh-extensions/, and a
+small .rwt-runtime/ cache next to itself.
 
 Requirement
 -----------
@@ -26,6 +27,17 @@ runtime - it can't reach the one baked inside the self-contained GameServer.exe.
 That's the one thing the owner installs once.)
 
 If GameServer.exe isn't in the folder, KMH says so and stops.
+
+Updating from 1.1.1
+-------------------
+Update EVERY player's KMH-Patch mod to 1.2.0 alongside the server. The wire
+protocol advanced to v2 in 1.2.0 (deposit rules changed), so a still-on-1.1.1
+client can't safely use the new economy. Rather than let it half-work and lose
+items, the version gate simply disables KMH for that client - they see a clear
+"KMH disabled: server protocol vX vs your vY, update the KMH-Patch mod" notice
+and fall back to plain RWT until they update. Update the server first, then
+players; back up KMH-Data before the first 1.2.0 boot (the server also auto-
+backs-up on boot by default) and run 'kmh validate all' afterward.
 
 No .NET 8 on your host (managed panels often pin an older one)? Grab the
 "-selfcontained" zip instead - it bundles .NET 8, so there's nothing to install.
@@ -50,30 +62,253 @@ run KMHServerAddon.exe. Two ways to fix it:
     Redo the two renames after any RWT update - it restores the stock launcher.
     On a host without .NET 8, use the -selfcontained zip for this.
 
-KMH API transport (experimental) - security
+KMH API transport - security & public setup
 -------------------------------------------
-Off by default (Config/Transport.json EnableKmhApiTransport=false). When you turn
-it on it's secure by default: binds 127.0.0.1 (local only), auth required, and
-connection/auth-flood caps. To allow REMOTE players set BindAddress=0.0.0.0 and
-forward the port - keep RequireKmhApiAuth=true. The server prints a clear warning
-at boot if it's public or auth is off. Tunables in Transport.json: MaxConnections,
+ON by default since v1.2.0 (Config/Transport.json EnableKmhApiTransport=true,
+BindAddress=0.0.0.0) - the recommended transport path for newer RWT versions.
+Do not enable unsafe transport exposure. Public KMH API Transport is allowed by
+default only because auth, caps, throttling, limits, and warnings are required
+by default. Public bind must not mean unsecured bind.
+
+Public setup (remote players):
+  1. Forward TCP port 5099 (KmhApiPort) to the server machine, external =
+     internal port number.
+  2. Keep RequireKmhApiAuth=true. Every connection authenticates with a one-time
+     token issued over the player's verified RWT session.
+  3. After updating, run `kmh transport-test` - it self-checks the caps,
+     throttle and posture and prints PASS/FAIL per guard.
+Local-only instead? Set BindAddress=127.0.0.1. Chat fallback keeps KMH working
+either way on RWT versions that still carry it.
+
+Required-by-default safety (all tunable in Transport.json, all clamped so a bad
+edit can't disable a guard): RequireKmhApiAuth, MaxConnections,
 MaxConnectionsPerIp, AuthTimeoutSeconds, IdleTimeoutSeconds, MaxFrameKb,
-FailedAuthPerIp/WindowSeconds/BlockSeconds.
+FailedAuthPerIp/WindowSeconds/BlockSeconds. If you disable auth or expose the
+port unsafely the server prints a loud warning at boot - public bind + auth off
+is never a silent setup.
+
+Multiple servers on one host: give each KMH instance its OWN KmhApiPort in its
+KMH-Data/Config/Transport.json (like each RWT server has its own port). The server
+tells the client its port in the handshake, so the client always dials the right
+one - just as a player joins RWT 25554-25557, KMH connects to that server's KMH
+API port. Two instances sharing a port = the second fails to bind and quietly
+stays on chat (logged at boot). For remote players, forward each KmhApiPort
+(keep external = internal port number).
+
+Client debug uplink (diagnosing player-side issues)
+---------------------------------------------------
+Players can enable "Send debug logs to the server" in the mod options; every KMH
+log line from their game then lands in KMH-Data/Debug/<user>_<timestamp>.txt
+(one file per player session, every line arrival-timestamped). To turn it on for
+EVERYONE automatically, set DebugLogging=true in Config/Transport.json - the
+handshake tells connecting clients to start uplinking (verbose logging is forced
+on for their session; their saved setting is untouched). Abuse-bounded: 300
+lines/min and 10 MB per player, lines truncated at 400 chars, files pruned after
+14 days, folder excluded from backups.
+
+Living world - on by default since v1.2.0
+-----------------------------------------
+World events and global quests now run by themselves so the server feels alive
+without any owner setup:
+  - World events auto-roll: considered every 4h with a 40% chance (~one event
+    per 10h on average, so timing feels organic, not scheduled), lasting 3h by
+    default. Types: tax holiday, market boom/crash, resource shortage, double
+    worker XP, house stipend, bounty target, global weather - weights and
+    allowed types are owner-tunable.
+  - Global weather: a rolled event applies a real GameCondition (aurora,
+    eclipse, cold snap, heat wave by default) to EVERY colony for the duration.
+    Fully data-driven via World.json WeatherConditionDefs entries of
+    "GameConditionDef|Title|Description" - add any vanilla or modded condition
+    def, no code needed. Fire one manually: kmh event world_weather [minutes]
+    [0] [DefName].
+  - Global quests auto-generate: considered every 12h, up to 2 active, 24h
+    duration. Rewards are real silver from the house pool (seeded once on new
+    servers), scale with the live economy, and are floored/capped
+    (QuestMinReward/QuestRewardMaxReward) so quests never spam worthless or
+    economy-breaking payouts.
+  - Everything announces once in-game and (if configured) to the Discord
+    Announcements channel when it fires/completes - no periodic spam.
+
+  - Generated content: by default 60% of auto-generated quests are synthesized
+    from YOUR server's live item catalog (items + prices reported by clients) -
+    "Shortage: cloth", "Supply Run: steel" - instead of the premade templates.
+    Tune with GeneratedQuestChance (0 = templates only), the value band
+    (GeneratedItemMinValue/MaxValue) and GeneratedQuestGoalValue.
+  - Global-quest balance (v1.2.0): hunt/build goals now SCALE with active players
+    so a quiet server isn't asked for 58 kills. goal = clamp(GlobalQuestBaseTargetCount
+    + activePlayers * GlobalQuestTargetsPerActivePlayer * difficulty, Min, Max)
+    (GlobalQuestMinTargetCount/MaxTargetCount, GlobalQuestDifficultyMultiplier). Set
+    GlobalQuestScaleByActivePlayers=false for the old fixed 20-60 goal. Default
+    duration is now GlobalQuestDefaultDurationHours=48 (clamped 24-72). Auto-gen is
+    skipped below GlobalQuestMinActivePlayers, and the same target isn't reused within
+    GlobalQuestRepeatTargetCooldownHours. Reward pool adds GlobalQuestRewardPerTarget
+    per goal unit; co-op payout is split BY CONTRIBUTION (you earned 12 of 58 -> ~12/58
+    of the pool). Kill counting is fixed: a direct kill counts ONCE, and a target that
+    bleeds out after recent colonist damage now counts (predator/weather deaths don't).
+  - Weather can be
+    auto-discovered too: clients report every GameConditionDef in their game
+    (mods included) into Catalog/WeatherDefs.json; set AutoDiscoverWeather=true
+    to roll those as well (ExcludedWeatherDefs blocks colony-wreckers like
+    toxic fallout - extend it for harsh modded conditions).
+
+How quests verify themselves (no admin approval needed):
+  - hunt:    the client counts kills of the target def (persistent tally, saved
+             with the game) and auto-reports progress every ~4s; only kills made
+             AFTER the quest went live count.
+  - build:   the client counts standing player-faction structures of the target
+             def and auto-reports growth; pre-existing buildings never count.
+  - deliver: deliberate by design - players click Deliver on the quest board and
+             the goods leave their colony/caravan. If the quest ends mid-delivery
+             the items are deposited to their treasury instead of being lost.
+  Progress reports are cumulative and resend-safe (the server keeps each
+  player's max), and world snapshots are pushed to every connected player on
+  change - nobody has to open a menu for their progress to count.
+
+Per-item control (keep some, disable others) - all in Config/World.json:
+  - One event type:      remove it from AllowedEventTypes, or set its Weight*
+                         to 0 to stop auto-rolls but keep manual firing.
+  - One weather kind:    remove its line from WeatherConditionDefs (and add its
+                         defName to ExcludedWeatherDefs if discovery is on).
+  - One quest objective: remove hunt/build/deliver from AllowedObjectives.
+  - One quest template:  delete its line from QuestTemplates.
+  - Generated quests:    GeneratedQuestChance=0.
+Quieter server overall? Set AutoRollEvents=false and/or AutoGenerateQuests=false
+(manual `kmh event` / `kmh worldquest` still work), or turn the whole system off
+with LivingWorld=false in Config/Features.json.
+
+Updating from 1.1.x: these recommended defaults are applied ONCE by a marker-
+gated migration. Values you customized are preserved; everything the migration
+touches is logged at boot ("Defaults upgrade:" lines) and summarized in a
+must-read notice ~5s after startup (also posted to your Discord Admin channel
+if one is configured). If you re-disable something afterwards it stays off -
+the migration never re-runs.
 
 Config (KMH-Data/Config/)
 -------------------------
-  Economy.json          marketplace/auction/want tax, caps, price floors
-  Sites.json            custom-site pricing, worker XP, cycle rate
+  Economy.json          marketplace/auction/want tax, caps, price floors. Deposits are
+                        client-trusted, so MaxSilverDepositPerTx / MaxItemDepositQtyPerTx
+                        reject an absurd single deposit (anti-mint). Keep them generous -
+                        the client removes the goods before sending, so a legit deposit at
+                        or under the cap must never be rejected. 0 disables a cap.
+
+                        ECONOMY / TREASURY ACCESS MODES (P7; default Standard = current
+                        behavior, nothing changes). EconomyMode is a preset:
+                          Standard  - remote treasury, no cooldowns/fees/caps (default).
+                          Balanced  - remote, light 5s cooldowns + 1% deposit/withdraw fee.
+                          Localized - PersonalTreasuryAccessMode=ColonyOnly, item moves need
+                                      a caravan, treasury blocked during raids.
+                          Hardcore  - CaravanOnly, block during raids AND hostile map events,
+                                      10s cooldowns + 2% fees.
+                          Custom    - uses the granular fields below verbatim.
+                        Granular fields (used when EconomyMode=Custom):
+                          PersonalTreasuryAccessMode = Remote | ColonyOnly | CaravanOnly |
+                                                       TreasurySiteRequired | Disabled
+                          GuildTreasuryAccessMode    = Remote | GuildHallRequired |
+                                                       CaravanNearGuildHall | Disabled
+                          TreasuryDeposit/WithdrawCooldownSeconds (0 = none)
+                          TreasuryDeposit/WithdrawFeePercent (0..50; silver-only
+                            service fee -> the house pool, same sink as marketplace
+                            tax. Deposit fee credits only when the pending deposit
+                            commits; withdraw fee on success. Item deposits/withdraws
+                            pay no fee. Balanced=1/1, Hardcore=2/2, others 0.)
+                          MaxPersonal/GuildTreasurySilver (0 = no cap)
+                          RequireCaravanForItemDeposit / ...Withdraw
+                          BlockTreasuryDuringRaid / BlockTreasuryDuringHostileMapEvent
+                        The client reports context (colony/caravan/raid/hostile-event/near-
+                        guild-hall) with each treasury/guild action; the server enforces per
+                        mode. TreasurySiteRequired still fails gracefully (behaves as Remote +
+                        one-time warning) since Treasury Sites aren't built yet. Pending
+                        (unconfirmed) deposits stay non-spendable regardless of mode. The boot
+                        banner + 'kmh audit' show the active policy.
+
+                        PASSIVE INCOME vs ACCESS MODES: access modes gate PLAYER-INITIATED
+                        deposits/withdraws only. Earned/returned value - site rewards, and
+                        marketplace / auction / want payouts and refunds - is deposited directly
+                        and still accrues into the vault under any mode. Under a restrictive mode
+                        the player simply can't WITHDRAW it until they meet the access rule; under
+                        Disabled it accrues but stays locked until you re-enable access. This is
+                        intentional (earned value is never dropped); 'kmh validate configs' prints
+                        an [INFO] line whenever a non-Remote mode is set so it's never a surprise.
+
+                        GUILD HALL RULES (P8; ALL disabled by default - standard guilds
+                        unchanged). A guild's hall is a world-tile record stored ON the guild
+                        (so it can't be orphaned or inherited by a reused name; disband/season
+                        reset drop it with the guild). An admin sets it from the Guild Hall
+                        dialog ("Set Hall here" = their current colony/caravan tile). Fields:
+                          RequireGuildHallToCreateGuild          (create needs a hall tile)
+                          RequireGuildHallForGuildTreasury       (guild vault needs a hall)
+                          RequireGuildHallForGuildContributions  (contributing needs a hall)
+                          GuildHallAccessRadiusTiles = 10        ("near" = within N tiles)
+                          RequireCaravanNearGuildHallForContribution
+                          RequireMemberNearGuildHallToJoin
+                          AllowRemoteGuildInvites = true         (false = invite near the hall)
+                        These integrate with P7: GuildTreasuryAccessMode=GuildHallRequired /
+                        CaravanNearGuildHall now enforce via the client's near-hall check.
+                        COMPATIBILITY: a guild with NO hall is never blocked by proximity (so
+                        pre-P8 guilds keep working); the Require* flags are what force a hall to
+                        exist first. Proximity is client-computed against the server-owned hall
+                        tile+radius (best available - the standalone server can't do tile math).
+                        'kmh audit' lists guilds missing a required hall.
+  Sites.json            custom-site pricing, worker XP, cycle rate. Cost + cycle also
+                        scale with amount/cycle (client can't fake amount) so an under-
+                        reported item value can't buy a cheap high-output site. The server
+                        uses its TRUSTED catalog value (not the client's) for build cost and
+                        logs suspicious under-reports. Anti-spam caps:
+                        MaxSitesPerPlayer/PerGuild/ServerWide, MaxWorkerSitesPerPlayer,
+                        BuildCooldownMinutes. Worker skill from the client is advisory only;
+                        server-owned site XP is authoritative. Lower CustomSiteMaxRewardAmount
+                        or set AllowCustomSites=false to bound further.
+
+                        OUTPUT TIERS (server-authoritative; UseSiteOutputTiers=true):
+                        every output is classified into a tier that decides allow/block, the
+                        per-cycle amount cap, cost/cycle multipliers, and how far workers can
+                        scale it. Unknown/rare/tech items land in Tier 4 (DefaultUnknownOutputTier
+                        =4), which ships DISABLED - so a site can NEVER print weapons, apparel,
+                        tech/techprints, bionics, ammo, genes, relics, drugs, or minified
+                        buildings. Tiers: 1 Basic (wood/raw/hay/meat), 2 Refined
+                        (steel/cloth/blocks/meals), 3 Advanced (plasteel/uranium/gold/components),
+                        4 Crafted/Rare/Tech (off). Each tier in OutputTiers[] has the same fields:
+                        Enabled, Name, MaxAmount, CostMultiplier, CycleMultiplier,
+                        MaxSpeedMultiplier, MaxOutputMultiplier, AllowAutoClassifiedItems,
+                        Allowed/BlockedDefNames, Allowed/BlockedKeywords (Blocked* always win).
+                        MaxAllowedSiteOutputTier caps the highest usable tier server-wide.
+                        WORKERS = SPEED, SKILL = AMOUNT, each capped by the tier (Tier 4 never
+                        multiplies output). An over-limit build amount is REJECTED (not silently
+                        clamped) and the treasury isn't charged. AutoAddOwnerAsSiteWorker=true
+                        makes the owner count as a worker so a solo/private site produces (0
+                        workers = Paused). To allow a specific extra item, add its defName to a
+                        tier's AllowedDefNames; to allow Tier 4, set OutputTiers[3].Enabled=true.
+                        RewardIntervalSeconds is only the poll cadence, NOT the payout timer -
+                        each site's own cycle time (base / worker speed) decides when it pays.
+                        Legacy RestrictOutputsToSimpleResources still applies when
+                        UseSiteOutputTiers=false. Old Sites.json loads and gets a tier computed.
+  (Treasury items)      Complex items (weapons/apparel/minified/comp/modded) are stored
+                        with full state (Treasury.json item_payloads) so a deposit->withdraw
+                        round-trip never cleans taint, repairs damage, rerolls quality, or
+                        strips material/comp data; clean/tainted and damaged/undamaged stacks
+                        never merge. Plain resources stay compact (items map). Items deposited
+                        before v1.2.0's payload system load as LEGACY - their exact state can't
+                        be proven, so restore-preview flags them and they never silently become
+                        clean/full-value.
   Reputation.json       score deltas + tier cutoffs
   Quests.json           per-poster caps, expiry
   World.json            server event + global-quest scheduler / reward tuning
+                        (auto-roll + auto-generate ON by default since v1.2.0)
   Features.json         turn major systems on/off (treasury, marketplace, guilds,
                         quests, auctions, want board, world, standings). All on by
                         default; off blocks that system server-side and clients show
                         it as disabled. Stored data is kept - re-enable to restore it.
   Enforcement.json      config-enforcement state + safe-mods list
-  Maintenance.json      automatic-backup + boot integrity-scan settings
-  Discord/DiscordConfig.json   paste a bot token to enable the Discord bridge
+  Maintenance.json      ServerName (this instance's friendly name - set a distinct one
+                        per server on a shared host), automatic-backup + boot scan settings
+  Discord/DiscordConfig.json   paste a bot token to enable the Discord bridge. Running
+                        several bots in one Discord? Set Bot.RequireMention=true so each
+                        only answers !kmh-* text commands that @mention it (e.g.
+                        "@KMH-25554 !kmh-link CODE") - otherwise all of them reply. Slash
+                        commands are already per-bot. DMs still work without a mention.
+                        Set Roles.SyncGuildRoles=true to give linked players a Discord role
+                        named "<Guild> (<Rank>)" that tracks their KMH guild + rank (needs
+                        the bot to have Manage Roles + its role above the ones it creates).
   (Transport and Discord have their own on/off switch in their files above.)
 All are generated with defaults on first boot. Reload economy/site config live
 (in-game chat or server console):  kmh reload-economy
@@ -84,10 +319,57 @@ KMH backs up KMH-Data/ on every boot (into a sibling KMH-Data-Backups/ folder)
 and scans it for problems at startup. Owner commands (console or /kmh server):
   kmh verify              read-only integrity scan
   kmh backup [reason]     snapshot KMH-Data now    |  kmh backups   list them
+  kmh restore <name|latest|before:<time>>   roll KMH-Data back to a backup
   kmh inspect <system>    dump auctions/wants/quests/... with ids
   kmh cancel <auction|want|quest> <id>   refund + remove a stuck entry
   kmh ledger [user]       recent economy audit-trail entries
   kmh smoketest           non-mutating self-check of every subsystem
+
+Rolling back with RWT
+---------------------
+KMH-Data lives beside RWT's saves, not inside them, so an RWT world rollback
+leaves KMH (treasury, sites, marketplace) reflecting the newer state. Bring KMH
+along with a restore. It's applied at the NEXT startup - before anything loads -
+and always safety-backs up current KMH-Data first, so it stays reversible.
+  - By hand:  kmh restore before:<time>   then restart the server.
+  - From tooling: write the target into KMH-Data-Backups/.kmh-restore-request
+    (one line: a backup folder name, "latest", or "before:<iso|yyyyMMdd-HHmmss>")
+    and restart. KMH consumes the marker on boot.
+Pair it with an RWT rollback by matching the timestamp: KMH's boot backups are
+named yyyyMMdd-HHmmss (UTC), and "before:<RWT-snapshot-time>" picks the newest
+KMH backup at or before that moment. Set BackupOnBoot=true (Config/Maintenance)
+so there's always a recent snapshot to land on; raise BackupRetention to keep
+more history for deeper rollbacks.
+
+Monitoring & external tooling
+-----------------------------
+KMH writes a machine-readable snapshot to KMH-Data/status.json on boot, every
+~60s, and on demand (kmh export). It's a stable JSON contract for dashboards,
+leaderboards, and health checks - read it instead of scraping internal data
+files. It carries ServerName + a stable ServerId + the KMH ApiPort (so you can tell
+several instances on one host apart and map bot<->server<->port), build/wire
+versions, uptime, live counts (players, guilds,
+marketplace/auctions/wants/quests/sites, active events + global quests), house
+pool + reported wealth, current season, disabled features, the current-season
+leaderboard toppers (player, colony, trade, guild, and treasury under Leaders),
+and the backup list (name + UTC) for rollback correlation. Because it's rewritten
+on a cadence, a
+stale GeneratedUtc / file mtime means KMH has stopped - use it as a heartbeat.
+
+Seasons
+-------
+  kmh season          show the current season
+  kmh season roll     archive this season's leaders + all-time records, advance
+                      the counter. Non-destructive - lifetime stats stay.
+  kmh season reset confirm   archive leaders, THEN wipe the live economy for a
+                      fresh season: treasury (personal + guild vaults), market +
+                      house pool, auctions, want board, sites, quests, reputation,
+                      pending mail, world events + global quests, and standings.
+                      Guilds (membership + perks), Discord links, and the season
+                      archive are KEPT. Backs up first, so it's reversible with
+                      'kmh restore <that backup>'.
+The 'confirm' word is required (it's a full economy wipe). Pair reset with a fresh
+RWT scenario at season start so colony wealth also begins near zero.
 
 Anti-cheat & enforcement
 ------------------------
@@ -97,16 +379,23 @@ safe-mods list. Turn it on with 'kmh enforce on'. This needs the patch on the
 client - stock RWT clients can't be enforced.
 
 Scenario / custom-scenario enforcement is NOT implemented yet. KMH can't force a
-required scenario or block custom scenarios in v1.1.1; treat that as planned.
+required scenario or block custom scenarios in v1.2.0; treat that as planned.
 Until then, agree a scenario out-of-band and watch for odd starting wealth.
 
 Save-reset economy: KMH-Data outlives a player's RimWorld save, so someone can
 deposit starting resources into their treasury, reset their save, and repeat.
-v1.1.1 ships a manual lever, not automatic detection:
-  kmh treasury-reset <user>    clear one player's personal treasury
-  kmh treasury-reset all       clear every personal treasury (guild vaults kept)
-Both back up KMH-Data first and log what they cleared. Always keep a backup
-before any reset. Automatic new-save detection is planned.
+Two ways to handle it:
+  - Automatic: set ResetEconomyOnNewSave=true in Config/Economy.json. When a
+    player starts a new save/scenario, KMH clears their personal treasury AND a
+    solo guild's vault (a 1-member guild is otherwise a shelter). Off by default;
+    multi-member guild vaults are untouched.
+  - Manual: kmh treasury-reset <user>   clear one player's personal (+ solo guild) treasury
+            kmh treasury-reset all       clear every personal treasury
+Both back up KMH-Data first and log what was cleared. Keep a backup before any
+reset. The reset also purges the player's open marketplace listings, auctions,
+and want orders (escrow lives outside the treasury and would otherwise shelter
+value across a save reset); other players' bids on the reset player's auctions
+are refunded. Run 'kmh audit' to spot orphaned or solo-guild vaults.
 
 Extensions
 ----------

@@ -249,6 +249,10 @@ event Action<WorldEventEndedEvent>   WorldEventEnded;   // a world event expired
 event Action<GlobalQuestCreatedEvent>   GlobalQuestCreated;   // a global quest was created
 event Action<GlobalQuestCompletedEvent> GlobalQuestCompleted; // goal met, reward paid out
 event Action<GlobalQuestExpiredEvent>   GlobalQuestExpired;   // expired unfinished, reward refunded
+event Action<BackupCreatedEvent>        BackupCreated;   // KMH-Data folder backup written (name, UTC, reason)
+event Action<RestoreAppliedEvent>       RestoreApplied;  // KMH-Data rolled back to a backup on boot
+event Action<SnapshotCreatedEvent>      SnapshotCreated; // versioned player/server snapshot written (kind, player, season, timestamp, dir)
+event Action<SeasonRolledEvent>         SeasonRolled;    // season archived + advanced (and whether the economy was wiped)
 ```
 
 Each payload is an immutable `sealed class` with `init`-only
@@ -258,6 +262,15 @@ thread; queue to your own background worker for long-running work.
 **Subscriber-throw protection:** if your handler throws, the
 exception is logged but dispatch continues to other subscribers. One
 bad handler can't break others.
+
+**Snapshots for external tooling:** `SnapshotCreated.Dir` points at a
+folder holding a versioned `kmh_*_snapshot.json` + checksummed
+manifest - copy it beside your matching save/backup the moment the
+event fires (KMH prunes its own copies on a retention schedule). To
+*request* snapshots, append lines to `KMH-Data/.kmh-snapshot-request`
+(`player <user> <YYYY-MM-DD_HH-MM>` / `server <ts>` / `all <ts>`;
+consumed within ~60s) or run `kmh snapshot-player/server/all`. Full
+format and pairing rules: `SNAPSHOTS.txt`.
 
 ### Custom wire kinds
 

@@ -23,11 +23,18 @@ namespace KMHServerAddon.Maintenance
 
             reply("=== KMH transport security test (non-mutating) ===");
 
-            // --- secure-by-default config contract ---
-            Check("Default bind is loopback", () =>
+            // --- config contract: public-by-default is allowed ONLY because every safety system defaults on ---
+            Check("Default posture is locked down", () =>
             {
                 var c = new TransportConfig();
-                return (!c.IsPublicBind, $"BindAddress={c.BindAddress}");
+                bool safetyOn = c.RequireKmhApiAuth
+                             && c.MaxConnections > 0 && c.MaxConnectionsPerIp > 0
+                             && c.AuthTimeoutSeconds > 0 && c.IdleTimeoutSeconds > 0
+                             && c.MaxFrameKb > 0
+                             && c.FailedAuthPerIp > 0 && c.FailedAuthWindowSeconds > 0 && c.FailedAuthBlockSeconds > 0;
+                return (safetyOn, safetyOn
+                    ? $"bind={c.BindAddress} with auth+caps+throttle+timeouts+frame limits all required"
+                    : "A SAFETY DEFAULT IS OFF - public default bind is not acceptable like this");
             });
             Check("Default auth is on", () =>
             {
@@ -147,7 +154,7 @@ namespace KMHServerAddon.Maintenance
                 string auth  = live.RequireKmhApiAuth ? "auth required" : "AUTH OFF";
                 if (live.IsPublicBind && !live.RequireKmhApiAuth)
                     return (false, $"PUBLIC BIND + AUTH OFF on {where} - anyone reachable can act as any player");
-                string note = live.IsPublicBind ? "public bind (intentional?)" : "loopback";
+                string note = live.IsPublicBind ? "public bind (default; forward the port for remote KMH)" : "loopback";
                 return (true, $"{where} - {auth}, {note}");
             });
 

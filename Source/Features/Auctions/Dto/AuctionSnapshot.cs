@@ -27,5 +27,10 @@ namespace KMHServerAddon.Features.Auctions.Dto
         [JsonProperty("listed_utc_ticks")]    public long   ListedUtcTicks    { get; set; } = 0;
         [JsonProperty("ends_utc_ticks")]      public long   EndsUtcTicks      { get; set; } = 0;
         [JsonProperty("visibility")]          public string Visibility        { get; set; } = "public";
+
+        // State-preserving escrow (persisted; STRIPPED from wire). When set, this is a payload auction.
+        [JsonProperty("escrow_payloads")]     public List<Items.KmhThingPayload> EscrowPayloads { get; set; }
+        [JsonProperty("state_fingerprint")]   public string StateFingerprint  { get; set; } = "";
+        [JsonProperty("state_note")]          public string StateNote         { get; set; } = "";
     }
 }

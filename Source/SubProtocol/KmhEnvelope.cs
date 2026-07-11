@@ -66,5 +66,19 @@ namespace KMHServerAddon.SubProtocol
             if (Data == null) return null;
             try { return Data.ToObject<T>(); } catch { return null; }
         }
+
+        // Reads a JSON string array field into a list (empty list when absent/malformed).
+        public System.Collections.Generic.List<string> GetStringList(string key)
+        {
+            System.Collections.Generic.List<string> outList = new System.Collections.Generic.List<string>();
+            if (Data == null || Data[key] == null) return outList;
+            try
+            {
+                foreach (JToken t in Data[key])
+                    if (t != null && t.Type != JTokenType.Null) outList.Add(t.Value<string>());
+            }
+            catch { }
+            return outList;
+        }
     }
 }

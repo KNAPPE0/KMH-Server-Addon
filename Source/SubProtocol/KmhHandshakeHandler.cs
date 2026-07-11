@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using KMHServerAddon.Diagnostics;
 
 namespace KMHServerAddon.SubProtocol
@@ -7,6 +8,14 @@ namespace KMHServerAddon.SubProtocol
     // has KMH-Patch loaded.
     internal static class KmhHandshakeHandler
     {
+        // Per-connection compatible-handshake set (leak-free: entries drop when the ServerClient is GC'd). The router
+        // gates all feature traffic on this so a wrong-version/modified client can't half-use v1.2.0 flows.
+        private static readonly ConditionalWeakTable<ServerClient, object> _compatible = new ConditionalWeakTable<ServerClient, object>();
+        private static readonly object CompatMarker = new object();
+        internal static bool IsCompatible(ServerClient client) => client != null && _compatible.TryGetValue(client, out _);
+        // Marked by the chat hello.ack (version-matched) and by the API transport handshake (also version-checked).
+        internal static void MarkCompatible(ServerClient client) { if (client != null) _compatible.AddOrUpdate(client, CompatMarker); }
+
         public static void Register()
         {
             KmhRouter.RegisterHandler(KmhProtocol.Kind.HelloAck, OnHelloAck);
@@ -30,10 +39,15 @@ namespace KMHServerAddon.SubProtocol
             {
                 v           = KmhProtocol.CurrentVersion,
                 build       = KmhProtocol.BuildVersion,
+                server_name = KmhServerIdentity.Name,
                 api_enabled = apiOn,
+                api_host    = apiOn ? (tcfg.PublicApiHost ?? "") : "",   // "" -> client dials the RWT IP it connected to
                 api_port    = apiOn ? tcfg.KmhApiPort : 0,
                 api_token   = apiToken,
+                allow_chat_fallback = tcfg.AllowChatTransportFallback,   // owner policy: false = clients must not tunnel features over chat
+
                 disabled    = string.Join(",", Features.FeaturesConfig.Current.DisabledList()),
+                debug_uplink = tcfg.DebugLogging,   // server debug on -> clients auto-send their KMH logs back
             });
 
             if (sent)
@@ -49,6 +63,7 @@ namespace KMHServerAddon.SubProtocol
 
             if (clientVersion == KmhProtocol.CurrentVersion)
             {
+                _compatible.AddOrUpdate(client, CompatMarker);   // unlocks feature traffic in the router gate
                 ServerLog.Info($"Handshake complete with {username} (client v{clientVersion})");
 
                 // Push initial state for features the patch mod would otherwise need to request explicitly.

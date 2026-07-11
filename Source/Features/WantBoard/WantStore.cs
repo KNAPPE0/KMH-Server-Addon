@@ -33,6 +33,35 @@ namespace KMHServerAddon.Features.WantBoard
             Diagnostics.ServerLog.Info($"WantBoard: loaded {s.Wants?.Count ?? 0} open want(s)");
         }
 
+        // Save-reset: a buyer's open wants escrow silver OUTSIDE the treasury, so a save-reset must drop them too or
+        // they shelter value. Purge burns the escrow (the reset burns the treasury alongside).
+        public static bool HasBuyerWants(string user)
+        {
+            if (string.IsNullOrEmpty(user)) return false;
+            lock (_lock) foreach (WantDto w in _byId.Values) if (Eq(w.BuyerUsername, user)) return true;
+            return false;
+        }
+
+        public static int PurgeBuyer(string user)
+        {
+            if (string.IsNullOrEmpty(user)) return 0;
+            List<long> ids = new List<long>();
+            lock (_lock)
+            {
+                foreach (WantDto w in _byId.Values) if (Eq(w.BuyerUsername, user)) ids.Add(w.Id);
+                foreach (long id in ids) _byId.Remove(id);
+            }
+            if (ids.Count > 0) SaveToDisk();
+            return ids.Count;
+        }
+
+        // Season reset: clear all want-board orders.
+        public static void ClearForNewSeason()
+        {
+            lock (_lock) { _byId.Clear(); _nextId = 1; }
+            SaveToDisk();
+        }
+
         public static void SaveToDisk()
         {
             PersistedState s = new PersistedState();
@@ -76,7 +105,8 @@ namespace KMHServerAddon.Features.WantBoard
         // -- post --
 
         public static (long id, string reason) Post(string buyer, string itemDef, int qtyWanted, int unitPrice,
-            int durationHours, string visibility)
+            int durationHours, string visibility,
+            int minQuality = 0, string requiredStuff = "", bool allowComplex = false, bool allowTainted = false, bool allowDamaged = false)
         {
             if (string.IsNullOrEmpty(buyer))  return (0, "No buyer.");
             if (string.IsNullOrEmpty(itemDef)) return (0, "No item.");
@@ -118,6 +148,12 @@ namespace KMHServerAddon.Features.WantBoard
                     ListedUtcTicks   = now,
                     EndsUtcTicks     = now + TimeSpan.FromHours(hours).Ticks,
                     Visibility       = string.IsNullOrEmpty(visibility) ? "public" : visibility,
+                    MinQuality       = minQuality < 0 ? 0 : minQuality,
+                    RequiredStuff    = requiredStuff ?? "",
+                    // Any state/complex constraint means this is a payload want (filled from full-state items).
+                    AllowComplex     = allowComplex || allowTainted || allowDamaged || minQuality > 0 || !string.IsNullOrEmpty(requiredStuff),
+                    AllowTainted     = allowTainted,
+                    AllowDamaged     = allowDamaged,
                 };
             }
             SaveToDisk();
@@ -145,9 +181,16 @@ namespace KMHServerAddon.Features.WantBoard
             FulfillResult r = new FulfillResult();
             if (string.IsNullOrEmpty(seller) || qty <= 0) { r.Reason = "Bad fulfill."; return r; }
 
+            // Route: a want with state constraints is filled from full-state payloads (which the constraints gate),
+            // so a buyer can't be handed tainted/damaged/wrong-material gear. Plain wants use the compact path.
+            bool complexWant = false;
+            lock (_lock) { if (_byId.TryGetValue(wantId, out WantDto peek)) complexWant = peek.AllowComplex; }
+            if (complexWant) return FulfillFromPayloads(seller, wantId, qty);
+
             long now = DateTime.UtcNow.Ticks;
             int fillable;
             string itemDef; int unitPrice; string buyer;
+            string sellerGuild = Guilds.GuildStore.CurrentGuildOf(seller); // resolve before the lock
 
             // Cheap pre-check so we never withdraw items for an invalid fulfill.
             lock (_lock)
@@ -155,6 +198,9 @@ namespace KMHServerAddon.Features.WantBoard
                 if (!_byId.TryGetValue(wantId, out WantDto pw)) { r.Reason = "Want not found."; return r; }
                 if (pw.EndsUtcTicks <= now)        { r.Reason = "This want has expired.";            return r; }
                 if (Eq(pw.BuyerUsername, seller))  { r.Reason = "You can't fulfill your own want.";   return r; }
+                // Enforce guild-only visibility on the action too (crafted client could target a hidden id).
+                if (!Guilds.GuildVisibility.IsVisibleTo(pw.BuyerTreasuryKey, pw.Visibility, sellerGuild, prefetched: true))
+                { r.Reason = "You can't fulfill that want."; return r; }
                 int remaining = pw.QtyWanted - pw.QtyFilled;
                 if (remaining <= 0) { r.Reason = "This want is already filled."; return r; }
                 fillable  = Math.Min(qty, remaining);
@@ -205,15 +251,86 @@ namespace KMHServerAddon.Features.WantBoard
                 if (back > 0) Treasury.TreasuryStore.DepositItem(seller, t.Key, back, note: $"want #{wantId} surplus returned");
             }
 
-            // Pay the seller from escrow (price - house tax) and credit the tax.
+            // Pay the seller from escrow via the authoritative split (escrow == payout + server tax + guild tax).
             long gross = (long)unitPrice * commit;
-            long tax   = HouseTax(seller, gross);
-            long net   = Math.Max(0, gross - tax);
-            Treasury.TreasuryStore.DepositSilver(seller, (int)net, note: $"want #{wantId} fulfilled");
-            if (tax > 0) Marketplace.MarketplaceStore.CreditHousePool(tax);
+            Economy.SaleSplit split = Economy.SaleSplit.Compute(seller, itemDef, gross, demandDrift: false, worldPayoutEvents: false);
+            split.Settle(seller, $"want #{wantId} fulfilled");
+            long net = split.SellerPayout;
+            Treasury.TreasuryStore.DepositSilver(seller, (int)Math.Min(int.MaxValue, net), note: $"want #{wantId} fulfilled");
 
             SaveToDisk();
-            Diagnostics.ServerLog.Info($"WantBoard: {seller} fulfilled {commit}x {itemDef} for want #{wantId} (net {net}, tax {tax})");
+            Diagnostics.ServerLog.Info($"WantBoard: {seller} fulfilled {commit}x {itemDef} for want #{wantId} (net {net}, tax {split.ServerTax}, guild {split.GuildTax})");
+
+            r.Ok = true; r.FilledQty = commit; r.Completed = completed;
+            r.Buyer = buyer; r.ItemDefName = itemDef; r.UnitPrice = unitPrice; r.SellerNet = net;
+            return r;
+        }
+
+        // Fill a state-constrained want from the seller's full-state payloads. Mirrors the compact Fulfill's atomic
+        // race handling; delivers exact payloads to the buyer and returns surplus to the seller. State that doesn't
+        // meet the want (wrong material/quality, disallowed taint/damage) simply isn't withdrawn, so the buyer can
+        // never receive an item the want didn't accept.
+        private static FulfillResult FulfillFromPayloads(string seller, long wantId, int qty)
+        {
+            FulfillResult r = new FulfillResult();
+            long now = DateTime.UtcNow.Ticks;
+            int fillable, unitPrice, minQ; string itemDef, buyer, reqStuff; bool aT, aD;
+            string sellerGuild = Guilds.GuildStore.CurrentGuildOf(seller);
+            lock (_lock)
+            {
+                if (!_byId.TryGetValue(wantId, out WantDto pw)) { r.Reason = "Want not found."; return r; }
+                if (pw.EndsUtcTicks <= now)       { r.Reason = "This want has expired."; return r; }
+                if (Eq(pw.BuyerUsername, seller))  { r.Reason = "You can't fulfill your own want."; return r; }
+                if (!Guilds.GuildVisibility.IsVisibleTo(pw.BuyerTreasuryKey, pw.Visibility, sellerGuild, prefetched: true))
+                { r.Reason = "You can't fulfill that want."; return r; }
+                int remaining = pw.QtyWanted - pw.QtyFilled;
+                if (remaining <= 0) { r.Reason = "This want is already filled."; return r; }
+                fillable = Math.Min(qty, remaining);
+                itemDef = pw.ItemDefName; unitPrice = pw.UnitPriceSilver; buyer = pw.BuyerUsername;
+                reqStuff = pw.RequiredStuff; minQ = pw.MinQuality; aT = pw.AllowTainted; aD = pw.AllowDamaged;
+            }
+
+            List<Items.KmhThingPayload> taken = Treasury.TreasuryStore.TryWithdrawMatchingPayloads(
+                seller, itemDef, reqStuff, minQ, aT, aD, fillable, $"want #{wantId} fulfill");
+            if (taken.Count == 0)
+            { r.Reason = $"You have no matching {ItemLabels.ItemLabelCache.LabelFor(itemDef)} that meets this want (material/quality/condition)."; return r; }
+            int takenUnits = 0; foreach (Items.KmhThingPayload t in taken) takenUnits += t.StackCount;
+
+            int commit; bool completed = false;
+            lock (_lock)
+            {
+                if (!_byId.TryGetValue(wantId, out WantDto w) || w.EndsUtcTicks <= DateTime.UtcNow.Ticks)
+                { Items.KmhPayloadEscrow.RefundTo(seller, taken, $"want #{wantId} returned"); r.Reason = "That want just closed - your items were returned."; return r; }
+                int remaining = w.QtyWanted - w.QtyFilled;
+                commit = Math.Min(takenUnits, remaining);
+                if (commit <= 0)
+                { Items.KmhPayloadEscrow.RefundTo(seller, taken, $"want #{wantId} returned"); r.Reason = "That want was just filled - your items were returned."; return r; }
+                w.QtyFilled += commit; w.EscrowRemaining -= (long)unitPrice * commit;
+                completed = w.QtyFilled >= w.QtyWanted; if (completed) _byId.Remove(wantId);
+            }
+
+            // Deliver `commit` payload-units to the buyer; any surplus (lost race) goes back to the seller. Guarded so
+            // a deposit that can't land parks in the recovery queue instead of vanishing.
+            int toBuyer = commit;
+            foreach (Items.KmhThingPayload p in taken)
+            {
+                if (toBuyer >= p.StackCount) { Items.KmhPayloadEscrow.Deliver(buyer, p, $"want #{wantId} received", $"want #{wantId} received"); toBuyer -= p.StackCount; }
+                else if (toBuyer > 0 && string.IsNullOrEmpty(p.ScribeXml))
+                {
+                    Items.KmhPayloadEscrow.Deliver(buyer,  Items.KmhPayloadEscrow.Clone(p, toBuyer), $"want #{wantId} received", $"want #{wantId} received");
+                    Items.KmhPayloadEscrow.Deliver(seller, Items.KmhPayloadEscrow.Clone(p, p.StackCount - toBuyer), $"want #{wantId} surplus returned", $"want #{wantId} surplus returned");
+                    toBuyer = 0;
+                }
+                else Items.KmhPayloadEscrow.Deliver(seller, p, $"want #{wantId} surplus returned", $"want #{wantId} surplus returned");
+            }
+
+            long gross = (long)unitPrice * commit;
+            Economy.SaleSplit split = Economy.SaleSplit.Compute(seller, itemDef, gross, demandDrift: false, worldPayoutEvents: false);
+            split.Settle(seller, $"want #{wantId} fulfilled");
+            long net = split.SellerPayout;
+            Treasury.TreasuryStore.DepositSilver(seller, (int)Math.Min(int.MaxValue, net), note: $"want #{wantId} fulfilled");
+            SaveToDisk();
+            Diagnostics.ServerLog.Info($"WantBoard: {seller} fulfilled {commit}x {itemDef} (full-state) for want #{wantId} (net {net}, tax {split.ServerTax}, guild {split.GuildTax})");
 
             r.Ok = true; r.FilledQty = commit; r.Completed = completed;
             r.Buyer = buyer; r.ItemDefName = itemDef; r.UnitPrice = unitPrice; r.SellerNet = net;
@@ -295,16 +412,6 @@ namespace KMHServerAddon.Features.WantBoard
         }
 
         // -- helpers --
-
-        // House tax on a fulfillment: marketplace tax %, reduced by the seller guild's perk, waived on a tax holiday.
-        private static long HouseTax(string seller, long amount)
-        {
-            Economy.EconomyConfig cfg = Economy.EconomyConfig.Current;
-            if (World.WorldStore.IsTaxHoliday()) return 0;
-            int reduction = Guilds.GuildStore.GetMarketplaceTaxReductionPoints(Guilds.GuildStore.CurrentGuildOf(seller));
-            int pct = Math.Max(0, cfg.MarketplaceTaxPercent - reduction);
-            return (long)Math.Round(amount * (pct / 100.0));
-        }
 
         private static WantDto Clone(WantDto w) => new WantDto
         {

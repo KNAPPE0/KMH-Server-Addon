@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.IO;
 using KMHServerAddon.Diagnostics;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 
 namespace KMHServerAddon.Persistence
 {
@@ -106,6 +108,57 @@ namespace KMHServerAddon.Persistence
                     return false;
                 }
             }
+        }
+
+        // Config migration: add fields missing from an existing file (from `defaults`, nested recursed), preserving
+        // every owner-set value. Writes only on change, so an upgraded server picks up new settings, not silent defaults.
+        // True when the file exists and has a top-level key. Used to detect a pre-v1.2.0 config (e.g. an old Sites.json
+        // that predates a new field) so the owner can be told what migrated.
+        public static bool FileHasKey(string path, string key)
+        {
+            try { return File.Exists(path) && JObject.Parse(File.ReadAllText(path))[key] != null; }
+            catch { return false; }
+        }
+
+        // Returns the number of missing fields backfilled (0 on none/error), so boot can total them for the upgrade summary.
+        public static int BackfillMissingFields(string path, object defaults)
+        {
+            if (string.IsNullOrEmpty(path) || defaults == null || !File.Exists(path)) return 0;
+            try
+            {
+                JObject existing = JObject.Parse(File.ReadAllText(path));
+                JObject def = JObject.FromObject(defaults, JsonSerializer.Create(Settings));
+                List<string> added = new List<string>();
+                if (AddMissing(existing, def, "", added))
+                {
+                    Save(path, existing);
+                    ServerLog.Info($"Persistence: added new settings to {Path.GetFileName(path)} (kept your existing values): {string.Join(", ", added)}");
+                }
+                return added.Count;
+            }
+            catch (Exception ex)
+            {
+                ServerLog.Warn($"Persistence: could not update {Path.GetFileName(path)} with new settings: {ex.Message}");
+                return 0;
+            }
+        }
+
+        private static bool AddMissing(JObject existing, JObject defaults, string prefix, List<string> added)
+        {
+            bool changed = false;
+            foreach (JProperty p in defaults.Properties())
+            {
+                JToken cur = existing[p.Name];
+                if (cur == null)
+                {
+                    existing[p.Name] = p.Value.DeepClone();
+                    added.Add(prefix + p.Name);
+                    changed = true;
+                }
+                else if (cur.Type == JTokenType.Object && p.Value.Type == JTokenType.Object)
+                    changed |= AddMissing((JObject)cur, (JObject)p.Value, prefix + p.Name + ".", added);
+            }
+            return changed;
         }
 
         private sealed class WriteProbe { public long Stamp { get; set; } public string Token { get; set; } = ""; }

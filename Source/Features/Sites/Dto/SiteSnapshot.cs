@@ -46,13 +46,24 @@ namespace KMHServerAddon.Features.Sites.Dto
         [JsonProperty("marketplace_unit_price")] public int MarketplaceUnitPrice { get; set; } = 1;
         [JsonProperty("relevant_skill")]    public string RelevantSkillDef { get; set; } = "Crafting";
 
+        // Server-authoritative output tier + the worker-scaling ceilings it grants (persisted so the reward cycle is
+        // stable even if the config changes). Old sites get these backfilled on load by re-classifying the item.
+        [JsonProperty("output_tier")]       public int    OutputTier            { get; set; } = 1;
+        [JsonProperty("tier_max_speed")]    public double TierMaxSpeedMultiplier { get; set; } = 3.0;
+        [JsonProperty("tier_max_output")]   public double TierMaxOutputMultiplier { get; set; } = 2.0;
+        // A legacy site whose output is now blocked by current rules: paused, needs admin review (never silently
+        // keeps producing a now-illegal output).
+        [JsonProperty("blocked_output")]    public bool   BlockedOutput         { get; set; } = false;
+
         [JsonProperty("last_reward_utc_ticks")] public long  LastRewardUtcTicks   { get; set; } = 0;
         [JsonProperty("total_silver_generated")] public double TotalSilverGenerated { get; set; } = 0;
 
         // Display-only fields the server fills for the client (not persisted as canonical truth - derived from the
-        // live state each snapshot)
+        // live state each snapshot). effective_cycle_minutes is 0 when paused (never Infinity/NaN/huge).
         [JsonProperty("production_multiplier")] public double ProductionMultiplier { get; set; } = 0;
         [JsonProperty("effective_cycle_minutes")] public double EffectiveCycleMinutes { get; set; } = 0;
+        [JsonProperty("is_producing")]      public bool   IsProducing { get; set; } = false;
+        [JsonProperty("paused_reason")]     public string PausedReason { get; set; } = "";
     }
 
     public class WorkerProgressDto
@@ -62,6 +73,18 @@ namespace KMHServerAddon.Features.Sites.Dto
         [JsonProperty("xp")]               public double Xp              { get; set; } = 0;
         [JsonProperty("base_skill_level")] public int    BaseSkillLevel  { get; set; } = 0;
         [JsonProperty("destination")]      public string Destination     { get; set; } = SiteEntry.DestTreasury;
+
+        // The actual colonist doing the work (client-reported; the headless server can't verify it, so it's advisory
+        // for display + skill). Empty PawnName = a legacy account-level worker. Refreshed each join / re-validate.
+        [JsonProperty("pawn_name")]         public string PawnName          { get; set; } = "";
+        [JsonProperty("pawn_load_id")]      public int    PawnLoadId        { get; set; } = -1;
+        [JsonProperty("last_validated_utc")] public long  LastValidatedUtc  { get; set; } = 0;
+
+        // Legacy = an old account worker with no real pawn; disabled (doesn't produce) until reassigned. Not deleted.
+        [JsonProperty("legacy")]            public bool   Legacy            { get; set; } = false;
+        [JsonProperty("blocked_reason")]    public string BlockedReason     { get; set; } = "";
+
+        [JsonIgnore] public bool IsActivePawnWorker => PawnLoadId > 0 && !Legacy && string.IsNullOrEmpty(BlockedReason);
 
         // XP-derived level: xpForLevel(L) = 1000 + L*1000, capped at 20. Current level is the better of the
         // brought-in skill and what XP has earned

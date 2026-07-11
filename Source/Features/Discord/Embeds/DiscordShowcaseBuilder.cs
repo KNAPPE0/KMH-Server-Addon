@@ -8,11 +8,7 @@ using KMHServerAddon.Features.Marketplace.Dto;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // Embed builder for the per-user marketplace showcase. Centralizing the layout keeps it consistent across the
-    // post-or-edit path and any future sweep refresh.
-    //
-    // Layout: title with the owner's username, optional italic tagline as description, one inline field per listing
-    // (rank/price/qty/`!kmh-buy` hint), footer with refresh timestamp.
+    // Per-user marketplace showcase embed; centralized so post/edit/sweep-refresh stay consistent.
     internal static class DiscordShowcaseBuilder
     {
         // Discord caps embeds at 25 fields. We sort by price ascending so the cheapest listings always make the cut

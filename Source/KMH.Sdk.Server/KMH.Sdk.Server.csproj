@@ -9,9 +9,9 @@
     <Nullable>disable</Nullable>
     <LangVersion>latest</LangVersion>
     <ImplicitUsings>enable</ImplicitUsings>
-    <Version>1.1.1</Version>
-    <AssemblyVersion>1.1.1.0</AssemblyVersion>
-    <FileVersion>1.1.1.0</FileVersion>
+    <Version>1.2.0</Version>
+    <AssemblyVersion>1.2.0.0</AssemblyVersion>
+    <FileVersion>1.2.0.0</FileVersion>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CS1591</NoWarn>
   </PropertyGroup>
@@ -31,7 +31,7 @@
     <RepositoryType>git</RepositoryType>
     <PackageLicenseFile>LICENSE</PackageLicenseFile>
     <PackageReadmeFile>EXTENSIONS.md</PackageReadmeFile>
-    <PackageReleaseNotes>1.1.1 - Transport hardening hotfix (loopback-by-default API, auth, connection caps, failed-auth throttle, reconnect-race fix, security test harness). 1.1.0 - Living World update (auctions, want board, server standings, world events/global quests, offline mail, recovery tools). See EXTENSIONS.md.</PackageReleaseNotes>
+    <PackageReleaseNotes>1.2.0 - Economy integrity update (auto treasury reset on new save, custom-site value-underreport hardening, disabled-feature dashboard clarity). 1.1.1 - Transport hardening hotfix (loopback-by-default API, auth, connection caps, failed-auth throttle, reconnect-race fix, security test harness). See EXTENSIONS.md.</PackageReleaseNotes>
     <PackageOutputPath>..\..\Releases</PackageOutputPath>
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>

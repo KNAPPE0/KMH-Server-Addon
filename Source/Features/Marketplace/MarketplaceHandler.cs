@@ -31,8 +31,15 @@ namespace KMHServerAddon.Features.Marketplace
             int    price          = env?.GetInt("unit_price_silver", 0) ?? 0;
             string visibility     = env?.GetString("visibility", "public") ?? "public";
             int    expiresInHours = env?.GetInt("expires_hours", 0) ?? 0;
+            string fingerprint    = env?.GetString("fingerprint") ?? "";
 
-            long id = MarketplaceStore.Post(username, itemDefName, qty, price, visibility, expiresInHours, out string reason,
+            long id;
+            string reason;
+            // Payload listing: complex item escrowed from the treasury's payload store (state preserved).
+            if (!string.IsNullOrEmpty(fingerprint))
+                id = MarketplaceStore.PostPayload(username, fingerprint, qty, price, visibility, expiresInHours, out reason);
+            else
+                id = MarketplaceStore.Post(username, itemDefName, qty, price, visibility, expiresInHours, out reason,
                                             stuffDefName, qualityIndex);
             if (id == 0)
             {
@@ -118,16 +125,7 @@ namespace KMHServerAddon.Features.Marketplace
         // dialogs refresh immediately. Internal so Discord-driven mutations (DiscordTrade Commands) can fire the
         // same notification path the in-game wire handlers do
         internal static void BroadcastSnapshot()
-        {
-            foreach (ServerClient c in Network.ServerClients.Keys)
-            {
-                if (c == null || !c.IsVerified) continue;
-                string username = c.GetData<UserFile>()?.Username;
-                if (string.IsNullOrEmpty(username)) continue;
-                Dto.MarketplaceSnapshot snapshot = MarketplaceStore.BuildSnapshot(username);
-                KmhRouter.SendTo(c, KmhProtocol.Kind.MarketplaceSnapshot, snapshot);
-            }
-        }
+            => KmhRouter.BroadcastToInterested(KmhProtocol.Kind.MarketplaceSnapshot, u => MarketplaceStore.BuildSnapshot(u));
 
         // Push a fresh treasury snapshot to the given client. Used after buy / cancel / post since their treasury
         // just changed
@@ -139,12 +137,8 @@ namespace KMHServerAddon.Features.Marketplace
             KmhRouter.SendTo(client, KmhProtocol.Kind.TreasurySnapshot, snapshot);
         }
 
-        // Send a fresh treasury snapshot to a specific username if they're currently online. No-op if not
-        // connected. Caller-scoped so the recipient's CanDeposit / CanWithdraw flags reflect their own permissions
-        // on their own vault
-        //
-        // Internal - Discord-driven mutations call this for both buyer and seller after !kmh-buy / !kmh-sell /
-        // !kmh-cancel so their open in-game treasury dialogs refresh immediately
+        // Push a caller-scoped treasury snapshot to an online user (no-op if offline). Discord-driven mutations call it
+        // for both parties so their open in-game treasury dialogs refresh immediately.
         internal static void PushTreasuryTo(string username)
         {
             if (string.IsNullOrEmpty(username)) return;

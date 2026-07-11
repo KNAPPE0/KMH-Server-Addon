@@ -3,12 +3,8 @@ using Newtonsoft.Json;
 
 namespace KMHServerAddon.Features.Guilds.Dto
 {
-    // Wire DTO for the cross-guild leaderboard. Mirror of the patch mod's
-    // KMHPatch.Features.Guilds.Dto.GuildLeaderboardSnapshot - same JSON property names, same fields. Drift = the
-    // patch dialog renders broken data
-    //
-    // Metrics our stores already track (member count + treasury silver). Adding fields is backwards-compatible -
-    // older clients deserialize unknown JSON properties to default
+    // Cross-guild leaderboard wire DTO; JSON property names must mirror the patch mod's copy exactly or the dialog
+    // renders broken data. Adding fields is backward-compatible (old clients default unknown properties).
     public class GuildLeaderboardSnapshot
     {
         [JsonProperty("guilds")]
@@ -20,5 +16,6 @@ namespace KMHServerAddon.Features.Guilds.Dto
         [JsonProperty("name")]            public string Name           { get; set; } = "";
         [JsonProperty("member_count")]    public int    MemberCount    { get; set; } = 0;
         [JsonProperty("treasury_silver")] public long   TreasurySilver { get; set; } = 0;
+        [JsonProperty("open_join")]       public bool   OpenJoin       { get; set; } = false;
     }
 }
