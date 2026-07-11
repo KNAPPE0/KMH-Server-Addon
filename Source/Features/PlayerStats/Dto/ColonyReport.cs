@@ -8,6 +8,7 @@ namespace KMHServerAddon.Features.PlayerStats.Dto
     // on demand to anyone who opens the colonist modal (so the owner needn't be online).
     public class ColonyReport
     {
+        [JsonProperty("save_id")]           public string SaveId          { get; set; } = "";
         [JsonProperty("colony_name")]       public string ColonyName      { get; set; } = "";
         [JsonProperty("colony_age_days")]   public int    ColonyAgeDays   { get; set; } = 0;
         [JsonProperty("time_played_hours")] public int    TimePlayedHours { get; set; } = 0;

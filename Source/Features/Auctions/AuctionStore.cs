@@ -33,6 +33,55 @@ namespace KMHServerAddon.Features.Auctions
             Diagnostics.ServerLog.Info($"Auctions: loaded {s.Auctions?.Count ?? 0} open auction(s)");
         }
 
+        // Save-reset: auctions escrow the seller's item AND bidders' silver OUTSIDE the treasury, so a save-reset must
+        // handle this user's auction activity or it shelters value. HasUserActivity gates the reset's early-out.
+        public static bool HasUserActivity(string user)
+        {
+            if (string.IsNullOrEmpty(user)) return false;
+            lock (_lock)
+                foreach (AuctionDto a in _byId.Values)
+                    if (Eq(a.SellerUsername, user) || Eq(a.HighBidder, user)) return true;
+            return false;
+        }
+
+        // Drop this user's own auctions (refunding any OTHER high bidder - innocent), and retract any bid they hold on
+        // others' auctions (their escrowed bid is burned; the auction reverts to no-bid). Their own item burns with the
+        // reset. Returns (auctions removed, bids retracted).
+        public static (int removed, int retracted) PurgeUser(string user)
+        {
+            if (string.IsNullOrEmpty(user)) return (0, 0);
+            List<(string bidder, long amt)> refunds = new List<(string, long)>();
+            List<long> remove = new List<long>();
+            int retracted = 0;
+            lock (_lock)
+            {
+                foreach (AuctionDto a in _byId.Values)
+                {
+                    if (Eq(a.SellerUsername, user))
+                    {
+                        if (!string.IsNullOrEmpty(a.HighBidder) && a.CurrentBid > 0 && !Eq(a.HighBidder, user))
+                            refunds.Add((a.HighBidder, a.CurrentBid));
+                        remove.Add(a.Id);
+                    }
+                    else if (Eq(a.HighBidder, user) && a.CurrentBid > 0)
+                    {
+                        a.CurrentBid = 0; a.HighBidder = ""; retracted++;
+                    }
+                }
+                foreach (long id in remove) _byId.Remove(id);
+            }
+            foreach ((string bidder, long amt) in refunds) DepositLong(bidder, amt, "auction voided (seller reset)");
+            if (remove.Count > 0 || retracted > 0) SaveToDisk();
+            return (remove.Count, retracted);
+        }
+
+        // Season reset: clear all auctions.
+        public static void ClearForNewSeason()
+        {
+            lock (_lock) { _byId.Clear(); _nextId = 1; }
+            SaveToDisk();
+        }
+
         public static void SaveToDisk()
         {
             PersistedState s = new PersistedState();
@@ -120,6 +169,66 @@ namespace KMHServerAddon.Features.Auctions
             return (id, $"Auction posted: {qty}x, starts at {Util.SilverFmt.Format(startingBid)}.");
         }
 
+        // Post a complex item as a state-preserving auction. Escrows the exact payloads out of the seller's treasury.
+        public static (long id, string reason) PostPayload(string seller, string fingerprint, int qty,
+            long startingBid, long minIncrement, long buyout, int durationHours, string visibility)
+        {
+            if (string.IsNullOrEmpty(seller)) return (0, "No seller.");
+            if (string.IsNullOrEmpty(fingerprint)) return (0, "No item.");
+            if (qty <= 0) return (0, "Quantity must be > 0.");
+
+            Economy.EconomyConfig cfg = Economy.EconomyConfig.Current;
+            startingBid  = Clamp(startingBid, 1, int.MaxValue);
+            minIncrement = Clamp(minIncrement, 1, int.MaxValue);
+            buyout       = buyout <= 0 ? 0 : Clamp(buyout, startingBid, int.MaxValue);
+            int hours    = durationHours > 0 ? Math.Min(durationHours, cfg.AuctionMaxDurationHours) : cfg.AuctionDefaultDurationHours;
+
+            lock (_lock)
+            {
+                int open = 0;
+                foreach (AuctionDto a in _byId.Values) if (Eq(a.SellerUsername, seller)) open++;
+                if (open >= cfg.AuctionMaxOpenPerUser)
+                    return (0, $"You already have the max {cfg.AuctionMaxOpenPerUser} open auctions.");
+            }
+
+            List<Items.KmhThingPayload> escrow = Treasury.TreasuryStore.WithdrawPayloads(seller, fingerprint, qty, note: "auction post escrow");
+            if (escrow == null || escrow.Count == 0) return (0, "Your treasury doesn't have that item to auction.");
+            int totalUnits = Items.KmhPayloadEscrow.TotalUnits(escrow);
+            Items.KmhThingPayload meta = escrow[0];
+
+            long id, now = DateTime.UtcNow.Ticks;
+            lock (_lock)
+            {
+                id = _nextId++;
+                _byId[id] = new AuctionDto
+                {
+                    Id = id, SellerUsername = seller, SellerTreasuryKey = Treasury.TreasuryStore.ResolveOwnerKeyFor(seller),
+                    ItemDefName = meta.DefName, StuffDefName = meta.StuffDefName, QualityIndex = meta.Quality, Qty = totalUnits,
+                    StartingBid = startingBid, MinIncrement = minIncrement, BuyoutSilver = buyout,
+                    CurrentBid = 0, HighBidder = "", BidCount = 0, ListedUtcTicks = now,
+                    EndsUtcTicks = now + TimeSpan.FromHours(hours).Ticks,
+                    Visibility = string.IsNullOrEmpty(visibility) ? "public" : visibility,
+                    EscrowPayloads = escrow, StateFingerprint = fingerprint, StateNote = Items.KmhPayloadEscrow.StateNote(meta),
+                };
+            }
+            SaveToDisk();
+            Extensibility.KmhEventBus.Instance.RaiseAuctionPosted(new KMH.Sdk.Server.Events.AuctionPostedEvent
+            { AuctionId = id, SellerUsername = seller, ItemDefName = meta.DefName, Qty = totalUnits, StartingBid = startingBid, BuyoutSilver = buyout, Visibility = string.IsNullOrEmpty(visibility) ? "public" : visibility });
+            return (id, $"Auction posted: {totalUnits}x {meta.DisplayLabel}, starts at {Util.SilverFmt.Format(startingBid)} (full state kept).");
+        }
+
+        // Deliver an auction's item to a user's treasury: exact payloads when it's a payload auction, else compact.
+        private static void DeliverAuctionItem(string username, AuctionDto a, string note)
+        {
+            if (a.EscrowPayloads != null && a.EscrowPayloads.Count > 0)
+            {
+                Items.KmhPayloadEscrow.RefundTo(username, a.EscrowPayloads, note);
+                a.EscrowPayloads = null;
+            }
+            else
+                Treasury.TreasuryStore.DepositItem(username, Util.ItemKey.Compose(a.ItemDefName, a.StuffDefName, a.QualityIndex), a.Qty, note);
+        }
+
         // -- bid --
 
         public sealed class BidResult
@@ -141,6 +250,7 @@ namespace KMHServerAddon.Features.Auctions
             amount = Math.Min(amount, int.MaxValue);
 
             long now = DateTime.UtcNow.Ticks;
+            string bidderGuild = Guilds.GuildStore.CurrentGuildOf(bidder); // resolve before the lock
 
             // Cheap pre-check so an obviously-bad bid never touches the treasury.
             lock (_lock)
@@ -148,6 +258,9 @@ namespace KMHServerAddon.Features.Auctions
                 if (!_byId.TryGetValue(auctionId, out AuctionDto pa)) { r.Reason = "Auction not found."; return r; }
                 if (pa.EndsUtcTicks <= now)               { r.Reason = "This auction has ended.";            return r; }
                 if (Eq(pa.SellerUsername, bidder))        { r.Reason = "You can't bid on your own auction."; return r; }
+                // Enforce guild-only visibility on the action too (crafted client could target a hidden id).
+                if (!Guilds.GuildVisibility.IsVisibleTo(pa.SellerTreasuryKey, pa.Visibility, bidderGuild, prefetched: true))
+                { r.Reason = "You can't bid on that auction."; return r; }
                 if (pa.BuyoutSilver > 0 && amount > pa.BuyoutSilver) amount = pa.BuyoutSilver; // never overpay a buyout
                 long need = pa.CurrentBid > 0 ? pa.CurrentBid + pa.MinIncrement : pa.StartingBid;
                 if (amount < need) { r.Reason = $"Bid must be at least {Util.SilverFmt.Format(need)}."; return r; }
@@ -213,8 +326,7 @@ namespace KMHServerAddon.Features.Auctions
                 if (!string.IsNullOrEmpty(a.HighBidder))  return (false, "Can't cancel - it already has a bid.");
                 _byId.Remove(auctionId);
             }
-            Treasury.TreasuryStore.DepositItem(seller, Util.ItemKey.Compose(a.ItemDefName, a.StuffDefName, a.QualityIndex), a.Qty,
-                note: $"auction #{auctionId} cancelled");
+            DeliverAuctionItem(seller, a, $"auction #{auctionId} cancelled");
             SaveToDisk();
             return (true, "Auction cancelled - item returned to your treasury.");
         }
@@ -253,8 +365,7 @@ namespace KMHServerAddon.Features.Auctions
             lock (_lock) { if (!_byId.TryGetValue(auctionId, out a)) return o; _byId.Remove(auctionId); }
 
             o.Done = true; o.Seller = a.SellerUsername; o.ItemDefName = a.ItemDefName; o.Qty = a.Qty;
-            string key = Util.ItemKey.Compose(a.ItemDefName, a.StuffDefName, a.QualityIndex);
-            Treasury.TreasuryStore.DepositItem(a.SellerUsername, key, a.Qty, note: $"auction #{a.Id} voided by admin");
+            DeliverAuctionItem(a.SellerUsername, a, $"auction #{a.Id} voided by admin");
             o.Affected.Add(a.SellerUsername);
             if (!string.IsNullOrEmpty(a.HighBidder) && a.CurrentBid > 0)
             {
@@ -300,21 +411,22 @@ namespace KMHServerAddon.Features.Auctions
             lock (_lock) { if (!_byId.TryGetValue(auctionId, out a)) return o; _byId.Remove(auctionId); }
 
             o.Done = true; o.Seller = a.SellerUsername; o.ItemDefName = a.ItemDefName; o.Qty = a.Qty;
-            string key = Util.ItemKey.Compose(a.ItemDefName, a.StuffDefName, a.QualityIndex);
             if (!string.IsNullOrEmpty(a.HighBidder) && a.CurrentBid > 0)
             {
-                Treasury.TreasuryStore.DepositItem(a.HighBidder, key, a.Qty, note: $"auction #{a.Id} won");
-                long tax = HouseTax(a.SellerUsername, a.CurrentBid);
-                long net = Math.Max(0, a.CurrentBid - tax);
-                DepositLong(a.SellerUsername, net, $"auction #{a.Id} sold");
-                if (tax > 0) Marketplace.MarketplaceStore.CreditHousePool(tax);
-                o.Sold = true; o.Winner = a.HighBidder; o.FinalBid = a.CurrentBid; o.SellerNet = net;
+                DeliverAuctionItem(a.HighBidder, a, $"auction #{a.Id} won");
+                // Authoritative breakdown: bid == seller payout + server tax + guild sale tax (never distributes more).
+                Economy.SaleSplit split = Economy.SaleSplit.Compute(a.SellerUsername, a.ItemDefName, a.CurrentBid,
+                                                                    demandDrift: false, worldPayoutEvents: false);
+                split.Settle(a.SellerUsername, $"auction #{a.Id} sold");
+                DepositLong(a.SellerUsername, split.SellerPayout, $"auction #{a.Id} sold");
+                o.Sold = true; o.Winner = a.HighBidder; o.FinalBid = a.CurrentBid; o.SellerNet = split.SellerPayout;
                 o.Affected.Add(a.HighBidder); o.Affected.Add(a.SellerUsername);
-                Diagnostics.ServerLog.Info($"Auction #{a.Id} '{a.ItemDefName} x{a.Qty}' won by {a.HighBidder} for {a.CurrentBid} (tax {tax})");
+                Diagnostics.ServerLog.Info($"Auction #{a.Id} '{a.ItemDefName} x{a.Qty}' won by {a.HighBidder} for {a.CurrentBid} " +
+                                           $"(tax {split.ServerTax}, guild {split.GuildTax})");
             }
             else
             {
-                Treasury.TreasuryStore.DepositItem(a.SellerUsername, key, a.Qty, note: $"auction #{a.Id} unsold");
+                DeliverAuctionItem(a.SellerUsername, a, $"auction #{a.Id} unsold");
                 o.Affected.Add(a.SellerUsername);
                 Diagnostics.ServerLog.Info($"Auction #{a.Id} '{a.ItemDefName} x{a.Qty}' ended with no bids - returned to {a.SellerUsername}");
             }
@@ -326,22 +438,14 @@ namespace KMHServerAddon.Features.Auctions
 
         // -- helpers --
 
-        // House tax on the winning bid: marketplace tax %, reduced by the seller guild's perk, waived during a tax holiday.
-        private static long HouseTax(string seller, long amount)
-        {
-            Economy.EconomyConfig cfg = Economy.EconomyConfig.Current;
-            if (World.WorldStore.IsTaxHoliday()) return 0;
-            int reduction = Guilds.GuildStore.GetMarketplaceTaxReductionPoints(Guilds.GuildStore.CurrentGuildOf(seller));
-            int pct = Math.Max(0, cfg.MarketplaceTaxPercent - reduction);
-            return (long)Math.Round(amount * (pct / 100.0));
-        }
-
         private static void DepositLong(string user, long amount, string note)
         {
             long rem = amount;
             while (rem > 0) { int chunk = (int)Math.Min(rem, int.MaxValue); Treasury.TreasuryStore.DepositSilver(user, chunk, note); rem -= chunk; }
         }
 
+        // Display/wire copy. Deliberately does NOT copy EscrowPayloads - the deep blob stays only on the live
+        // auction in _byId; snapshots and admin inspection carry only the state note/fingerprint.
         private static AuctionDto Clone(AuctionDto a) => new AuctionDto
         {
             Id = a.Id, SellerUsername = a.SellerUsername, SellerTreasuryKey = a.SellerTreasuryKey,
@@ -349,6 +453,7 @@ namespace KMHServerAddon.Features.Auctions
             StartingBid = a.StartingBid, MinIncrement = a.MinIncrement, BuyoutSilver = a.BuyoutSilver,
             CurrentBid = a.CurrentBid, HighBidder = a.HighBidder, BidCount = a.BidCount,
             ListedUtcTicks = a.ListedUtcTicks, EndsUtcTicks = a.EndsUtcTicks, Visibility = a.Visibility,
+            StateFingerprint = a.StateFingerprint, StateNote = a.StateNote,
         };
     }
 }

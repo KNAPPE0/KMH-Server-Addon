@@ -17,6 +17,9 @@ Deploy/
 # uploaded to GitHub Releases rather than tracked.
 Releases/
 
+# Manual source-zip backups at repo root (e.g. "Source ServerAddon 3.zip") — snapshots, not tracked source.
+/*.zip
+
 # Per-user server runtime data folders, in case the dev runs the
 # Deploy build in-place during smoke tests. Anchored to repo root
 # (leading /) so they don't catch identically-named tracked folders

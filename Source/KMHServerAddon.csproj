@@ -12,9 +12,9 @@
     <Nullable>disable</Nullable>
     <LangVersion>latest</LangVersion>
     <ImplicitUsings>enable</ImplicitUsings>
-    <Version>1.1.1</Version>
-    <AssemblyVersion>1.1.1.0</AssemblyVersion>
-    <FileVersion>1.1.1.0</FileVersion>
+    <Version>1.2.0</Version>
+    <AssemblyVersion>1.2.0.0</AssemblyVersion>
+    <FileVersion>1.2.0.0</FileVersion>
     <IntermediateOutputPath>obj\$(RwtFlavor)\$(Configuration)\</IntermediateOutputPath>
 
     <!-- Same RID set the RWT server uses so the addon publishes across
@@ -45,6 +45,14 @@
   <ItemGroup Condition="'$(RwtFlavor)' == 'Old' and Exists('bin\payload\KMHAddon.RTShared.dll')">
     <EmbeddedResource Include="bin\payload\KMHAddon.RTShared.dll" LogicalName="KMHAddon.RTShared.dll" />
   </ItemGroup>
+
+  <!-- 26.6.x servers run the EMBEDDED payload. If source changed since the payload was last built, the launcher
+       ships stale New-flavor code (missing handlers/features - e.g. a "No handler for kind" flood). Warn loudly. -->
+  <Target Name="WarnStalePayload" BeforeTargets="Build"
+          Condition="'$(RwtFlavor)' == 'Old' and Exists('bin\payload\KMHAddon.RTShared.dll')"
+          Inputs="@(Compile)" Outputs="bin\payload\KMHAddon.RTShared.dll">
+    <Warning Text="KMHAddon.RTShared.dll (the 26.6.x payload) is OLDER than source - rebuild it before releasing: dotnet build -p:RwtFlavor=New. A stale payload ships old code to new-generation servers (e.g. missing message handlers)." />
+  </Target>
 
   <!-- Harmony bundled with our addon - RWT server doesn't ship it.
        Private=true so 0Harmony.dll lands in our build output and the

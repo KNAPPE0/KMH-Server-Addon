@@ -25,6 +25,7 @@ namespace KMH.Sdk.Server.Events
     {
         public string Username               { get; init; } = "";
         public string PreviousDiscordDisplay { get; init; } = "";
+        public ulong  DiscordId              { get; init; }   // 0 for legacy links that never stored a snowflake
     }
 
     public sealed class MarketplacePostEvent
@@ -189,5 +190,40 @@ namespace KMH.Sdk.Server.Events
     {
         public long   QuestId { get; init; }
         public string Title   { get; init; } = "";
+    }
+
+    // Ops lifecycle - backups, coordinated rollback, and seasons. Useful for external tooling that mirrors KMH state
+    // or coordinates with an RWT backup/rollback.
+    public sealed class BackupCreatedEvent
+    {
+        public string Name   { get; init; } = "";   // backup folder name (yyyyMMdd-HHmmss-<reason>)
+        public string Utc    { get; init; } = "";   // ISO-8601, parsed from the name
+        public string Reason { get; init; } = "";   // "boot" / "manual" / "pre-season-reset" / "pre-restore" / ...
+    }
+
+    public sealed class RestoreAppliedEvent
+    {
+        public string BackupName   { get; init; } = "";   // the backup KMH-Data was rolled back to
+        public string SafetyBackup { get; init; } = "";   // snapshot of the pre-restore state (empty if it failed)
+    }
+
+    // A versioned KMH snapshot (player or server) was written under KMH-Data/Snapshots/. Lets external backup
+    // tooling copy the folder beside its matching save/backup the moment it exists.
+    public sealed class SnapshotCreatedEvent
+    {
+        public string Kind           { get; init; } = "";   // "player" | "server"
+        public string PlayerId       { get; init; } = "";   // empty for server snapshots
+        public string Season         { get; init; } = "";   // "S6", ...
+        public string MatchTimestamp { get; init; } = "";   // the YYYY-MM-DD_HH-MM folder name
+        public string Dir            { get; init; } = "";   // absolute snapshot folder (snapshot + manifest inside)
+    }
+
+    public sealed class SeasonRolledEvent
+    {
+        public int    RolledSeason { get; init; }         // the season just archived
+        public int    NewSeason    { get; init; }         // the season now current
+        public int    RecordCount  { get; init; }         // leader records archived
+        public string Actor        { get; init; } = "";
+        public bool   EconomyWiped { get; init; }         // true when raised by a full 'season reset', false for 'roll'
     }
 }

@@ -9,17 +9,7 @@ using KMHServerAddon.Features.LinkedAccounts;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // !kmh-wtb command family. Lets a linked player publish a Want-To-Buy board to the configured WTB channel
-    // (falls back to the showcase channel if a dedicated WTB channel isn't configured)
-    //
-    // Subcommands: !kmh-wtb - post (first time) OR refresh !kmh-wtb add <item> <qty> <max-price> !kmh-wtb remove
-    // <item> - drop an entry !kmh-wtb list - show your own entries in chat !kmh-wtb clear - empty your entry list
-    // !kmh-wtb delete - delete the published board !kmh-wtb tagline <text|clear> - set/clear the headline
-    //
-    // Aliases: !kmh-want, !kmh-wanted.
-    //
-    // Entry list is hard-capped per user to keep boards readable and avoid persistent-state bloat from accidental
-    // scripts
+    // !kmh-wtb command family - a linked player's Want-To-Buy board. Entries are hard-capped per user (anti-bloat).
     internal static class DiscordWtbCommands
     {
         // Max WTB entries per user. 25 = Discord embed field cap, so we never have to truncate when rendering.

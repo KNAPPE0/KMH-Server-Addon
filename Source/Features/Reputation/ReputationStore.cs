@@ -4,20 +4,8 @@ using KMHServerAddon.Persistence;
 
 namespace KMHServerAddon.Features.Reputation
 {
-    // Server-authoritative player reputation for the quest economy. Persisted to
-    // KMH-Data/Reputation/Reputation.json. (Supersedes a reputation concept the RWT
-    // fork documented on UserFile but never finished implementing.)
-    //
-    // Score is a running total re-derived from the raw event counters, so the weighting can change later and
-    // Recompute() will reprice every player
-    //
-    // +1 per quest completed -2 per proof rejected (a poster declined this claimer's submission) -5 per quest
-    // abandoned (claimer dropped it after claiming) -1 per quest the player rejected AS poster (deters frivolous
-    // rejection)
-    //
-    // Tiers (derived, not stored): >= 20 Trusted, 0..19 Neutral, < 0 Unreliable.
-    //
-    // Never client-set: only quest-lifecycle events on the server move these.
+    // Server-authoritative quest reputation. Score is re-derived from raw event counters (so weighting can change and
+    // Recompute reprices everyone); never client-set - only server-side quest-lifecycle events move it.
     internal static class ReputationStore
     {
         // Scoring weights + tier cutoffs live in config/reputation.json (ReputationConfig) so owners can tune them
@@ -160,6 +148,22 @@ namespace KMHServerAddon.Features.Reputation
                 }
                 Diagnostics.ServerLog.Info($"Reputation: loaded {state.Entries.Count} entries from disk");
             }
+        }
+
+        // Season reset: clear all reputation.
+        public static void ClearForNewSeason()
+        {
+            lock (_lock) { _entries.Clear(); }
+            SaveToDisk();
+        }
+
+        public static bool RemoveUser(string username)
+        {
+            if (string.IsNullOrEmpty(username)) return false;
+            bool removed;
+            lock (_lock) removed = _entries.Remove(username);
+            if (removed) SaveToDisk();
+            return removed;
         }
 
         public static void SaveToDisk()

@@ -3,10 +3,8 @@ using KMHServerAddon.SubProtocol;
 
 namespace KMHServerAddon.Features.Quests
 {
-    // Server-side handler for kmh.quest.* - counterpart to the patch mod's KMHPatch.Features.Quests.QuestHandler
-    //
-    // Same broadcast pattern as Marketplace: any mutation pushes a fresh quest snapshot to every verified client so
-    // all open Quest Board dialogs see the change immediately
+    // Server-side handler for kmh.quest.* (counterpart to the patch mod's QuestHandler). Any mutation rebroadcasts
+    // a fresh quest snapshot so every open Quest Board updates immediately.
     internal static class QuestHandler
     {
         public static void Register()
@@ -259,16 +257,9 @@ namespace KMHServerAddon.Features.Quests
             KmhRouter.SendTo(client, KmhProtocol.Kind.QuestSnapshot, snapshot);
         }
 
-        private static void BroadcastSnapshot()
+        internal static void BroadcastSnapshot()
         {
-            foreach (ServerClient c in Network.ServerClients.Keys)
-            {
-                if (c == null || !c.IsVerified) continue;
-                string username = c.GetData<UserFile>()?.Username;
-                if (string.IsNullOrEmpty(username)) continue;
-                Dto.QuestSnapshot snapshot = QuestStore.BuildSnapshot(username);
-                KmhRouter.SendTo(c, KmhProtocol.Kind.QuestSnapshot, snapshot);
-            }
+            KmhRouter.BroadcastToInterested(KmhProtocol.Kind.QuestSnapshot, u => QuestStore.BuildSnapshot(u));
             // Quest activity is the only thing that moves reputation, so refresh the roster on the same beat -
             // keeps board tier badges current
             Features.Reputation.ReputationHandler.BroadcastSnapshot();

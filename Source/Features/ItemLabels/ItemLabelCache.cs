@@ -5,10 +5,8 @@ using KMHServerAddon.Persistence;
 
 namespace KMHServerAddon.Features.ItemLabels
 {
-    // Server-side cache of defName -> human label, built from connected clients at handshake. The server is headless
-    // (no RimWorld defs), so it relies on clients' DefDatabase: each sends its catalog and we cache the union, so
-    // Discord commands/listings show readable text and accept friendly names even for items the server has no def for.
-    // Persisted to KMH-Data/Catalog/ItemLabels.json so a restart doesn't blank it until clients reconnect.
+    // Headless server's defName -> label cache, union of clients' catalogs (persisted). Security: labels are UI-only
+    // (last-writer-wins, vary by mod/language); defName is the security key and values are first-seen-wins (anti-poison).
     internal static class ItemLabelCache
     {
         private static readonly object _lock = new object();
@@ -16,9 +14,12 @@ namespace KMHServerAddon.Features.ItemLabels
             = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         // defName -> RimWorld BaseMarketValue, contributed by clients (the live game economy). Lets the World Engine
-        // value-scale quest rewards to what the requested goods are actually worth.
+        // value-scale quest rewards to what the requested goods are actually worth. FIRST-SEEN WINS (see ApplyValues):
+        // once a value is recorded it isn't overwritten by a later client, so one modified client can't poison the
+        // trusted value used for Site pricing.
         private static Dictionary<string, long> _values
             = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        private static readonly HashSet<string> _valueDivergenceWarned = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         // Merge an incoming label set into the cache. Last-writer-wins on collisions - newest contributor's
         // spelling/case wins. Saves to disk only if at least one entry was new (cheap dirty check avoids spamming
@@ -51,23 +52,34 @@ namespace KMHServerAddon.Features.ItemLabels
         public static void ApplyValues(Dictionary<string, long> incoming)
         {
             if (incoming == null || incoming.Count == 0) return;
-            int added = 0;
+            int added = 0, flagged = 0;
             lock (_lock)
             {
                 foreach (KeyValuePair<string, long> kv in incoming)
                 {
                     if (string.IsNullOrEmpty(kv.Key) || kv.Value <= 0) continue;
-                    if (!_values.TryGetValue(kv.Key, out long existing) || existing != kv.Value)
+                    if (!_values.TryGetValue(kv.Key, out long existing))
                     {
-                        _values[kv.Key] = kv.Value;
+                        _values[kv.Key] = kv.Value;   // first-seen wins - this becomes the trusted baseline
                         added++;
+                    }
+                    else if (existing != kv.Value)
+                    {
+                        // A later client reported a DIFFERENT value. Keep the trusted baseline (anti-poison); flag a
+                        // large divergence once per def so an owner can spot a modified client skewing values.
+                        double ratio = existing > 0 ? (double)kv.Value / existing : 0;
+                        if ((ratio > 1.5 || ratio < 0.5) && _valueDivergenceWarned.Add(kv.Key))
+                        {
+                            flagged++;
+                            ServerLog.Warn($"ItemLabels: {kv.Key} value {kv.Value} diverges from trusted {existing} - kept trusted (possible modified client).");
+                        }
                     }
                 }
             }
             if (added > 0)
             {
                 SaveToDisk();
-                ServerLog.Verbose($"ItemLabels: value cache updated ({added} new/changed, {_values.Count} total)");
+                ServerLog.Verbose($"ItemLabels: value cache +{added} first-seen ({_values.Count} total)" + (flagged > 0 ? $", {flagged} divergent ignored" : ""));
             }
         }
 
@@ -108,25 +120,16 @@ namespace KMHServerAddon.Features.ItemLabels
             return q.Length > 0 ? $"{q} {baseLabel}" : baseLabel;
         }
 
-        // Friendly-name resolution for Discord-side input. Returns the matching defName when the query is
-        // unambiguous, or null + a candidates list when it matches more than one item.
-        //
-        // Match strategy (in order):
-        //   1. Exact label match (case-insensitive)  - "Plasteel" → Plasteel
-        //   2. Exact defName match                   - raw defName fallback
-        //   3. Substring on label                    - "knife" → multiple
-        //   4. Substring on defName                  - last-resort
+        // Friendly-name -> defName for Discord input. Unambiguous -> defName; multiple matches -> null + candidates.
+        // Tries exact label, exact defName, then substring on each.
         public static string ResolveDefNameByQuery(string query, out List<string> candidates)
         {
             candidates = null;
             if (string.IsNullOrWhiteSpace(query)) return null;
             string q = query.Trim();
 
-            // Single-pass over the cache, populating four priority buckets. Previous implementation scanned the
-            // dictionary up to three times (exact-label, label-substring, defName-substring). For a server with
-            // several thousand item labels and a busy Discord command surface this was the hottest path on the
-            // addon - now it's O(N) instead of up to O(3N) and short-circuits once we hit a single exact-label or
-            // exact-defName match
+            // Single O(N) pass into priority buckets (hot path with thousands of labels); short-circuits on a lone
+            // exact match.
             List<string> exactLabel = null;
             string       exactDef   = null;
             List<string> labelHits  = null;
@@ -208,6 +211,42 @@ namespace KMHServerAddon.Features.ItemLabels
         public static int Count
         {
             get { lock (_lock) { return _labels.Count; } }
+        }
+
+        // Every known (defName, label, value) - used to build the server-authoritative site output catalog.
+        public static List<(string DefName, string Label, long Value)> AllForCatalog()
+        {
+            List<(string, string, long)> result = new List<(string, string, long)>();
+            lock (_lock)
+            {
+                foreach (KeyValuePair<string, string> kv in _labels)
+                {
+                    _values.TryGetValue(kv.Key, out long v);
+                    result.Add((kv.Key, kv.Value, v));
+                }
+            }
+            return result;
+        }
+
+        // Random deliver-quest target: value in [min,max], sane def; null until the catalog has candidates.
+        public static (string defName, string label, long value)? RandomDeliverable(long minValue, long maxValue, Random rng)
+        {
+            List<(string, string, long)> pool = new List<(string, string, long)>();
+            lock (_lock)
+            {
+                foreach (KeyValuePair<string, long> kv in _values)
+                {
+                    if (kv.Value < minValue || kv.Value > maxValue) continue;
+                    string d = kv.Key;
+                    if (d.StartsWith("Unfinished", StringComparison.OrdinalIgnoreCase)
+                        || d.StartsWith("Minified", StringComparison.OrdinalIgnoreCase)
+                        || d.StartsWith("Corpse_",  StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!_labels.TryGetValue(d, out string label) || string.IsNullOrEmpty(label)) continue;
+                    pool.Add((d, label, kv.Value));
+                }
+            }
+            if (pool.Count == 0) return null;
+            return pool[rng.Next(pool.Count)];
         }
 
         // Returns up to `max` entries sorted alphabetically by defName, optionally filtered to entries whose

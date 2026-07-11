@@ -4,12 +4,8 @@ using Newtonsoft.Json;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // Persistent state for the leaderboard auto-poster's live-message edit-in-place + daily rollover machinery.
-    // Keeping a single message alive avoids filling the leaderboard channel with one entry per poster tick; rolling
-    // that message over on a cadence produces an archive trail readable from chat history
-    //
-    // Persisted to KMH-Data/Discord/LeaderboardState.json so a server restart doesn't orphan the live message or
-    // reset the rollover timer
+    // Leaderboard live-message ids + rollover timer, persisted so a restart doesn't orphan the message or reset the
+    // rollover.
     internal class DiscordLeaderboardState
     {
         [JsonProperty("live_message_id")]

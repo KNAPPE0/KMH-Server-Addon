@@ -3,13 +3,14 @@ namespace KMHServerAddon.SubProtocol
     // Keep byte-identical with client KmhProtocol; zero-width username prefix prevents player-name collisions.
     internal static class KmhProtocol
     {
-        // Wire compatibility version; client/server mismatch blocks KMH feature activation.
-        public const int CurrentVersion = 1;
+        // Wire compatibility version; client/server mismatch blocks KMH feature activation. Bumped to 2 for v1.2.0:
+        // deposit semantics changed, so a v1.1.1 client must be gated out rather than half-use the new economy and lose items.
+        public const int CurrentVersion = 2;
 
         // Human-readable release version, carried in kmh.hello purely so each side can DETECT a version gap and
         // nudge the player. It never gates the connection (that's CurrentVersion's job) and stays additive: a
         // pre-1.1.0 server omits it, so an empty value received by a client reliably means "older server".
-        public const string BuildVersion = "1.1.1";
+        public const string BuildVersion = "1.2.0";
 
         public const string SystemUsername = "​[KMH-SYS]"; // server -> client
         public const string ClientUsername = "​[KMH-CLI]"; // client -> server
@@ -54,6 +55,10 @@ namespace KMHServerAddon.SubProtocol
             public const string TreasuryDepositItem     = "kmh.treasury.deposit_item";   // client -> server
             public const string TreasuryWithdrawItem    = "kmh.treasury.withdraw_item";  // client -> server
             public const string TreasuryGrant           = "kmh.treasury.grant";          // server -> client (materialize a confirmed withdrawal into the colony)
+            public const string TreasuryDepositConfirm  = "kmh.treasury.deposit_confirm";   // client -> server (these deposit txns are now durably saved locally)
+            public const string TreasuryDepositReconcile= "kmh.treasury.deposit_reconcile"; // client -> server (full set of durably-saved deposit txns, sent on connect)
+            public const string TreasuryDepositPreflight= "kmh.treasury.deposit_preflight"; // client -> server (approve BEFORE removing local goods)
+            public const string TreasuryDepositApproval = "kmh.treasury.deposit_approval";  // server -> client (approve/deny + short-lived token)
 
             // Marketplace - open-listings list + buy / cancel / post mutations.
             public const string MarketplaceRequest      = "kmh.marketplace.request";     // client -> server
@@ -83,6 +88,10 @@ namespace KMHServerAddon.SubProtocol
             public const string GuildKick               = "kmh.guild.kick";               // client -> server
             public const string GuildBuyPerk            = "kmh.guild.buy_perk";           // client -> server
             public const string GuildSetMotd            = "kmh.guild.set_motd";           // client -> server
+            public const string GuildLeave              = "kmh.guild.leave";              // client -> server
+            public const string GuildDonate             = "kmh.guild.donate";             // client -> server
+            public const string GuildWithdraw           = "kmh.guild.withdraw";           // client -> server (guild vault -> personal, rank-capped)
+            public const string GuildTransferOwner      = "kmh.guild.transfer_owner";     // client -> server ({ username }) Owner only
             public const string GuildProposeAlliance    = "kmh.guild.propose_alliance";   // client -> server
             public const string GuildAcceptAlliance     = "kmh.guild.accept_alliance";    // client -> server
             public const string GuildBreakAlliance      = "kmh.guild.break_alliance";     // client -> server
@@ -90,9 +99,14 @@ namespace KMHServerAddon.SubProtocol
             public const string GuildClearHostile       = "kmh.guild.clear_hostile";      // client -> server
             public const string GuildSaveSettings       = "kmh.guild.save_settings";      // client -> server
             public const string GuildInvite             = "kmh.guild.invite";             // client -> server (admin/mod invites a player)
+            public const string GuildDeclineInvite      = "kmh.guild.decline_invite";     // client -> server (invitee turns an invite down)
+            public const string GuildInvitablesRequest  = "kmh.guild.invitables.request"; // client -> server (known guildless players for the invite picker)
+            public const string GuildInvitablesSnapshot = "kmh.guild.invitables.snapshot"; // server -> client
             public const string GuildSetOpenJoin        = "kmh.guild.set_open_join";      // client -> server (admin toggles open join)
             public const string GuildJoin               = "kmh.guild.join";               // client -> server (join an open or invited guild)
             public const string GuildCreate             = "kmh.guild.create";             // client -> server (create a guild + join as admin)
+            public const string GuildHallSet            = "kmh.guild.hall.set";           // client -> server (admin sets/moves the Guild Hall tile)
+            public const string GuildHallRemove         = "kmh.guild.hall.remove";        // client -> server (admin removes the Guild Hall)
 
             // Cross-guild leaderboard payload containing every guild in leaderboard form.
             public const string GuildLeaderboardRequest = "kmh.guild_leaderboard.request"; // client -> server
@@ -137,12 +151,19 @@ namespace KMHServerAddon.SubProtocol
             public const string SiteLeave              = "kmh.site.leave";              // client -> server (worker leave)
             public const string SiteSetDestination     = "kmh.site.set_destination";    // client -> server
             public const string SiteCancel             = "kmh.site.cancel";             // client -> server (owner removes)
+            public const string SiteCatalogRequest     = "kmh.site.catalog.request";    // client -> server (curated output picker)
+            public const string SiteCatalog            = "kmh.site.catalog";            // server -> client (classified allowed outputs)
 
             // Clients send defName -> label maps after handshake; server merges them for Discord commands and market output.
             public const string ItemLabels              = "kmh.item_labels";              // client -> server
             // Clients also send defName -> BaseMarketValue (RimWorld's canonical prices) so the server can value-scale
             // quest rewards / pricing. Separate envelope so it never bloats the (already near-cap) labels push.
             public const string ItemValues              = "kmh.item_values";              // client -> server
+            // GameConditionDefs (defName -> label) from the client's game, incl. mods - feeds discovered weather.
+            public const string ConditionDefs           = "kmh.condition_defs";           // client -> server
+
+            // Batched client KMH log lines -> KMH-Data/Debug/ (player-enabled, or auto when server debug is on).
+            public const string DebugLog                = "kmh.debug.log";                // client -> server
 
             // Pushes enforcement state and config profiles so clients can lock Mod Options and restore when cleared.
             public const string EnforcementSnapshot     = "kmh.enforcement.snapshot";      // server -> client

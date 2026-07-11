@@ -145,6 +145,17 @@ namespace KMHServerAddon.Features.Seasons
                 list.Add(new SeasonRecordDto { Category = "Highest Treasury", Holder = richGuild.Name, Detail = Util.SilverFmt.Format(richGuild.TreasurySilver), Value = richGuild.TreasurySilver });
             }
 
+            // Top banker: the biggest personal KMH treasury ("bank"). TopVaults is sorted desc, so the first
+            // non-guild vault is the richest player.
+            foreach ((string OwnerKey, long Silver, bool IsGuild) v in Treasury.TreasuryStore.TopVaults(10))
+            {
+                if (v.IsGuild || v.Silver <= 0) continue;
+                string user = v.OwnerKey.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase)
+                    ? v.OwnerKey.Substring("_personal:".Length) : v.OwnerKey;
+                list.Add(new SeasonRecordDto { Category = "Top Banker", Holder = user, Detail = Util.SilverFmt.Format(v.Silver), Value = v.Silver });
+                break;
+            }
+
             return list;
         }
 

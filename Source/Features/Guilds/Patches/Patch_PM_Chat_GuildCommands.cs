@@ -85,10 +85,12 @@ namespace KMHServerAddon.Features.Guilds.Patches
         {
             if (parts.Length < 3) { Reply(client, "Usage: /kmh guild invite <username>"); return; }
             string target = parts[2];
-            if (GuildStore.Invite(username, target, out string err))
+            if (GuildStore.Invite(username, target, out string gname, out string err))
             {
                 Reply(client, $"Invited {target}. They can /kmh guild join now.");
                 ServerLog.Info($"Guild: {username} invited {target}");
+                Notifications.KmhMail.ToUser(target.Trim(), "positive", $"Guild invite: {gname}",
+                    $"{username} invited you to join '{gname}'. Open the Guild Hall (KMH tab) to accept or decline.");
             }
             else Reply(client, $"Could not invite: {err}");
         }
@@ -110,8 +112,8 @@ namespace KMHServerAddon.Features.Guilds.Patches
             }
             if (GuildStore.DepositToGuild(username, amount, out string err))
             {
-                Reply(client, $"Contributed {Util.SilverFmt.Format(amount)} to your guild vault.");
-                ServerLog.Info($"Guild: {username} deposited {amount}s to guild vault");
+                Reply(client, $"Contribution of {Util.SilverFmt.Format(amount)} pending - save your game to finalize.");
+                ServerLog.Info($"Guild: {username} started a pending {amount}s guild contribution (chat)");
             }
             else Reply(client, $"Could not deposit: {err}");
         }
@@ -153,14 +155,14 @@ namespace KMHServerAddon.Features.Guilds.Patches
                 return;
             }
             string perkKey = parts[2];
-            if (GuildStore.BuyPerk(username, perkKey))
+            if (GuildStore.BuyPerk(username, perkKey, out string reason, out int newLevel, out int cost))
             {
-                Reply(client, $"Purchased perk '{perkKey}'. See /kmh guild perks for new level.");
-                ServerLog.Info($"Guild: {username} bought perk '{perkKey}'");
+                Reply(client, $"Purchased {GuildStore.PerkLabel(perkKey)} (now Lv {newLevel}) for {Util.SilverFmt.Format(cost)}.");
+                ServerLog.Info($"Guild: {username} bought perk '{perkKey}' -> Lv {newLevel}");
             }
             else
             {
-                Reply(client, $"Could not buy '{perkKey}'. Need Admin rank, a valid key, an un-maxed perk, and enough guild silver.");
+                Reply(client, $"Could not buy {GuildStore.PerkLabel(perkKey)}: {reason}");
             }
         }
 
@@ -252,8 +254,8 @@ namespace KMHServerAddon.Features.Guilds.Patches
             string target = parts[2];
             if (GuildStore.TransferAdmin(username, target, out string err))
             {
-                Reply(client, $"Admin transferred to {target}. You are now a Member.");
-                ServerLog.Info($"Guild: {username} transferred Admin to {target}");
+                Reply(client, $"Ownership transferred to {target}. You are now an Admin.");
+                ServerLog.Info($"Guild: {username} transferred guild ownership to {target}");
             }
             else
             {

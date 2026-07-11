@@ -22,6 +22,9 @@ namespace KMHServerAddon.Features.Discord
         // channel ids and command prefix without each one re-loading the config file
         internal static DiscordConfig Config => _config;
 
+        // The live socket client (guild-role sync needs it for REST user + role calls). Null until the bot connects.
+        internal static DiscordSocketClient Client => _client;
+
         // Short human-readable status line for /kmh server status. Cheap - just reads in-memory state, no Discord
         // round-trip
         public static string DescribeStatus()
@@ -156,6 +159,7 @@ namespace KMHServerAddon.Features.Discord
 
             // One-time "server online" announcement (guards against Ready re-firing on reconnects)
             DiscordEventPublisher.OnBridgeReady();
+            DiscordGuildRoleSync.OnBridgeReady();
 
             return Task.CompletedTask;
         }
@@ -175,7 +179,9 @@ namespace KMHServerAddon.Features.Discord
                         {
                             if (c?.IsVerified == true) count++;
                         }
-                        string status = count == 1 ? "1 player online" : $"{count} players online";
+                        string players = count == 1 ? "1 player online" : $"{count} players online";
+                        // Prefix the server name so multiple bots on one host are distinguishable in Discord.
+                        string status = $"{KmhServerIdentity.Name} · {players}";
                         await _client.SetActivityAsync(new Game(status, ActivityType.Watching))
                             .ConfigureAwait(false);
                     }
@@ -394,6 +400,24 @@ namespace KMHServerAddon.Features.Discord
                 string prefix = _config.CommandPrefix ?? "!";
                 string text   = (message.Content ?? "").Trim();
 
+                // Multi-bot: when RequireMention is on, note whether THIS bot was @mentioned and strip its mention so
+                // "@Bot !kmh-x" parses like "!kmh-x". The gate below then ignores un-mentioned commands, so several
+                // bots in one channel don't all answer.
+                bool mentionedMe = false;
+                if (_config.RequireMentionForCommands)
+                {
+                    ulong myId = _client?.CurrentUser?.Id ?? 0;
+                    if (myId != 0)
+                    {
+                        string mA = $"<@{myId}>", mB = $"<@!{myId}>";
+                        if (text.Contains(mA) || text.Contains(mB))
+                        {
+                            mentionedMe = true;
+                            text = text.Replace(mA, "").Replace(mB, "").Trim();
+                        }
+                    }
+                }
+
                 // Chat bridge relays normal messages in-game, while prefixed messages still fall through to commands.
                 if (_config.ChatBridgeChannelId != 0
                     && message.Channel?.Id == _config.ChatBridgeChannelId
@@ -406,6 +430,10 @@ namespace KMHServerAddon.Features.Discord
                 }
 
                 if (!text.StartsWith(prefix, StringComparison.Ordinal)) return;
+
+                // Multi-bot gate: with RequireMention on, only the @mentioned bot acts. DMs are already per-bot, so a
+                // mention isn't needed there (and players link via DM).
+                if (_config.RequireMentionForCommands && !mentionedMe && message.Channel is SocketGuildChannel) return;
 
                 // Optional guild allowlist for commands; DMs always work so players can still link.
                 if (message.Channel is SocketGuildChannel gc

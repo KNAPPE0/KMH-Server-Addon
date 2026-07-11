@@ -97,7 +97,8 @@ namespace KMHServerAddon.Features.Transport
             }
             else if (cfg.IsPublicBind)
             {
-                ServerLog.Warn($"KMH API: public bind ({cfg.BindAddress}) - reachable by remote players. If unintended set BindAddress=127.0.0.1; only forward port {cfg.KmhApiPort} if you want remote KMH.");
+                // Default posture since v1.2.0: public bind with auth + caps + throttling required. Info, not a warning.
+                ServerLog.Info($"KMH API: public bind ({cfg.BindAddress}) with auth required - forward TCP {cfg.KmhApiPort} for remote KMH, or set BindAddress=127.0.0.1 for local-only.");
             }
         }
 
@@ -204,6 +205,16 @@ namespace KMHServerAddon.Features.Transport
                     if (string.IsNullOrEmpty(user)) { await WriteFrame(stream, KindApiHelloAck, new { ok = false, reason = "no_user" }, ct).ConfigureAwait(false); return; }
                 }
 
+                // Protocol enforcement on the API path: reject an incompatible client here so it never reaches the
+                // feature router (and API-only sessions on chat-less RWT still get marked compatible below).
+                int helloV = hello.GetInt("v", 0);
+                if (helloV != KmhProtocol.CurrentVersion)
+                {
+                    await WriteFrame(stream, KindApiHelloAck, new { ok = false, reason = "version", v = KmhProtocol.CurrentVersion }, ct).ConfigureAwait(false);
+                    ServerLog.Protocol($"API: hello rejected for '{user}' - client v{helloV} != server v{KmhProtocol.CurrentVersion}.");
+                    return;
+                }
+
                 // ack before registering, so no other thread writes this socket mid-handshake
                 await WriteFrame(stream, KindApiHelloAck, new { ok = true, v = KmhProtocol.CurrentVersion, build = KmhProtocol.BuildVersion, disabled = string.Join(",", FeaturesConfig.Current.DisabledList()) }, ct).ConfigureAwait(false);
                 conn = new ApiConn(client, stream, user);
@@ -220,7 +231,9 @@ namespace KMHServerAddon.Features.Transport
                     if (env.Kind == KindPing) { conn.TrySend(new KmhEnvelope(KindPong, null)); continue; }
                     // feature envelope -> shared router, using the authenticated identity (never the envelope)
                     var sc = KmhRouter.ResolveClient(user);
-                    if (sc != null) { ServerLog.Protocol($"API <= {user}: {env.Kind}"); KmhRouter.HandleInbound(sc, env); }
+                    // The API handshake already authed + version-checked this client, so mark its ServerClient compatible
+                    // (covers chat-less RWT where the chat hello.ack never runs the router gate would otherwise block).
+                    if (sc != null) { SubProtocol.KmhHandshakeHandler.MarkCompatible(sc); ServerLog.Protocol($"API <= {user}: {env.Kind}"); KmhRouter.HandleInbound(sc, env); }
                     else ServerLog.Protocol($"API: dropping '{env.Kind}' from {user} - no live ServerClient.");
                 }
             }

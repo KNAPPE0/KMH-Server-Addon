@@ -36,6 +36,22 @@ namespace KMHServerAddon.Features.Notifications
             Diagnostics.ServerLog.Info($"Notifications: loaded queued notices for {s.Users.Count} user(s)");
         }
 
+        // Season reset: clear all pending mail/notifications.
+        public static void ClearForNewSeason()
+        {
+            lock (_lock) { _byUser.Clear(); }
+            SaveToDisk();
+        }
+
+        public static int ClearUser(string user)
+        {
+            if (string.IsNullOrEmpty(user)) return 0;
+            int n;
+            lock (_lock) { n = _byUser.TryGetValue(user, out var list) ? (list?.Count ?? 0) : 0; _byUser.Remove(user); }
+            if (n > 0) SaveToDisk();
+            return n;
+        }
+
         public static void SaveToDisk()
         {
             PersistedState s = new PersistedState();
@@ -69,6 +85,17 @@ namespace KMHServerAddon.Features.Notifications
         }
 
         // Return + clear a user's queued notices (delivered on login).
+        // Read-only copy of a user's queued mail (does NOT drain) - for snapshots.
+        public static List<NotificationDto> PeekForUser(string user)
+        {
+            List<NotificationDto> outList = new List<NotificationDto>();
+            if (string.IsNullOrEmpty(user)) return outList;
+            lock (_lock)
+                if (_byUser.TryGetValue(user, out List<NotificationDto> list) && list != null)
+                    outList.AddRange(list);
+            return outList;
+        }
+
         public static List<NotificationDto> Drain(string user)
         {
             if (string.IsNullOrEmpty(user)) return new List<NotificationDto>();

@@ -63,9 +63,58 @@ namespace KMHServerAddon.Features.PlayerStats
             Dto.ColonyReport report = env?.DataAs<Dto.ColonyReport>();
             if (report == null) return;
             PlayerStatsStore.ApplyColonyReport(username, report);
+
+            // Anti-exploit: if the player started a new save, clear their treasury so they can't farm starting
+            // resources by depositing, resetting, and repeating. Opt-in; backs up first (see EconomyConfig).
+            if (Features.Economy.EconomyConfig.Current.ResetEconomyOnNewSave
+                && Features.Economy.EconomyResetStore.RecordAndDetectReset(username, report.SaveId))
+                AutoResetEconomy(client, username);
             // Deliberately NO broadcast: open leaderboards auto-refresh on their own ~8s tick and on open.
             // Broadcasting on every client-timed report would amplify one client's uploads into a full snapshot
             // pushed to everyone - a needless fan-out / DoS lever.
+        }
+
+        // Back up, then clear the player's personal treasury (plus a solo guild's vault) and refresh their view.
+        private static void AutoResetEconomy(ServerClient client, string username)
+        {
+            Features.Treasury.Dto.TreasurySnapshot snap = Features.Treasury.TreasuryStore.GetSnapshotFor(username);
+            // A solo guild's vault is a shelter from this reset, so clear it too.
+            string soloGuild       = Features.Guilds.GuildStore.SoloGuildOf(username);
+            long   soloGuildSilver = soloGuild != null ? Features.Treasury.TreasuryStore.GetGuildSilver(soloGuild) : 0;
+
+            // Escrowed value (marketplace/auction/want) lives outside the treasury and would otherwise shelter the reset.
+            bool personalEmpty = snap.SilverBalance <= 0 && (snap.Items == null || snap.Items.Count == 0);
+            bool hasEscrow = Features.Marketplace.MarketplaceStore.HasSellerListings(username)
+                          || Features.Auctions.AuctionStore.HasUserActivity(username)
+                          || Features.WantBoard.WantStore.HasBuyerWants(username);
+            if (personalEmpty && soloGuildSilver <= 0 && !hasEscrow) return; // nothing to clear
+
+            if (Persistence.KmhDataBackup.TryCreate("pre-auto-economy-reset", out string dir, out _))
+                ServerLog.Verbose($"Auto economy reset backup: {System.IO.Path.GetFileName(dir)}");
+            Features.Treasury.TreasuryStore.ResetPersonal(username);
+            if (soloGuild != null) Features.Treasury.TreasuryStore.ClearGuildVault(soloGuild);
+            int mpPurged = Features.Marketplace.MarketplaceStore.PurgeSeller(username);
+            var (auRemoved, auRetracted) = Features.Auctions.AuctionStore.PurgeUser(username);
+            int wantPurged = Features.WantBoard.WantStore.PurgeBuyer(username);
+            // Sites: the old save's pawns no longer exist, so remove owned sites + every worker slot (guild-owned sites
+            // stay; this player just stops working them). Old-save recovery value is cleared too (logged; backup above).
+            var (sitesRemoved, _) = Features.Sites.SiteStore.PurgeOwner(username, dryRun: false);
+            int workerSlots = Features.Sites.SiteStore.RemoveWorkerEverywhere(username);
+            int recCleared  = Features.Recovery.RecoveryStore.ClearUser(username);
+            ServerLog.Warn($"Auto economy reset for {username} - new save detected, treasury cleared (personal {snap.SilverBalance}s"
+                           + (soloGuild != null ? $", solo guild '{soloGuild}' {soloGuildSilver}s" : "")
+                           + $") + escrows purged, {sitesRemoved} owned site(s) removed, {workerSlots} worker slot(s) cleared, {recCleared} recovery record(s) cleared. Guild membership/donations kept.");
+
+            // Refresh the caller's treasury; broadcast only the shared boards that actually changed.
+            if (client != null)
+            {
+                KmhRouter.SendTo(client, KmhProtocol.Kind.TreasurySnapshot, Features.Treasury.TreasuryStore.GetSnapshotFor(username));
+                KmhRouter.Notify(client, "neutral", "New save detected - your KMH economy was reset: treasury, listings, sites and worker slots from the old save were cleared (guild membership and past donations kept).");
+            }
+            if (mpPurged > 0)                       Features.Marketplace.MarketplaceHandler.BroadcastSnapshot();
+            if (auRemoved + auRetracted > 0)        Features.Auctions.AuctionHandler.BroadcastSnapshot();
+            if (wantPurged > 0)                     Features.WantBoard.WantHandler.BroadcastSnapshot();
+            if (sitesRemoved + workerSlots > 0)     Features.Sites.SiteHandler.BroadcastSnapshot();
         }
 
         // A client opened someone's card - send that player's full colonist profile (or an empty one if none).
@@ -79,16 +128,11 @@ namespace KMHServerAddon.Features.PlayerStats
                 new Dto.ColonistProfileEnvelope { Username = target, Detail = detail });
         }
 
-        // Push the current snapshot to every connected verified client. Used by mutating features that want every
-        // viewer to see a fresh leaderboard immediately (no polling)
+        // Push the current snapshot to clients currently viewing standings (built once, sent to interested only).
         private static void PlayerStatsSnapshotAll()
         {
             Dto.PlayerStatsSnapshot snapshot = PlayerStatsStore.BuildSnapshot();
-            foreach (ServerClient c in TCPNetwork.Network.ServerClients.Keys)
-            {
-                if (c == null || !c.IsVerified) continue;
-                KmhRouter.SendTo(c, KmhProtocol.Kind.PlayerStatsSnapshot, snapshot);
-            }
+            KmhRouter.BroadcastToInterested(KmhProtocol.Kind.PlayerStatsSnapshot, _ => snapshot);
         }
     }
 }

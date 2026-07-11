@@ -15,9 +15,19 @@ namespace KMHServerAddon.Features.Sites
             KmhRouter.RegisterHandler(KmhProtocol.Kind.SiteLeave,          OnLeave);
             KmhRouter.RegisterHandler(KmhProtocol.Kind.SiteSetDestination, OnSetDestination);
             KmhRouter.RegisterHandler(KmhProtocol.Kind.SiteCancel,         OnCancel);
+            KmhRouter.RegisterHandler(KmhProtocol.Kind.SiteCatalogRequest, OnCatalogRequest);
         }
 
         private static void OnRequest(ServerClient client, KmhEnvelope env) => SendSnapshotTo(client);
+
+        // Curated, server-classified output catalog for the client's Site output picker.
+        private static void OnCatalogRequest(ServerClient client, KmhEnvelope env)
+        {
+            string user = client?.GetData<UserFile>()?.Username;
+            if (string.IsNullOrEmpty(user)) return;
+            bool includeBlocked = env?.GetBool("include_blocked") ?? false;
+            KmhRouter.SendTo(client, KmhProtocol.Kind.SiteCatalog, SiteStore.BuildOutputCatalogFor(user, includeBlocked));
+        }
 
         private static void OnBuild(ServerClient client, KmhEnvelope env)
         {
@@ -40,9 +50,14 @@ namespace KMHServerAddon.Features.Sites
         private static void OnJoin(ServerClient client, KmhEnvelope env)
         {
             string user = client?.GetData<UserFile>()?.Username;
-            var (ok, reason) = SiteStore.JoinWorker(user, env?.GetInt("tile", -1) ?? -1, env?.GetInt("base_skill_level", 0) ?? 0);
-            Reply(client, ok, ok ? reason : $"Join failed: {reason}");
-            if (ok) BroadcastSnapshot();
+            var (ok, reason, changed) = SiteStore.JoinWorker(user, env?.GetInt("tile", -1) ?? -1, env?.GetInt("base_skill_level", 0) ?? 0,
+                env?.GetString("pawn_name") ?? "", env?.GetInt("pawn_load_id", -1) ?? -1,
+                env?.GetBool("present", true) ?? true);
+            if (!ok) { Reply(client, false, $"Join failed: {reason}"); return; }
+            // Periodic no-change re-validations stay silent - no toast, no broadcast (would be per-worker spam).
+            if (!changed) return;
+            Reply(client, true, reason);
+            BroadcastSnapshot();
         }
 
         private static void OnLeave(ServerClient client, KmhEnvelope env)
@@ -79,15 +94,7 @@ namespace KMHServerAddon.Features.Sites
         }
 
         internal static void BroadcastSnapshot()
-        {
-            foreach (ServerClient c in Network.ServerClients.Keys)
-            {
-                if (c == null || !c.IsVerified) continue;
-                string u = c.GetData<UserFile>()?.Username;
-                if (string.IsNullOrEmpty(u)) continue;
-                KmhRouter.SendTo(c, KmhProtocol.Kind.SiteSnapshot, SiteStore.BuildSnapshotFor(u));
-            }
-        }
+            => KmhRouter.BroadcastToInterested(KmhProtocol.Kind.SiteSnapshot, u => SiteStore.BuildSnapshotFor(u));
 
         private static void SendTreasuryTo(ServerClient client)
         {

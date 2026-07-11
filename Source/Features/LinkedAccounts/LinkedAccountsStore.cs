@@ -5,21 +5,8 @@ using KMHServerAddon.Persistence;
 
 namespace KMHServerAddon.Features.LinkedAccounts
 {
-    // Server-side store for in-game username -> Discord identity links.
-    //
-    // We track two parallel maps keyed by username:
-    //   - Display name (string) - what we show in UI / announces. Volatile;
-    // a Discord user can rename and our copy goes stale until they re-link or the next snapshot push refreshes it
-    //   - Snowflake Id (ulong) - Discord's stable per-account identifier.
-    // The Id is what we authenticate against for mutating commands (!buy, !sell, etc); display-name lookups are
-    // kept as a fallback
-    //     for legacy links from before the Id was tracked.
-    //
-    // The wire snapshot (LinkedAccountsSnapshot) still ships only display names - the patch mod only needs them for
-    // in-UI "username (Discord)" rendering. Ids stay server-only
-    //
-    // When a link/unlink fires, the bridge calls LinkedAccountsHandler .BroadcastSnapshot() so every connected
-    // patch-mod client sees the change immediately without polling
+    // username -> Discord identity. Security: mutating commands authenticate against the stable snowflake Id, not the
+    // volatile display name (Ids stay server-only; the wire snapshot ships display names for UI rendering only).
     internal static class LinkedAccountsStore
     {
         private static readonly object _lock = new object();
@@ -59,14 +46,28 @@ namespace KMHServerAddon.Features.LinkedAccounts
         {
             if (string.IsNullOrEmpty(username)) return;
             string previousDisplay = null;
+            ulong  previousId      = 0;
             lock (_lock)
             {
                 _links.TryGetValue(username, out previousDisplay);
+                _ids.TryGetValue(username, out previousId);
                 _links.Remove(username);
                 _ids.Remove(username);
             }
             SaveToDisk();
-            Extensibility.KmhEventBus.Instance.RaisePlayerUnlinked(new KMH.Sdk.Server.Events.PlayerUnlinkedEvent { Username = username, PreviousDiscordDisplay = previousDisplay ?? "" });
+            Extensibility.KmhEventBus.Instance.RaisePlayerUnlinked(new KMH.Sdk.Server.Events.PlayerUnlinkedEvent { Username = username, PreviousDiscordDisplay = previousDisplay ?? "", DiscordId = previousId });
+        }
+
+        // Every current link as (username, discordId) - used by the Discord guild-role sync to reconcile all members.
+        public static List<KeyValuePair<string, ulong>> AllLinked()
+        {
+            lock (_lock)
+            {
+                List<KeyValuePair<string, ulong>> outList = new List<KeyValuePair<string, ulong>>(_ids.Count);
+                foreach (KeyValuePair<string, ulong> kv in _ids)
+                    if (kv.Value != 0) outList.Add(kv);
+                return outList;
+            }
         }
 
         // Cheap membership check - used by /kmh unlink to differentiate "you have no link" from "we just removed

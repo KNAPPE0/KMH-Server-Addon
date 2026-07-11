@@ -21,6 +21,21 @@ namespace KMHServerAddon.Features.Quests
 
         // Forged-packet caps live in config/quests.json (QuestsConfig) so owners can tune them without code
 
+        // Admin-cleanup residual detector: how many active quests the user posted / claimed (read-only).
+        public static (int posted, int claimed) CountForUser(string user)
+        {
+            if (string.IsNullOrEmpty(user)) return (0, 0);
+            int p = 0, c = 0;
+            lock (_lock)
+                foreach (QuestEntry q in _byId.Values)
+                {
+                    if (q == null) continue;
+                    if (string.Equals(q.PosterUsername, user, System.StringComparison.OrdinalIgnoreCase)) p++;
+                    if (string.Equals(q.ClaimedByUsername, user, System.StringComparison.OrdinalIgnoreCase)) c++;
+                }
+            return (p, c);
+        }
+
         // Per-caller snapshot. Filters out guild-only quests the caller isn't entitled to see (own guild + allied
         // guilds get visibility). Caller's own posts always pass through - managing what you posted shouldn't
         // depend on still being in the same guild
@@ -285,11 +300,8 @@ namespace KMHServerAddon.Features.Quests
             return ok;
         }
 
-        // Returns true on successful state transition (Completed for DeliverItem auto-verify, Submitted for Bounty
-        // manual sign-off). Returns the OTHER party affected by the submission via the out params - handler uses
-        // these to push them a fresh treasury snapshot directly instead of waiting for the auto-refresh tick. For
-        // DeliverItem auto-complete the poster's treasury changes (items deposited); for Bounty Submit no other
-        // treasury changes until Approve
+        // DeliverItem auto-completes (poster's treasury gains items); Bounty just moves to Submitted (manual Approve).
+        // Returns the other affected party via out param so the handler can push them a fresh treasury snapshot.
         public static bool Submit(string claimerUsername, long questId, out string posterAffected)
         {
             posterAffected = null;
@@ -486,16 +498,8 @@ namespace KMHServerAddon.Features.Quests
             return true;
         }
 
-        // Bounty-kind sign-off. Poster reviews the claimer's work (out of band - chat / Discord / screenshot etc.)
-        // and calls this to pay out + mark Completed
-        //
-        // Rejects when:
-        //   - quest not found
-        //   - kind != Bounty (DeliverItem auto-completes in Submit)
-        //   - state != Submitted
-        //   - caller != poster
-        // Returns the claimer's username via out param so the handler can push them a fresh treasury snapshot (they
-        // just received bounty silver)
+        // Bounty sign-off: poster pays out + marks Completed. Returns the claimer via out param so the handler can
+        // push them a fresh treasury snapshot (they just got bounty silver).
         public static bool Approve(string callerUsername, long questId, out string claimerAffected)
         {
             claimerAffected = null;
@@ -600,8 +604,10 @@ namespace KMHServerAddon.Features.Quests
             posterAffected = null;
             if (string.IsNullOrEmpty(claimerUsername)) return false;
 
-            int bounty; string poster;
-            Dictionary<string, int> items;
+            QuestsConfig cfg = QuestsConfig.Current;
+            int bounty = 0; string poster;
+            bool routedToReview = false;
+            Dictionary<string, int> items = null;
             lock (_lock)
             {
                 if (!_byId.TryGetValue(questId, out QuestEntry q)) return false;
@@ -610,13 +616,36 @@ namespace KMHServerAddon.Features.Quests
                 if (q.State != QuestEntry.StateClaimed) return false;
                 if (!string.Equals(q.ClaimedByUsername, claimerUsername, StringComparison.OrdinalIgnoreCase))
                     return false;
-                bounty = q.BountySilver;
+                // Anti-forge floor: the report is client-tracked, so a claim can't complete faster than any human
+                // could actually do the work (stops claim->instant-verify macros farming escrowed bounties).
+                if (cfg.AutoVerifyMinClaimSeconds > 0 && q.ClaimedUtcTicks > 0
+                    && DateTime.UtcNow.Ticks - q.ClaimedUtcTicks < TimeSpan.FromSeconds(cfg.AutoVerifyMinClaimSeconds).Ticks)
+                    return false;
                 poster = q.PosterUsername;
-                items  = new Dictionary<string, int>(q.BountyItems, StringComparer.OrdinalIgnoreCase);
-                q.State             = QuestEntry.StateCompleted;
-                q.CompletedUtcTicks = DateTime.UtcNow.Ticks;
-                _lifetimeQuestsCompleted  += 1;
-                _lifetimeBountySilverPaid += bounty;
+                if (cfg.AutoVerifyRequiresPosterReview)
+                {
+                    // Optional human sign-off: park in the poster's review queue instead of paying instantly.
+                    q.State                  = QuestEntry.StatePendingReview;
+                    q.ReviewState            = QuestEntry.ReviewPending;
+                    q.ProofText              = $"Auto-verified by the game client ({q.Kind}) - awaiting poster sign-off.";
+                    q.ProofSubmittedUtcTicks = DateTime.UtcNow.Ticks;
+                    routedToReview = true;
+                }
+                else
+                {
+                    bounty = q.BountySilver;
+                    items  = new Dictionary<string, int>(q.BountyItems, StringComparer.OrdinalIgnoreCase);
+                    q.State             = QuestEntry.StateCompleted;
+                    q.CompletedUtcTicks = DateTime.UtcNow.Ticks;
+                    _lifetimeQuestsCompleted  += 1;
+                    _lifetimeBountySilverPaid += bounty;
+                }
+            }
+            if (routedToReview)
+            {
+                SaveToDisk();
+                posterAffected = poster;
+                return true;
             }
 
             if (bounty > 0)
@@ -762,6 +791,20 @@ namespace KMHServerAddon.Features.Quests
                 }
                 Diagnostics.ServerLog.Info($"Quests: loaded {state.Quests?.Count ?? 0} quest(s) from disk");
             }
+        }
+
+        // Season reset: clear all quests and lifetime tallies.
+        public static void ClearForNewSeason()
+        {
+            lock (_lock)
+            {
+                _byId.Clear();
+                _nextId = 1;
+                _lifetimeQuestsPosted = 0;
+                _lifetimeQuestsCompleted = 0;
+                _lifetimeBountySilverPaid = 0;
+            }
+            SaveToDisk();
         }
 
         public static void SaveToDisk()

@@ -11,21 +11,8 @@ using KMHServerAddon.Features.Marketplace.Dto;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // Mutating market commands for the Discord bridge. Companion to DiscordBrowseCommands (read-only surfaces). All
-    // commands require a Discord-side link (we authenticate the calling user via the snowflake id stored on
-    // LinkedAccountsStore)
-    //
-    // !kmh-buy <listing-id> [qty] - buy from a listing !kmh-cancel <listing-id> - cancel your own listing !kmh-sell
-    // <itemDefName> <qty> <price> - post a new listing from your treasury
-    //
-    // !kmh-sell takes friendly item names - input like "plasteel" or "power armor" routes through
-    // ItemLabelCache.ResolveDefNameByQuery
-    // for fuzzy matching. Ambiguous queries get a candidate list back
-    // instead of a silent reject.
-    //
-    // After each mutation we call MarketplaceHandler.BroadcastSnapshot() + PushTreasuryTo() for both parties,
-    // matching what the in-game wire handlers do - so in-game dialogs refresh immediately rather than waiting for
-    // the 8s auto-refresh tick
+    // Mutating market commands (!kmh-buy/-sell/-cancel). Security: authenticates the caller via the snowflake id on
+    // LinkedAccountsStore, not display name.
     internal static class DiscordTradeCommands
     {
         // Same hard cap the in-game Buy path uses. Without this, qty * unitPrice can overflow int and corrupt
