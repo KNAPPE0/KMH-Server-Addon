@@ -5,15 +5,8 @@ using KMHServerAddon.Persistence;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // Per-user Discord-side decorations: showcase post coordinates, tagline, last-refresh timestamp. Keyed by
-    // in-game username - the LinkedAccountsStore stays the canonical user identity map, this store just hangs
-    // Discord-specific state off each known username
-    //
-    // Future Discord features (WTB board state, opt-out flags, custom emoji prefs) add their own fields here
-    // without needing a new store
-    //
-    // Persisted to KMH-Data/Discord/UserState.json so a server restart doesn't lose the message ids that drive
-    // edit-in-place
+    // Per-username Discord decorations (showcase message ids, tagline). Persisted so a restart keeps the message ids
+    // that drive edit-in-place; LinkedAccountsStore stays the canonical identity map.
     internal static class DiscordUserState
     {
         private static readonly object _lock = new object();

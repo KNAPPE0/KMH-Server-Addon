@@ -10,16 +10,7 @@ using KMHServerAddon.Features.Marketplace.Dto;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // !kmh-showcase command family. Lets a linked player publish a per-user marketplace embed to the configured
-    // showcase channel that refreshes in place on every subsequent call rather than spamming a fresh post.
-    //
-    // Subcommands: !kmh-showcase - post (first time) OR refresh existing. !kmh-showcase update - alias.
-    // !kmh-showcase delete - remove the post + clear state. !kmh-showcase tagline <text> - set the tagline.
-    // !kmh-showcase tagline clear - remove it.
-    //
-    // Aliases for the top-level command: !kmh-shopfront, !kmh-myshop.
-    //
-    // Per-user showcase state lives in the addon's own DiscordUserState store, so we don't touch any RWT files.
+    // !kmh-showcase command family - a linked player's marketplace embed, refreshed in place (not re-posted).
     internal static class DiscordShowcaseCommands
     {
         public static async Task<bool> TryHandleAsync(SocketMessage raw, string cmd, string[] parts)
@@ -101,10 +92,8 @@ namespace KMHServerAddon.Features.Discord
 
             DiscordUserState.GetShowcase(caller, out ulong prevChannel, out ulong prevMessage, out string tagline);
 
-            // Channel changed since last post (admin re-configured the server) - drop the old message id so we post
-            // fresh in the
-            // new channel rather than trying to edit something we can't
-            // see.
+            // Channel changed since last post (admin reconfigured) - drop the old message id so we post fresh in
+            // the new channel instead of editing a message we can't see.
             if (prevChannel != 0 && prevChannel != showcaseChannel)
             {
                 prevMessage = 0;

@@ -33,6 +33,9 @@ namespace KMHServerAddon.Maintenance
 
         private static async Task RunLoop(CancellationToken ct)
         {
+            // Publish an initial status snapshot promptly (stores are loaded by the time the sweeper starts).
+            try { KmhStatusExport.WriteToDisk(); } catch { }
+
             // Initial delay so the sweeper doesn't fight bootstrap I/O.
             try { await Task.Delay(SweepInterval, ct); }
             catch (TaskCanceledException) { return; }
@@ -67,7 +70,7 @@ namespace KMHServerAddon.Maintenance
                     PushTreasuryTo(sellerUsername);
                 }
             }
-            if (marketplaceChanged) BroadcastMarketplaceSnapshot();
+            if (marketplaceChanged) Features.Marketplace.MarketplaceHandler.BroadcastSnapshot();
 
             // --- open quests ---
             List<long> expiredQuests = Features.Quests.QuestStore.CollectExpiredOpenIds(now);
@@ -83,7 +86,7 @@ namespace KMHServerAddon.Maintenance
             }
             // Drop day-old completed quests so the board doesn't grow forever.
             if (Features.Quests.QuestStore.PruneFinalized(now)) questsChanged = true;
-            if (questsChanged) BroadcastQuestSnapshot();
+            if (questsChanged) Features.Quests.QuestHandler.BroadcastSnapshot();
 
             // --- custom-site production ---
             System.Collections.Generic.HashSet<string> sitePaid = Features.Sites.SiteStore.RunRewardCycle();
@@ -118,6 +121,26 @@ namespace KMHServerAddon.Maintenance
                         $"Your want expired - {Util.SilverFmt.Format(o.Refunded)} of unspent escrow was refunded to your treasury.");
             }
             if (wantsChanged) Features.WantBoard.WantHandler.BroadcastSnapshot();
+
+            // --- stale pending deposits: revert any never confirmed durably saved (disconnect/rollback dupe guard) ---
+            // Skip currently-online owners: they'll still save + confirm, so only abandoned (offline) deposits time out.
+            HashSet<string> online = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (ServerClient c in Network.ServerClients.Keys)
+            {
+                if (c?.IsVerified != true) continue;
+                string u = c.GetData<UserFile>()?.Username;
+                if (!string.IsNullOrEmpty(u)) online.Add(u);
+            }
+            int revertedPending = Features.Treasury.TreasuryStore.SweepStalePendingDeposits(
+                Features.Economy.EconomyConfig.Current.PendingDepositTimeoutMinutes,
+                u => online.Contains(u));
+            if (revertedPending > 0)
+                ServerLog.Info($"ExpirySweeper: reverted {revertedPending} stale pending deposit(s) (unconfirmed past timeout).");
+
+            // Consume any snapshot requests an external backup routine dropped, prune old ones, refresh heartbeat.
+            Persistence.KmhSnapshot.ConsumePendingRequests();
+            Persistence.KmhSnapshot.PruneOldIfDue();
+            KmhStatusExport.WriteToDisk();
         }
 
         private static void PushTreasuryTo(string username)
@@ -126,32 +149,6 @@ namespace KMHServerAddon.Maintenance
             Features.Treasury.Dto.TreasurySnapshot snapshot =
                 Features.Treasury.TreasuryStore.GetSnapshotFor(username);
             KmhRouter.SendToUsername(username, KmhProtocol.Kind.TreasurySnapshot, snapshot);
-        }
-
-        private static void BroadcastMarketplaceSnapshot()
-        {
-            foreach (ServerClient c in Network.ServerClients.Keys)
-            {
-                if (c?.IsVerified != true) continue;
-                string u = c.GetData<UserFile>()?.Username;
-                if (string.IsNullOrEmpty(u)) continue;
-                Features.Marketplace.Dto.MarketplaceSnapshot s
-                    = Features.Marketplace.MarketplaceStore.BuildSnapshot(u);
-                KmhRouter.SendTo(c, KmhProtocol.Kind.MarketplaceSnapshot, s);
-            }
-        }
-
-        private static void BroadcastQuestSnapshot()
-        {
-            foreach (ServerClient c in Network.ServerClients.Keys)
-            {
-                if (c?.IsVerified != true) continue;
-                string u = c.GetData<UserFile>()?.Username;
-                if (string.IsNullOrEmpty(u)) continue;
-                Features.Quests.Dto.QuestSnapshot s
-                    = Features.Quests.QuestStore.BuildSnapshot(u);
-                KmhRouter.SendTo(c, KmhProtocol.Kind.QuestSnapshot, s);
-            }
         }
     }
 }

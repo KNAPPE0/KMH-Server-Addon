@@ -41,5 +41,11 @@ namespace KMH.Sdk.Server.Apis
         event Action<GlobalQuestCreatedEvent> GlobalQuestCreated;
         event Action<GlobalQuestCompletedEvent> GlobalQuestCompleted;
         event Action<GlobalQuestExpiredEvent> GlobalQuestExpired;
+
+        // Ops lifecycle - backups, snapshots, coordinated rollback, seasons.
+        event Action<BackupCreatedEvent> BackupCreated;
+        event Action<RestoreAppliedEvent> RestoreApplied;
+        event Action<SnapshotCreatedEvent> SnapshotCreated;
+        event Action<SeasonRolledEvent> SeasonRolled;
     }
 }

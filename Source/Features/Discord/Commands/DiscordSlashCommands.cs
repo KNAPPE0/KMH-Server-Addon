@@ -18,10 +18,9 @@ using KMHServerAddon.Util;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // The /kmh slash-command tree. Registered on Ready (guild-scoped when Bot.GuildId is set, else global) and
-    // dispatched from DiscordBridge. Slash commands don't need the privileged MessageContent intent, so they work on
-    // bots that never enabled it. Tiers: player open; mod needs guild-admin or a Roles.Moderators role; console run
-    // is gated by the Console block and runs in the Admin channel. The legacy !kmh-* commands keep working in parallel.
+    // The /kmh slash-command tree, registered on Ready (guild-scoped if Bot.GuildId set, else global). Slash
+    // commands don't need the MessageContent intent, so they work on bots that never enabled it. Tiers: player
+    // open; mod needs guild-admin/Roles.Moderators; console gated + runs in the admin channel. Legacy !kmh-* still works.
     internal static class DiscordSlashCommands
     {
         // -------- registration --------

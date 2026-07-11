@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -49,6 +50,10 @@ namespace KMHServerAddon.Persistence
                 File.WriteAllText(Path.Combine(dest, "manifest.txt"), header + manifest);
 
                 destDir = dest;
+                Extensibility.KmhEventBus.Instance.RaiseBackupCreated(new KMH.Sdk.Server.Events.BackupCreatedEvent
+                {
+                    Name = Path.GetFileName(dest), Utc = StampUtcIso(Path.GetFileName(dest)), Reason = reason ?? "",
+                });
                 return true;
             }
             catch (Exception ex)
@@ -79,6 +84,100 @@ namespace KMHServerAddon.Persistence
                 return removed;
             }
             catch (Exception ex) { ServerLog.Warn($"Backup prune failed: {ex.Message}"); return 0; }
+        }
+
+        // Resolve a restore spec to a backup folder path: an exact folder name, "latest", or
+        // "before:<iso|yyyyMMdd-HHmmss>" (newest backup at or before that time). Returns null if nothing matches.
+        public static string ResolvePath(string spec)
+        {
+            if (string.IsNullOrWhiteSpace(spec)) return null;
+            string root = KmhDataPaths.BackupRoot;
+            if (!Directory.Exists(root)) return null;
+            string s = spec.Trim();
+
+            if (s.Equals("latest", StringComparison.OrdinalIgnoreCase))
+                return Directory.GetDirectories(root).OrderByDescending(Path.GetFileName, StringComparer.Ordinal).FirstOrDefault();
+
+            if (s.StartsWith("before:", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!TryParseWhen(s.Substring("before:".Length), out DateTime cutoff)) return null;
+                return Directory.GetDirectories(root)
+                    .Where(d => TryParseStamp(Path.GetFileName(d), out DateTime t) && t <= cutoff)
+                    .OrderByDescending(Path.GetFileName, StringComparer.Ordinal).FirstOrDefault();
+            }
+
+            string exact = Path.Combine(root, s);
+            return Directory.Exists(exact) ? exact : null;
+        }
+
+        // Roll KMH-Data back to match backup `spec`. Safety-backs up current data first, then makes KMH-Data an exact
+        // copy of the backup (files created since are removed - a true rollback). Boot-time only, before any store loads.
+        public static bool Restore(string spec, out string safetyBackup, out string error)
+        {
+            safetyBackup = null; error = null;
+            string src = ResolvePath(spec);
+            if (src == null) { error = $"no backup matches '{spec}'"; return false; }
+            if (!File.Exists(Path.Combine(src, "manifest.txt")))
+            { error = $"'{Path.GetFileName(src)}' has no manifest - refusing to restore from it"; return false; }
+
+            string[] backupFiles;
+            try { backupFiles = Directory.GetFiles(src, "*", SearchOption.AllDirectories); }
+            catch (Exception ex) { error = $"could not read backup: {ex.Message}"; return false; }
+            if (backupFiles.Length <= 1) { error = "backup has no data files - refusing to wipe live data"; return false; }
+
+            // Safety net so a bad restore stays reversible.
+            if (TryCreate("pre-restore", out string safeDir, out string safeErr)) safetyBackup = Path.GetFileName(safeDir);
+            else ServerLog.Warn($"Restore: pre-restore safety backup failed ({safeErr}) - continuing anyway.");
+
+            try
+            {
+                string dataRoot = KmhDataPaths.Folder;
+                Directory.CreateDirectory(dataRoot);
+                // Clear current KMH-Data (folder kept; backups are a sibling; Snapshots/ survives the wipe).
+                foreach (string entry in Directory.GetFileSystemEntries(dataRoot))
+                {
+                    if (IsSnapshotArtifact(entry)) continue;
+                    if (Directory.Exists(entry)) Directory.Delete(entry, recursive: true);
+                    else File.Delete(entry);
+                }
+                foreach (string file in backupFiles)
+                {
+                    string rel = GetRelative(src, file);
+                    if (rel.Equals("manifest.txt", StringComparison.OrdinalIgnoreCase)) continue; // backup metadata, not data
+                    string to = Path.Combine(dataRoot, rel);
+                    Directory.CreateDirectory(Path.GetDirectoryName(to));
+                    File.Copy(file, to, overwrite: true);
+                }
+                ServerLog.Warn($"KMH-Data RESTORED from '{Path.GetFileName(src)}'" +
+                               (safetyBackup != null ? $" (previous data saved as '{safetyBackup}')" : ""));
+                Extensibility.KmhEventBus.Instance.RaiseRestoreApplied(new KMH.Sdk.Server.Events.RestoreAppliedEvent
+                {
+                    BackupName = Path.GetFileName(src), SafetyBackup = safetyBackup ?? "",
+                });
+                return true;
+            }
+            catch (Exception ex) { error = ex.Message; return false; }
+        }
+
+        // ISO-8601 UTC parsed from a backup's yyyyMMdd-HHmmss name prefix, or "" if it doesn't parse.
+        public static string StampUtcIso(string backupName)
+            => TryParseStamp(backupName, out DateTime t) ? t.ToString("o") : "";
+
+        private static bool TryParseStamp(string folderName, out DateTime utc)
+        {
+            utc = default;
+            if (string.IsNullOrEmpty(folderName) || folderName.Length < 15) return false;
+            return DateTime.TryParseExact(folderName.Substring(0, 15), "yyyyMMdd-HHmmss",
+                CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out utc);
+        }
+
+        private static bool TryParseWhen(string s, out DateTime utc)
+        {
+            utc = default;
+            if (string.IsNullOrWhiteSpace(s)) return false;
+            if (TryParseStamp(s.Trim(), out utc)) return true;
+            return DateTime.TryParse(s.Trim(), CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out utc);
         }
 
         public readonly struct BackupInfo
@@ -117,7 +216,20 @@ namespace KMHServerAddon.Persistence
             string name = Path.GetFileName(path);
             if (name.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase)) return false;
             if (name.Equals(".kmh-selftest.json", StringComparison.OrdinalIgnoreCase)) return false;
+            if (name.Equals(".kmh-snapshot-request", StringComparison.OrdinalIgnoreCase)) return false;   // transient marker
+            if (IsSnapshotArtifact(path)) return false;   // Snapshots/ is an archive, not live state - keep backups lean
+            if (IsUnder(path, "Debug")) return false;     // client debug logs are transient diagnostics
             return true;
+        }
+
+        // Snapshots/ is a recovery archive: never backed up (bloat), never deleted by a rollback.
+        private static bool IsSnapshotArtifact(string path) => IsUnder(path, "Snapshots");
+
+        private static bool IsUnder(string path, string folder)
+        {
+            string marker = Path.DirectorySeparatorChar + folder + Path.DirectorySeparatorChar;
+            return path.IndexOf(marker, StringComparison.OrdinalIgnoreCase) >= 0
+                || path.TrimEnd(Path.DirectorySeparatorChar).EndsWith(Path.DirectorySeparatorChar + folder, StringComparison.OrdinalIgnoreCase);
         }
 
         // Net472 has no Path.GetRelativePath; KMH-Data paths are always under `root`, so a substring is exact.

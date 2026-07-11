@@ -545,10 +545,8 @@ namespace KMHServerAddon.Features.Discord
             catch { return "(?)"; }
         }
 
-        // Returns the in-game username linked to the Discord author, or null
-        // if not linked. Prefers snowflake-id lookup so the link survives a
-        // Discord display-name rename; falls back to display lookup for any legacy links from before Id storage
-        // landed
+        // In-game username linked to the Discord author, or null if unlinked. Prefers snowflake-id lookup so the
+        // link survives a Discord rename; falls back to display lookup for legacy links from before Id storage.
         private static string ResolveLinkedUsername(SocketMessage raw)
         {
             if (raw?.Author == null) return null;

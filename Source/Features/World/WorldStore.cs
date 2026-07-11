@@ -38,6 +38,24 @@ namespace KMHServerAddon.Features.World
             Diagnostics.ServerLog.Info($"World: loaded {s.Events?.Count ?? 0} event(s), {s.Quests?.Count ?? 0} server quest(s)");
         }
 
+        // Season reset: clear all events and global quests.
+        public static void ClearForNewSeason()
+        {
+            lock (_lock) { _events.Clear(); _quests.Clear(); _nextId = 1; }
+            SaveToDisk();
+        }
+
+        // Admin-cleanup residual detector: active global quests the user has contributed to (read-only).
+        public static int GlobalQuestContributionsOf(string user)
+        {
+            if (string.IsNullOrEmpty(user)) return 0;
+            int n = 0;
+            lock (_lock)
+                foreach (ServerQuestDto q in _quests)
+                    if (q?.Contributors != null && q.Contributors.ContainsKey(user)) n++;
+            return n;
+        }
+
         public static void SaveToDisk()
         {
             PersistedState s = new PersistedState();

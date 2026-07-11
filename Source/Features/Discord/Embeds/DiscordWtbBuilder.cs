@@ -6,12 +6,7 @@ using KMHServerAddon.Features.LinkedAccounts;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // Embed builder for the per-user Want-To-Buy board. Parallel shape to DiscordShowcaseBuilder: title with owner
-    // + linked Discord handle, optional italic tagline, one field per entry (item / max qty / max unit price).
-    // Footer notes how many entries are shown
-    //
-    // Sort order: newest-first. The most recent ask reads as the most urgent, and trims to the 25-field embed cap
-    // by dropping the oldest
+    // Want-To-Buy board embed, newest-first (trimmed oldest-first to the 25-field embed cap).
     internal static class DiscordWtbBuilder
     {
         private const int MaxFields = 25;

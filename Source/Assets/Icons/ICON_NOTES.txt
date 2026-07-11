@@ -1,0 +1,37 @@
+KMH icon inventory & notes
+==========================
+All icons ship from Source/Assets/Icons and are staged into KMH-Data/Icons on build.
+Source/license: Google Noto Emoji (https://github.com/googlefonts/noto-emoji), Apache License 2.0.
+Do not add images from unlicensed/unknown sources.
+
+Present
+-------
+  kmh_logo.png        KMH branding (Discord embeds etc.). PLACEHOLDER - server owners can replace it
+                      by dropping their own kmh_logo.png into KMH-Data/Icons.
+  guild.png           guild features (Discord embeds, announcements)
+  treasury.png        treasury/economy embeds
+  marketplace.png     marketplace embeds
+  quest.png           quest embeds
+  leaderboard.png     standings/leaderboard embeds
+  site_created.png    site created event
+  site_destroyed.png  site removed event
+  warning.png         warnings
+  error.png           errors
+
+Recommended future icons (NOT yet present - features fall back to text/nearest icon)
+------------------------------------------------------------------------------------
+  guild_hall.png      guild hall set/moved announcements (falls back to guild.png)
+  guild_owner.png     ownership transfer announcements (falls back to guild.png)
+  diplomacy.png / alliance.png / hostile.png   guild diplomacy events (fall back to guild.png)
+  open_join.png / invite_only.png              join-mode changes (fall back to guild.png)
+  deposit.png / withdraw.png                   treasury movement (fall back to treasury.png)
+  auctions.png / want_board.png                trading embeds (fall back to marketplace.png)
+  world_events.png / global_quests.png         living-world events (fall back to quest.png)
+  sites.png           general sites embeds (falls back to site_created.png)
+  recovery.png        recovery-queue admin notices (falls back to warning.png)
+  enforcement.png     config enforcement notices (falls back to warning.png)
+  api_transport.png   transport status notices (falls back to kmh_logo.png)
+When adding any of these, source them from Noto Emoji only and keep this file updated.
+
+In-game world markers use vanilla RimWorld textures (World/WorldObjects/Sites/GenericSite) so the
+mod ships no extra world art; swap the <texture> in Defs/WorldObjectDefs/*.xml to restyle.

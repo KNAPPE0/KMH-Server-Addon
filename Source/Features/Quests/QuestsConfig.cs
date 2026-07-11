@@ -16,6 +16,13 @@ namespace KMHServerAddon.Features.Quests
         public int MaxDescriptionLength { get; set; } = 1024;
         public int MaxBountyItems      { get; set; } = 20;
 
+        // Client auto-verify (escort/defend/hunt/build) guards. The verify report is client-tracked, so:
+        // a claim younger than this can't complete (stops claim->instant-verify macros)...
+        public int AutoVerifyMinClaimSeconds { get; set; } = 120;
+        // ...and owners who want human sign-off can route auto-verified quests to the poster's review
+        // queue (PendingReview -> poster approves/rejects) instead of paying instantly.
+        public bool AutoVerifyRequiresPosterReview { get; set; } = false;
+
         private static QuestsConfig _current;
         public static QuestsConfig Current => _current ?? (_current = LoadOrDefault());
 
@@ -28,6 +35,7 @@ namespace KMHServerAddon.Features.Quests
             cfg.MaxTitleLength      = Clamp(cfg.MaxTitleLength, 8, 200);
             cfg.MaxDescriptionLength = Clamp(cfg.MaxDescriptionLength, 16, 8000);
             cfg.MaxBountyItems      = Clamp(cfg.MaxBountyItems, 1, 200);
+            cfg.AutoVerifyMinClaimSeconds = Clamp(cfg.AutoVerifyMinClaimSeconds, 0, 3600);
             return cfg;
         }
 

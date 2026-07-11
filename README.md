@@ -13,13 +13,14 @@ ones who have it.
 
 ## RWT version
 
-Recommended **RWT 26.6.9.1** — KMH v1.1.1 is built and tested around it. It also
+Recommended **RWT 26.6.9.1** — KMH v1.2.0 is built and tested around it. It also
 runs on **RWT 26.5.24.1** (the older RWT generation); the addon auto-detects
 which one it's sitting next to and binds the matching API automatically.
 
-**RWT 26.6.23.1 and newer is experimental / compatibility-in-progress — don't
-update to it yet.** If Steam auto-updated RimWorld Together past 26.6.9.1, players
-downgrade in-game: `Mod Options → RimWorld Together → Change Version → 26.6.9.1`.
+**On RWT 26.6.23.1 and newer, RWT chat is not a reliable KMH carrier — keep the
+KMH API transport enabled (the default since v1.2.0); it's the recommended/required
+path there.** For the fully tested pairing instead, players downgrade in-game:
+`Mod Options → RimWorld Together → Change Version → 26.6.9.1`.
 
 Update the **KMH Server Addon** and the **KMH Patch** together so both sides match.
 
@@ -75,12 +76,15 @@ Update the **KMH Server Addon** and the **KMH Patch** together so both sides mat
   profile from in-game; clients verify, back up, apply, and lock their Mod
   Options to match, with a per-mod safe list, a gameplay-only mode, and admin
   bypass.
-- **KMH API transport** *(optional, experimental, off by default)* - a
-  KMH-owned port so clients talk to the addon directly instead of riding RWT
-  chat. It keeps KMH traffic off the chat stream and on its own readable
-  channel; connections authenticate with a one-time token issued over the
-  verified RWT session, and KMH falls back to chat if the port is unreachable.
-  Turn it on in `Config/Transport.json` and check it with `kmh transport`.
+- **KMH API transport** *(on by default — the recommended path for newer RWT
+  versions)* - a KMH-owned port (default `5099`) so clients talk to the addon
+  directly instead of riding RWT chat. Public-ready and locked down by default:
+  authentication (one-time token over the verified RWT session), connection
+  caps, per-IP caps, failed-auth throttling, idle/auth timeouts, and frame-size
+  limits are all required out of the box — a public bind never means an
+  unsecured bind. Forward TCP `5099` for remote players; KMH falls back to chat
+  if the port is unreachable. Tune in `Config/Transport.json`; verify with
+  `kmh transport-test`.
 - **Admin tools** - the `kmh` command family in console and `/kmh` in chat:
   `status`, `diag`, `transport`, grant silver, drain the house pool, live config
   reloads, enforcement management, fire events / global quests, and season rolls.

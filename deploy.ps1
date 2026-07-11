@@ -73,6 +73,23 @@ $ext = if ($Rid.StartsWith("win")) { ".exe" } else { "" }
 $publishName = if ($SelfContained) { "$Rid-selfcontained" } else { $Rid }
 $publish = Join-Path $PSScriptRoot "Source\bin\publish\$publishName"
 
+# The launcher embeds bin\payload\KMHAddon.RTShared.dll (the 26.6.x payload); a stale one silently ships old
+# code to every new-generation server. Always rebuild it first, then verify its version matches the project.
+Write-Host "[deploy] Building the RTShared payload (RwtFlavor=New) so the launcher embeds a fresh one."
+& dotnet build $project -c Release -p:RwtFlavor=New -v q | Out-Host
+if ($LASTEXITCODE -ne 0) {
+    throw "Payload build (RwtFlavor=New) failed with exit code $LASTEXITCODE."
+}
+$payloadDll = Join-Path $PSScriptRoot "Source\bin\payload\KMHAddon.RTShared.dll"
+if (-not (Test-Path $payloadDll)) {
+    throw "Payload missing after build: $payloadDll"
+}
+$payloadVersion = [System.Reflection.AssemblyName]::GetAssemblyName($payloadDll).Version.ToString(3)
+if ($payloadVersion -ne $version) {
+    throw "Payload version $payloadVersion does not match project version $version - stale payload would ship."
+}
+Write-Host "[deploy] Payload OK - KMHAddon.RTShared v$payloadVersion matches project v$version."
+
 if (Test-Path $publish) {
     Remove-Item $publish -Recurse -Force
 }
@@ -140,6 +157,18 @@ if (Test-Path $template) {
     }
     Copy-Item $template $dataOut -Recurse -Force
 }
+
+# Discord embed icons ship in every zip at KMH-Data/Icons (the one folder the addon reads). Staged from the
+# committed source set and guarded so they can never silently drop out of a release again.
+$iconsSrc = Join-Path $PSScriptRoot "Source\Assets\Icons"
+$iconsOut = Join-Path $Deploy "KMH-Data\Icons"
+New-Item -ItemType Directory -Path $iconsOut -Force | Out-Null
+Copy-Item (Join-Path $iconsSrc "*") $iconsOut -Recurse -Force
+$iconCount = (Get-ChildItem $iconsOut -Filter *.png -ErrorAction SilentlyContinue | Measure-Object).Count
+if ($iconCount -lt 1) {
+    throw "No icons staged into KMH-Data/Icons - Source\Assets\Icons is missing or empty."
+}
+Write-Host "[deploy] Icons OK - $iconCount icon(s) staged into KMH-Data/Icons."
 
 $setup = Join-Path $PSScriptRoot "SETUP.txt"
 if (Test-Path $setup) {

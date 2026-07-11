@@ -18,10 +18,14 @@ namespace KMHServerAddon.Features.Discord
 
         public static EmbedBuilder Base(DiscordConfig cfg, string title, string description = null)
         {
+            // Footer = the server identity, so posts from multiple servers are distinguishable. A custom Discord
+            // Branding.DisplayName still overrides it (back-compat for owners who set one).
+            string dn = cfg?.Branding?.DisplayName;
+            string footer = !string.IsNullOrWhiteSpace(dn) && dn != "KMH Server" ? dn : KmhServerIdentity.Name;
             EmbedBuilder eb = new EmbedBuilder()
                 .WithTitle(title)
                 .WithColor(BrandColor(cfg))
-                .WithFooter(string.IsNullOrEmpty(cfg?.Branding?.DisplayName) ? "KMH" : cfg.Branding.DisplayName)
+                .WithFooter(footer)
                 .WithCurrentTimestamp();
             if (!string.IsNullOrEmpty(description)) eb.WithDescription(description);
             return eb;

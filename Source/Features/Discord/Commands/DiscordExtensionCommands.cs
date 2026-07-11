@@ -7,14 +7,8 @@ using KMHServerAddon.Features.LinkedAccounts;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // Registry + dispatch for extension-provided Discord commands.
-    //
-    // Extensions register via IKmhServerHost.RegisterDiscordCommand(command, handler). The command word is stored
-    // WITHOUT the bot prefix, lowercased. The "kmh-" prefix is reserved for KMH core - registrations using it are
-    // refused so an extension can never shadow a built-in command
-    //
-    // DiscordBridge.OnMessage consults TryDispatch last in its command chain, so core commands always win a name
-    // collision
+    // Extension-provided Discord commands. The "kmh-" prefix is reserved for core (refused here) and this dispatches
+    // last, so an extension can never shadow a built-in command.
     internal static class DiscordExtensionCommands
     {
         private static readonly object _lock = new object();

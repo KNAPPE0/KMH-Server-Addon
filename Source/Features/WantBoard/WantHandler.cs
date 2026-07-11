@@ -24,15 +24,7 @@ namespace KMHServerAddon.Features.WantBoard
         }
 
         public static void BroadcastSnapshot()
-        {
-            foreach (ServerClient c in Network.ServerClients.Keys)
-            {
-                if (c?.IsVerified != true) continue;
-                string u = c.GetData<UserFile>()?.Username;
-                if (string.IsNullOrEmpty(u)) continue;
-                KmhRouter.SendTo(c, KmhProtocol.Kind.WantSnapshot, WantStore.BuildSnapshot(u));
-            }
-        }
+            => KmhRouter.BroadcastToInterested(KmhProtocol.Kind.WantSnapshot, u => WantStore.BuildSnapshot(u));
 
         private static void OnPost(ServerClient client, KmhEnvelope env)
         {
@@ -44,8 +36,14 @@ namespace KMHServerAddon.Features.WantBoard
             int unitPrice  = env?.GetInt("unit_price_silver", 0) ?? 0;
             int hours      = env?.GetInt("hours", 0) ?? 0;
             string vis     = env?.GetString("visibility") ?? "public";
+            int minQ       = env?.GetInt("min_quality", 0) ?? 0;
+            string reqStuff = env?.GetString("required_stuff") ?? "";
+            bool allowComplex = env?.GetBool("allow_complex") ?? false;
+            bool allowTainted = env?.GetBool("allow_tainted") ?? false;
+            bool allowDamaged = env?.GetBool("allow_damaged") ?? false;
 
-            (long id, string reason) = WantStore.Post(buyer, itemDef, qty, unitPrice, hours, vis);
+            (long id, string reason) = WantStore.Post(buyer, itemDef, qty, unitPrice, hours, vis,
+                minQ, reqStuff, allowComplex, allowTainted, allowDamaged);
             KmhRouter.Notify(client, id > 0 ? "positive" : "negative", reason);
             if (id > 0)
             {

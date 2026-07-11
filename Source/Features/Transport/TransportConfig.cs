@@ -3,18 +3,23 @@ using KMHServerAddon.Persistence;
 
 namespace KMHServerAddon.Features.Transport
 {
-    // KMH transport config; off by default, using RWT chat unless the owner enables the KMH-owned port. Secure by
-    // default: when enabled it binds loopback-only and requires auth - the owner must opt in to a public bind.
+    // KMH API transport config: on by default since v1.2.0 - public bind is only OK because auth/caps/throttle are required.
     internal sealed class TransportConfig
     {
-        // Master switch for the KMH API listener. Off = chat transport only (no port opened).
-        public bool   EnableKmhApiTransport   { get; set; } = false;
+        public int    SchemaVersion           { get; set; } = 1;
 
-        // Port the KMH API listens on when enabled. Distinct from RWT's own port.
+        // Master switch for the KMH API listener. Off = chat transport only (no port opened).
+        public bool   EnableKmhApiTransport   { get; set; } = true;
+
+        // Port the KMH API listens on when enabled. Distinct from RWT's own port. Forward this for remote KMH.
         public int    KmhApiPort              { get; set; } = 5099;
 
-        // Interface to bind. Default "127.0.0.1" = local only (safe). Set "0.0.0.0" to expose to remote players.
-        public string BindAddress             { get; set; } = "127.0.0.1";
+        // Public host clients should dial for the API when it differs from the RWT address (NAT/proxy/split hosts).
+        // Empty = clients dial the RWT server IP they already connected to.
+        public string PublicApiHost           { get; set; } = "";
+
+        // Interface to bind. "0.0.0.0" = accept remote players (auth still required); "127.0.0.1" = local only.
+        public string BindAddress             { get; set; } = "0.0.0.0";
 
         // Require handshake tokens / verified-session auth. Keep ON - off lets any socket claim any player.
         public bool   RequireKmhApiAuth       { get; set; } = true;
