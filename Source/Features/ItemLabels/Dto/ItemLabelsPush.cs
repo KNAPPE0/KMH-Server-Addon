@@ -14,5 +14,9 @@ namespace KMHServerAddon.Features.ItemLabels.Dto
         // defName -> RimWorld BaseMarketValue. Mirror of the patch DTO. Additive: a pre-1.1.0 client omits it.
         [JsonProperty("values")]
         public Dictionary<string, long> Values { get; set; } = new Dictionary<string, long>();
+
+        // Chunk metadata for large modpacks (mirror of the patch DTO). 0 = single (old-client) push.
+        [JsonProperty("chunk_index")] public int ChunkIndex { get; set; } = 0;
+        [JsonProperty("chunk_total")] public int ChunkTotal { get; set; } = 0;
     }
 }

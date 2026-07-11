@@ -10,6 +10,7 @@ namespace KMHServerAddon.Features.Marketplace.Dto
         [JsonProperty("house_silver_pool")]         public long HouseSilverPool         { get; set; } = 0;
         [JsonProperty("lifetime_trades_completed")] public long LifetimeTradesCompleted { get; set; } = 0;
         [JsonProperty("lifetime_silver_traded")]    public long LifetimeSilverTraded    { get; set; } = 0;
+        [JsonProperty("server_tax_percent")]        public int  ServerTaxPercent        { get; set; } = 0;   // base marketplace tax before guild perk reduction
     }
 
     public class MarketplaceListing
@@ -30,5 +31,11 @@ namespace KMHServerAddon.Features.Marketplace.Dto
         // Server-side: snake_case wire field for visibility ("public" / "guild_only"). Server uses it to filter the
         // listings shown to each client. Default "public" preserves pre-visibility behavior on missing field
         [JsonProperty("visibility")]          public string Visibility      { get; set; } = "public";
+
+        // State-preserving escrow for complex items. Persisted; STRIPPED from wire snapshots (blob stays server-side,
+        // moves treasury<->listing<->buyer-treasury). When set, this is a payload listing.
+        [JsonProperty("escrow_payloads")]     public List<Items.KmhThingPayload> EscrowPayloads { get; set; }
+        [JsonProperty("state_fingerprint")]   public string StateFingerprint { get; set; } = "";
+        [JsonProperty("state_note")]          public string StateNote        { get; set; } = "";   // UI: "(tainted, q5, legacy)"
     }
 }

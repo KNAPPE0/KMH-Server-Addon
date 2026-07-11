@@ -38,10 +38,13 @@ namespace KMHServerAddon.Persistence
             new DataFile("Auctions",            AuctionsFile,       false),
             new DataFile("WantBoard",           WantsFile,          false),
             new DataFile("Notifications",       NotificationsFile,  false),
+            new DataFile("Recovery",            RecoveryFile,       false),
             new DataFile("Seasons",             SeasonsFile,        false),
             new DataFile("Accounts",            LinkedAccountsFile, false),
             // Regenerable - rebuilt from clients/defaults on the next run if lost
             new DataFile("Catalog/ItemLabels",  ItemLabelsFile,           true),
+            new DataFile("Catalog/WeatherDefs", WeatherDefsFile,          true),
+            new DataFile("Players/SaveIds",     SaveIdsFile,              true),
             new DataFile("Discord/UserState",   DiscordUserStateFile,     true),
             new DataFile("Config/Economy",      EconomyConfigFile,        true),
             new DataFile("Config/Sites",        SitesConfigFile,          true),
@@ -65,6 +68,20 @@ namespace KMHServerAddon.Persistence
 
         // Data-format stamp + last-run marker (dotfile so it sorts/hides out of the way). Drives the migration guard
         public static string MetaFile => Path.Combine(Folder, ".kmh-meta.json");
+
+        // Coordinated-rollback marker. In the backups folder (sibling) so it survives a KMH-Data wipe and an external
+        // rollback tool can drop it. One line: a backup folder name, "latest", or "before:<iso|yyyyMMdd-HHmmss>".
+        public static string RestoreRequestFile => Path.Combine(BackupRoot, ".kmh-restore-request");
+
+        // Machine-readable status snapshot for external tooling (dashboards, monitoring, rollback correlation).
+        // Rewritten on a cadence, so its freshness also serves as a liveness heartbeat.
+        public static string StatusFile => Path.Combine(Folder, "status.json");
+
+        // Snapshots/<Season>/<PlayerId|_server>/<YYYY-MM-DD_HH-MM>/ - timestamp-matchable recovery snapshots.
+        public static string SnapshotsRoot => Sub("Snapshots");
+
+        // External snapshot-request marker, consumed on the sweep ("player <user> [ts]" | "server [ts]" | "all [ts]").
+        public static string SnapshotRequestFile => Path.Combine(Folder, ".kmh-snapshot-request");
 
         // Append-only economy audit trail (daily JSONL files). Not in KnownDataFiles - JSONL isn't a single JSON doc,
         // so the integrity scan (which JToken-parses whole files) skips it by design
@@ -104,13 +121,17 @@ namespace KMHServerAddon.Persistence
         public static string WorldFile           => Path.Combine(Sub("World"),       "World.json");
         public static string AuctionsFile        => Path.Combine(Sub("Auctions"),    "Auctions.json");
         public static string NotificationsFile   => Path.Combine(Sub("Notifications"), "Notifications.json");
+        public static string RecoveryFile        => Path.Combine(Sub("Recovery"),     "Recovery.json");
         public static string WantsFile           => Path.Combine(Sub("WantBoard"),   "Wants.json");
         public static string SeasonsFile         => Path.Combine(Sub("Seasons"),     "Seasons.json");
         public static string PlayerStatsFile     => Path.Combine(Sub("Players"),     "PlayerStats.json");
+        public static string SaveIdsFile         => Path.Combine(Sub("Players"),     "SaveIds.json");
         public static string ColonistsFile       => Path.Combine(Sub("Players"),     "Colonists.json");
         public static string LinkedAccountsFile  => Path.Combine(Sub("Accounts"),    "LinkedAccounts.json");
         public static string ItemLabelsFile      => Path.Combine(Sub("Catalog"),     "ItemLabels.json");
+        public static string WeatherDefsFile     => Path.Combine(Sub("Catalog"),     "WeatherDefs.json");
         public static string DiscordUserStateFile        => Path.Combine(Sub("Discord"), "UserState.json");
+        public static string DiscordGuildRolesFile       => Path.Combine(Sub("Discord"), "GuildRoles.json");
         public static string DiscordLeaderboardStateFile => Path.Combine(Sub("Discord"), "LeaderboardState.json");
 
         // Discord embed icons. Auto-created so the owner just drops icons here - no Assets/Icons folder to set up
@@ -125,7 +146,7 @@ namespace KMHServerAddon.Persistence
             "Treasury", "Marketplace", "Quests", "Guilds",
             "Reputation", "Sites", "Players", "Accounts", "Catalog", "Discord",
             "Enforcement", Path.Combine("Enforcement", "Profile"), "Icons", "Notifications", "WantBoard", "Seasons",
-            "Ledger",
+            "Ledger", "Debug",
         };
 
         // Idempotent - safe to call repeatedly. Creates KMH-Data/ and every domain subfolder, and drops the Icons

@@ -62,7 +62,7 @@ namespace KMHServerAddon.Diagnostics
         public static void Protocol(string message)
         {
             if (!DebugEnabled) return;
-            string line = $"{Constants.LogPrefix} [proto] {message}";
+            string line = $"{Constants.LogPrefix} [protocol] {message}";
             try { Printer.Title(line, Printer.Verbosity.Verbose); }
             catch { Console.WriteLine(line); }
         }

@@ -21,6 +21,7 @@ namespace KMHServerAddon.Features.World.Dto
         public const string DoubleWorkerXp  = "double_worker_xp";  // site worker XP * (Magnitude/100)
         public const string HouseStipend    = "house_stipend";     // one-shot payout of Magnitude silver to each online player
         public const string BountyTarget    = "bounty_target";     // everyone hunts Target for a shared pot of Magnitude
+        public const string WorldWeather    = "world_weather";     // clients apply GameConditionDef Target to their maps
 
         [JsonProperty("id")]                public long   Id              { get; set; } = 0;
         [JsonProperty("type")]              public string Type            { get; set; } = "";

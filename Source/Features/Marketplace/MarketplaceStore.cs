@@ -20,13 +20,8 @@ namespace KMHServerAddon.Features.Marketplace
         private static long _lifetimeSilverTraded    = 0;
         private static bool _housePoolSeeded         = false; // one-time new-server prime guard (see SeedHousePoolOnce)
 
-        // Build a per-caller snapshot. Filters out guild-only listings that the caller isn't entitled to see - see
-        // Guilds.GuildVisibility for
-        // the full rules (poster's own guild + allied guilds get visibility;
-        // others don't).
-        //
-        // Special case: caller is ALWAYS shown their own listings regardless of visibility flag (you can manage
-        // what you posted even if you somehow leave the guild that scoped it)
+        // Per-caller snapshot; hides guild-only listings the caller can't see (GuildVisibility rules), but ALWAYS
+        // includes the caller's own listings so they can manage what they posted even after leaving that guild.
         public static MarketplaceSnapshot BuildSnapshot(string callerUsername)
         {
             MarketplaceSnapshot s = new MarketplaceSnapshot();
@@ -40,6 +35,7 @@ namespace KMHServerAddon.Features.Marketplace
                 s.HouseSilverPool         = _houseSilverPool;
                 s.LifetimeTradesCompleted = _lifetimeTradesCompleted;
                 s.LifetimeSilverTraded    = _lifetimeSilverTraded;
+                s.ServerTaxPercent        = Economy.EconomyConfig.Current.MarketplaceTaxPercent;
 
                 s.Listings = new List<MarketplaceListing>(_byId.Count);
                 foreach (MarketplaceListing l in _byId.Values)
@@ -50,7 +46,8 @@ namespace KMHServerAddon.Features.Marketplace
                         !Guilds.GuildVisibility.IsVisibleTo(l.SellerTreasuryKey, l.Visibility, callerGuild, prefetched: true))
                         continue;
 
-                    // Shallow copy so concurrent mutation can't corrupt the serializer's view mid-send
+                    // Shallow copy so concurrent mutation can't corrupt the serializer's view mid-send. EscrowPayloads
+                    // (the deep blobs) are NEVER sent - only the display note/fingerprint travel.
                     s.Listings.Add(new MarketplaceListing
                     {
                         Id                = l.Id,
@@ -66,6 +63,8 @@ namespace KMHServerAddon.Features.Marketplace
                         QualityIndex      = l.QualityIndex,
                         StuffDefName      = l.StuffDefName,
                         Visibility        = l.Visibility,
+                        StateFingerprint  = l.StateFingerprint,
+                        StateNote         = l.StateNote,
                     });
                 }
             }
@@ -105,6 +104,7 @@ namespace KMHServerAddon.Features.Marketplace
             { reason = $"Minimum unit price is {Util.SilverFmt.Format(cfg.MarketplaceMinUnitPrice)}."; return 0; }
             if (unitPriceSilver > cfg.MarketplaceMaxUnitPrice)
             { reason = $"Maximum unit price is {Util.SilverFmt.Format(cfg.MarketplaceMaxUnitPrice)}."; return 0; }
+            if (!CheckUnderpricing(itemDefName, sellerUsername, unitPriceSilver, out reason)) return 0;
 
             // Cap the listing's total value to int range. Buy computes cost as int (UnitPrice * qty); without this a
             // large-but-legal listing (high qty * high unit price) would overflow to a negative cost - i.e. pay the
@@ -166,6 +166,139 @@ namespace KMHServerAddon.Features.Marketplace
             return assignedId;
         }
 
+        // Post a complex item as a state-preserving listing. Escrows the exact payloads out of the seller's treasury
+        // (escrowed as payloads), so the listed item keeps its HP/taint/quality/comp state. Returns
+        // the new listing id, or 0 with a reason.
+        public static long PostPayload(string sellerUsername, string fingerprint, int qty, int unitPriceSilver,
+            string visibility, int expiresInHours, out string reason)
+        {
+            reason = null;
+            if (string.IsNullOrEmpty(sellerUsername)) { reason = "No seller.";        return 0; }
+            if (string.IsNullOrEmpty(fingerprint))    { reason = "No item.";          return 0; }
+            if (qty <= 0)                             { reason = "Quantity must be > 0."; return 0; }
+
+            Economy.EconomyConfig cfg = Economy.EconomyConfig.Current;
+            if (unitPriceSilver < cfg.MarketplaceMinUnitPrice)
+            { reason = $"Minimum unit price is {Util.SilverFmt.Format(cfg.MarketplaceMinUnitPrice)}."; return 0; }
+            if (unitPriceSilver > cfg.MarketplaceMaxUnitPrice)
+            { reason = $"Maximum unit price is {Util.SilverFmt.Format(cfg.MarketplaceMaxUnitPrice)}."; return 0; }
+            if ((long)unitPriceSilver * qty > int.MaxValue)
+            { reason = "That listing's total value is too large - lower the quantity or price."; return 0; }
+
+            int lifetimeHours = expiresInHours > 0
+                ? Math.Min(expiresInHours, cfg.MarketplaceListingLifetimeHours)
+                : cfg.MarketplaceListingLifetimeHours;
+
+            lock (_lock)
+            {
+                int open = 0;
+                foreach (MarketplaceListing l in _byId.Values)
+                    if (string.Equals(l.SellerUsername, sellerUsername, StringComparison.OrdinalIgnoreCase)) open++;
+                if (open >= cfg.MarketplaceMaxOpenListingsPerUser)
+                { reason = $"You already have the max {cfg.MarketplaceMaxOpenListingsPerUser} open listings."; return 0; }
+            }
+
+            List<Items.KmhThingPayload> escrow = Treasury.TreasuryStore.WithdrawPayloads(sellerUsername, fingerprint, qty, note: "marketplace post escrow");
+            if (escrow == null || escrow.Count == 0) { reason = "Your treasury doesn't have that item to list."; return 0; }
+            int totalUnits = 0; foreach (Items.KmhThingPayload p in escrow) totalUnits += p.StackCount;
+            Items.KmhThingPayload meta = escrow[0];
+
+            // Underpricing check needs the item's def (only known after the escrow pop). If a strict server blocks it,
+            // push the escrow back so nothing is lost.
+            if (!CheckUnderpricing(meta.DefName, sellerUsername, unitPriceSilver, out reason))
+            {
+                foreach (Items.KmhThingPayload p in escrow) Treasury.TreasuryStore.DepositPayload(sellerUsername, p, note: "marketplace post rejected - refund");
+                return 0;
+            }
+
+            long assignedId, now = DateTime.UtcNow.Ticks;
+            lock (_lock)
+            {
+                assignedId = _nextId++;
+                _byId[assignedId] = new MarketplaceListing
+                {
+                    Id                = assignedId,
+                    SellerUsername    = sellerUsername,
+                    SellerTreasuryKey = Treasury.TreasuryStore.ResolveOwnerKeyFor(sellerUsername),
+                    ItemDefName       = meta.DefName,
+                    StuffDefName      = meta.StuffDefName,
+                    QualityIndex      = meta.Quality,
+                    RemainingQty      = totalUnits,
+                    OriginalQty       = totalUnits,
+                    UnitPriceSilver   = unitPriceSilver,
+                    ListedUtcTicks    = now,
+                    ExpiresUtcTicks   = now + TimeSpan.FromHours(lifetimeHours).Ticks,
+                    IsAutoListing     = false,
+                    Visibility        = string.IsNullOrEmpty(visibility) ? "public" : visibility,
+                    EscrowPayloads    = escrow,
+                    StateFingerprint  = fingerprint,
+                    StateNote         = Items.KmhItemSafety.DescribeStateForLedger(meta),
+                };
+            }
+            SaveToDisk();
+            Extensibility.KmhEventBus.Instance.RaiseMarketplacePost(new KMH.Sdk.Server.Events.MarketplacePostEvent { ListingId = assignedId, SellerUsername = sellerUsername, ItemDefName = meta.DefName, Qty = totalUnits, UnitPriceSilver = unitPriceSilver, Visibility = string.IsNullOrEmpty(visibility) ? "public" : visibility });
+            reason = $"Listed {totalUnits}x {meta.DisplayLabel} at {Util.SilverFmt.Format(unitPriceSilver)} each (full state kept).";
+            return assignedId;
+        }
+
+        // Pop up to `qty` escrow payload-units off a listing (under _lock). Blob instances are atomic; metadata splits.
+        private static List<Items.KmhThingPayload> PopPayloadsLocked(MarketplaceListing l, int qty)
+        {
+            List<Items.KmhThingPayload> outp = new List<Items.KmhThingPayload>();
+            if (l.EscrowPayloads == null) return outp;
+            int rem = qty;
+            foreach (Items.KmhThingPayload e in new List<Items.KmhThingPayload>(l.EscrowPayloads))
+            {
+                if (rem <= 0) break;
+                if (e.StackCount <= rem) { outp.Add(e); l.EscrowPayloads.Remove(e); rem -= e.StackCount; }
+                else if (string.IsNullOrEmpty(e.ScribeXml)) { outp.Add(ClonePayload(e, rem)); e.StackCount -= rem; rem = 0; }
+            }
+            return outp;
+        }
+
+        private static Items.KmhThingPayload ClonePayload(Items.KmhThingPayload p, int stackCount) => new Items.KmhThingPayload
+        {
+            SchemaVersion = p.SchemaVersion, DefName = p.DefName, StuffDefName = p.StuffDefName, StackCount = stackCount,
+            HitPoints = p.HitPoints, MaxHitPoints = p.MaxHitPoints, Quality = p.Quality, Tainted = p.Tainted,
+            ScribeXml = p.ScribeXml, Fidelity = p.Fidelity, DisplayLabel = p.DisplayLabel, MarketValue = p.MarketValue,
+            Fingerprint = p.Fingerprint, Legacy = p.Legacy, Warnings = new List<string>(p.Warnings ?? new List<string>()),
+        };
+
+        // Return every escrowed payload on a listing to a user's treasury (cancel/expire refund).
+        // Optional underpricing guard: compare a listing's unit price to the item's trusted server-side value. Off by
+        // default (returns true). Warns below WarnBelowTrustedValuePercent; blocks below MinPercentOfTrustedValue when
+        // BlockSuspiciousUnderpricedListings is on. Unknown value (0) -> can't judge -> allow.
+        private static bool CheckUnderpricing(string itemDefName, string seller, int unitPrice, out string reason)
+        {
+            reason = null;
+            Economy.EconomyConfig cfg = Economy.EconomyConfig.Current;
+            if (cfg.MarketplaceWarnBelowTrustedValuePercent <= 0 &&
+                !(cfg.MarketplaceBlockSuspiciousUnderpricedListings && cfg.MarketplaceMinPercentOfTrustedValue > 0))
+                return true;
+            Util.ItemKey.Split(itemDefName ?? "", out string pureDef, out _, out _);
+            long trusted = Items.KmhItemSafety.GetTrustedMarketValue(pureDef);
+            if (trusted <= 0) return true;
+            double ratio = unitPrice / (double)trusted;
+            if (cfg.MarketplaceBlockSuspiciousUnderpricedListings && cfg.MarketplaceMinPercentOfTrustedValue > 0 &&
+                ratio < cfg.MarketplaceMinPercentOfTrustedValue)
+            {
+                reason = $"That price is only {ratio:P0} of the item's value ({Util.SilverFmt.Format(trusted)}); this server requires at least {cfg.MarketplaceMinPercentOfTrustedValue:P0}.";
+                return false;
+            }
+            if (cfg.MarketplaceWarnBelowTrustedValuePercent > 0 && ratio < cfg.MarketplaceWarnBelowTrustedValuePercent)
+                Diagnostics.ServerLog.Warn($"Marketplace: {seller} listed {pureDef} at {unitPrice}s = {ratio:P0} of trusted value {trusted}s (underpriced - audit flag).");
+            return true;
+        }
+
+        private static void RefundPayloadsTo(string username, MarketplaceListing l, string note)
+        {
+            if (l.EscrowPayloads == null) return;
+            // Recovery-safe: a deposit that can't land (invalid/deleted seller) is HELD, never dropped.
+            foreach (Items.KmhThingPayload p in l.EscrowPayloads)
+                Items.KmhPayloadEscrow.Deliver(username, p, note, note);
+            l.EscrowPayloads = null;
+        }
+
         // Server-initiated expiry. No caller validation (the sweeper has no caller). Removes the listing + refunds
         // remaining stock to the seller's treasury. Returns the seller's username so the sweeper can push them a
         // treasury update if they're online
@@ -181,8 +314,11 @@ namespace KMHServerAddon.Features.Marketplace
             sellerUsername = listing.SellerUsername;
             if (listing.RemainingQty > 0 && !string.IsNullOrEmpty(sellerUsername))
             {
-                Treasury.TreasuryStore.DepositItem(sellerUsername, Util.ItemKey.Compose(listing.ItemDefName, listing.StuffDefName, listing.QualityIndex), listing.RemainingQty,
-                    note: $"marketplace listing #{listingId} expired");
+                if (listing.EscrowPayloads != null && listing.EscrowPayloads.Count > 0)
+                    RefundPayloadsTo(sellerUsername, listing, $"marketplace listing #{listingId} expired");
+                else
+                    Treasury.TreasuryStore.DepositItem(sellerUsername, Util.ItemKey.Compose(listing.ItemDefName, listing.StuffDefName, listing.QualityIndex), listing.RemainingQty,
+                        note: $"marketplace listing #{listingId} expired");
             }
             SaveToDisk();
             return true;
@@ -223,17 +359,58 @@ namespace KMHServerAddon.Features.Marketplace
             // Refund the remaining stock outside the lock (treasury has its own lock).
             if (listing.RemainingQty > 0)
             {
-                Treasury.TreasuryStore.DepositItem(callerUsername, Util.ItemKey.Compose(listing.ItemDefName, listing.StuffDefName, listing.QualityIndex), listing.RemainingQty,
-                    note: $"marketplace cancel listing #{listingId}");
+                if (listing.EscrowPayloads != null && listing.EscrowPayloads.Count > 0)
+                    RefundPayloadsTo(callerUsername, listing, $"marketplace cancel listing #{listingId}");
+                else
+                    Treasury.TreasuryStore.DepositItem(callerUsername, Util.ItemKey.Compose(listing.ItemDefName, listing.StuffDefName, listing.QualityIndex), listing.RemainingQty,
+                        note: $"marketplace cancel listing #{listingId}");
             }
             SaveToDisk();
             return true;
         }
 
-        // Reserves the qty under the lock BEFORE any treasury move so two
-        // buyers can't both pass the availability check on the same units;
-        // rolls the reservation back if the buyer's silver withdrawal fails. sellerUsername is set so the handler
-        // can push the seller a snapshot
+        // Admin cancel: like Cancel but bypasses the owner check and refunds the real seller (recovery-safe). Returns
+        // the affected seller so the caller can push a fresh snapshot.
+        public static bool AdminCancelListing(long listingId, out string seller, out int refundedQty)
+        {
+            seller = null; refundedQty = 0;
+            MarketplaceListing listing;
+            lock (_lock)
+            {
+                if (!_byId.TryGetValue(listingId, out listing)) return false;
+                _byId.Remove(listingId);
+            }
+            seller = listing.SellerUsername;
+            refundedQty = Math.Max(0, listing.RemainingQty);
+            if (refundedQty > 0)
+            {
+                if (listing.EscrowPayloads != null && listing.EscrowPayloads.Count > 0)
+                    RefundPayloadsTo(seller, listing, $"admin cancel listing #{listingId}");
+                else if (!Treasury.TreasuryStore.DepositItem(seller, Util.ItemKey.Compose(listing.ItemDefName, listing.StuffDefName, listing.QualityIndex), refundedQty, note: $"admin cancel listing #{listingId}"))
+                    // Seller invalid (corrupt legacy listing) - hold in recovery, never drop.
+                    Features.Recovery.RecoveryStore.HoldItem(seller, Items.KmhItemSafety.MarkLegacyPartial(listing.ItemDefName, listing.StuffDefName, listing.QualityIndex, refundedQty, listing.ItemDefName),
+                        $"admin cancel listing #{listingId}", "seller invalid on refund");
+            }
+            SaveToDisk();
+            return true;
+        }
+
+        // Admin purge a seller's listings, refunding escrow (recovery-safe). dryRun -> counts only, no change.
+        public static (int listings, int items) AdminPurgeSeller(string user, bool dryRun)
+        {
+            if (string.IsNullOrEmpty(user)) return (0, 0);
+            List<MarketplaceListing> mine = new List<MarketplaceListing>();
+            lock (_lock)
+                foreach (MarketplaceListing l in _byId.Values)
+                    if (string.Equals(l.SellerUsername, user, StringComparison.OrdinalIgnoreCase)) mine.Add(l);
+            int items = 0; foreach (MarketplaceListing l in mine) items += Math.Max(0, l.RemainingQty);
+            if (dryRun) return (mine.Count, items);
+            foreach (MarketplaceListing l in mine) AdminCancelListing(l.Id, out _, out _);
+            return (mine.Count, items);
+        }
+
+        // Reserve the qty under the lock BEFORE any treasury move so two buyers can't both pass the availability
+        // check on the same units; roll the reservation back if the buyer's silver withdrawal fails.
         public static bool Buy(string buyerUsername, long listingId, int qty, out string sellerUsername)
         {
             sellerUsername = null;
@@ -244,21 +421,35 @@ namespace KMHServerAddon.Features.Marketplace
             int cost;
             int qtyToSell;
             bool removedOnReserve;
+            List<Items.KmhThingPayload> soldPayloads = null;   // reserved-payloads for a payload listing
+            string buyerGuild = Guilds.GuildStore.CurrentGuildOf(buyerUsername); // resolve before the lock
 
             lock (_lock)
             {
                 if (!_byId.TryGetValue(listingId, out listing)) return false;
                 if (string.Equals(listing.SellerUsername, buyerUsername, StringComparison.OrdinalIgnoreCase))
                     return false; // can't buy your own listing
+                // Enforce guild-only visibility on the action too - the snapshot hides it, but a crafted client could
+                // target a hidden listing by (sequential) id.
+                if (!Guilds.GuildVisibility.IsVisibleTo(listing.SellerTreasuryKey, listing.Visibility, buyerGuild, prefetched: true))
+                    return false;
                 qtyToSell = Math.Min(qty, listing.RemainingQty);
                 if (qtyToSell <= 0) return false;
                 long costL = (long)listing.UnitPriceSilver * qtyToSell;
                 if (costL > int.MaxValue) return false; // legacy/tampered listing; Post now caps total to int range
                 cost = (int)costL;
 
-                // Reserve the units now, atomically with the availability check.
+                // Reserve the units now, atomically with the availability check. For a payload listing, pop the exact
+                // escrow payloads here too so a rollback can put them back.
+                if (listing.EscrowPayloads != null && listing.EscrowPayloads.Count > 0)
+                {
+                    soldPayloads = PopPayloadsLocked(listing, qtyToSell);
+                    qtyToSell = 0; foreach (Items.KmhThingPayload sp in soldPayloads) qtyToSell += sp.StackCount;
+                    if (qtyToSell <= 0) return false;
+                    cost = (int)((long)listing.UnitPriceSilver * qtyToSell);
+                }
                 listing.RemainingQty -= qtyToSell;
-                removedOnReserve = listing.RemainingQty <= 0;
+                removedOnReserve = listing.RemainingQty <= 0 && (listing.EscrowPayloads == null || listing.EscrowPayloads.Count == 0);
                 if (removedOnReserve) _byId.Remove(listingId);
             }
             sellerUsername = listing.SellerUsername;
@@ -267,13 +458,16 @@ namespace KMHServerAddon.Features.Marketplace
             // already reserved above
             if (!Treasury.TreasuryStore.WithdrawSilver(buyerUsername, cost, note: $"marketplace buy listing #{listingId}"))
             {
-                // Roll the reservation back. Restore the qty on the captured listing object; if our reservation
-                // removed it, re-add it (same object, so any other field stays intact). A concurrent Cancel that
-                // ran while it was out of the map simply saw "not found" and bailed, so re-adding here can't
-                // double-anything
+                // Roll the reservation back: restore the qty on the captured listing (re-add if our reservation removed it -
+                // same object, fields intact). A concurrent Cancel saw "not found" and bailed, so this can't double anything.
                 lock (_lock)
                 {
                     listing.RemainingQty += qtyToSell;
+                    if (soldPayloads != null)   // put the reserved escrow payloads back
+                    {
+                        listing.EscrowPayloads = listing.EscrowPayloads ?? new List<Items.KmhThingPayload>();
+                        listing.EscrowPayloads.AddRange(soldPayloads);
+                    }
                     if (removedOnReserve && !_byId.ContainsKey(listingId))
                         _byId[listingId] = listing;
                 }
@@ -281,54 +475,26 @@ namespace KMHServerAddon.Features.Marketplace
                 return false; // insufficient silver
             }
 
-            // --- house tax + guild taxes ---
-            // Buyer always pays full `cost`. The seller's payout is reduced by:
-            //   1. The marketplace house tax (config %, minus the seller guild's
-            //      MarketplaceTaxReduction perk), which accrues to the house pool.
-            //   2. The seller guild's own sale tax, which accrues to the guild vault.
-            Economy.EconomyConfig cfg = Economy.EconomyConfig.Current;
-            int basePct   = cfg.MarketplaceTaxPercent;
-            int reduction = Guilds.GuildStore.GetMarketplaceTaxReductionPoints(
-                                Guilds.GuildStore.CurrentGuildOf(listing.SellerUsername));
-            int taxPercent = Math.Max(0, basePct - reduction);
-            // World event: a tax holiday waives the house tax entirely.
-            if (World.WorldStore.IsTaxHoliday()) taxPercent = 0;
-            else if (cfg.DynamicDemandPricingEnabled)
-            {
-                // Supply/demand drift: in-demand items get a tax rebate (seller keeps more), gluts a surcharge (more
-                // flows to the house pool). Closed loop - the buyer's cost is unchanged, only the seller/house split.
-                long demand = WantBoard.WantStore.OpenDemandQty(listing.ItemDefName);
-                long supply = OpenSupplyQty(listing.ItemDefName);
-                long denom  = demand + supply;
-                if (denom > 0)
-                {
-                    double f = (demand - supply) / (double)denom; // +1 = pure demand .. -1 = pure glut
-                    taxPercent = Math.Max(0, Math.Min(90, taxPercent - (int)Math.Round(f * cfg.DemandTaxSwingPercent)));
-                }
-            }
-            int houseTax   = (int)Math.Round(cost * (taxPercent / 100.0));
-            if (houseTax < 0) houseTax = 0;
-            int sellerNet  = cost - houseTax;
-            if (sellerNet < 0) sellerNet = 0;
+            // One authoritative breakdown: buyer charge == seller payout + server tax + guild tax (world boom/crash
+            // legs are funded by / returned to the house pool, never minted or vanished).
+            Economy.SaleSplit split = Economy.SaleSplit.Compute(listing.SellerUsername, listing.ItemDefName, cost,
+                                                                demandDrift: true, worldPayoutEvents: true);
+            split.Settle(listing.SellerUsername, $"marketplace sale listing #{listingId}");
+            int sellerNet = (int)Math.Min(int.MaxValue, split.SellerPayout);
 
-            // World event: market boom/crash (server-wide) + any resource-shortage demand spike on this item scale
-            // the seller's payout up or down.
-            double payoutMult = World.WorldStore.MarketPayoutMultiplierFor(listing.ItemDefName);
-            if (payoutMult != 1.0) sellerNet = (int)Math.Round(sellerNet * payoutMult);
-            if (sellerNet < 0) sellerNet = 0;
-
-            // Guild sale tax skims from the seller's net into their guild vault.
-            sellerNet = Guilds.GuildStore.ApplyGuildMarketplaceSaleTax(listing.SellerUsername, sellerNet);
-
-            // Commit: credit seller net silver, give items to buyer.
+            // Commit: credit seller net silver, give items to buyer. Payload listings deliver the exact captured
+            // items into the buyer's treasury (state preserved); compact listings use the def+count path.
             Treasury.TreasuryStore.DepositSilver(listing.SellerUsername, sellerNet,
                 note: $"marketplace sale listing #{listingId} to {buyerUsername}");
-            Treasury.TreasuryStore.DepositItem(buyerUsername, Util.ItemKey.Compose(listing.ItemDefName, listing.StuffDefName, listing.QualityIndex), qtyToSell,
-                note: $"marketplace buy listing #{listingId} from {listing.SellerUsername}");
+            if (soldPayloads != null)
+                foreach (Items.KmhThingPayload sp in soldPayloads)
+                    Treasury.TreasuryStore.DepositPayload(buyerUsername, sp, note: $"marketplace buy listing #{listingId} from {listing.SellerUsername}");
+            else
+                Treasury.TreasuryStore.DepositItem(buyerUsername, Util.ItemKey.Compose(listing.ItemDefName, listing.StuffDefName, listing.QualityIndex), qtyToSell,
+                    note: $"marketplace buy listing #{listingId} from {listing.SellerUsername}");
 
             lock (_lock)
             {
-                _houseSilverPool         += houseTax;
                 _lifetimeTradesCompleted += 1;
                 _lifetimeSilverTraded    += cost;
             }
@@ -401,11 +567,11 @@ namespace KMHServerAddon.Features.Marketplace
         }
 
         /// <summary>Return silver to the house pool (e.g. refunding an unclaimed quest reward).</summary>
-        public static void CreditHousePool(long amount)
+        public static void CreditHousePool(long amount, string note = "house-pool credit (tax/refund)")
         {
             if (amount <= 0) return;
             lock (_lock) { _houseSilverPool += amount; }
-            Persistence.TransactionLedger.RecordHousePool(credit: true, amount: amount, note: "house-pool credit (tax/refund)");
+            Persistence.TransactionLedger.RecordHousePool(credit: true, amount: amount, note: note);
             SaveToDisk();
         }
 
@@ -452,6 +618,47 @@ namespace KMHServerAddon.Features.Marketplace
                 }
                 Diagnostics.ServerLog.Info($"Marketplace: loaded {state.Listings?.Count ?? 0} listing(s) from disk");
             }
+        }
+
+        // Save-reset: a seller's open listings escrow items OUTSIDE the treasury, so a save-reset must drop them too or
+        // they shelter value. Purge burns them (the reset burns the treasury alongside). HasSellerListings gates the
+        // reset's "nothing to clear" early-out.
+        public static bool HasSellerListings(string user)
+        {
+            if (string.IsNullOrEmpty(user)) return false;
+            lock (_lock)
+                foreach (MarketplaceListing l in _byId.Values)
+                    if (string.Equals(l.SellerUsername, user, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+
+        public static int PurgeSeller(string user)
+        {
+            if (string.IsNullOrEmpty(user)) return 0;
+            List<long> ids = new List<long>();
+            lock (_lock)
+            {
+                foreach (MarketplaceListing l in _byId.Values)
+                    if (string.Equals(l.SellerUsername, user, StringComparison.OrdinalIgnoreCase)) ids.Add(l.Id);
+                foreach (long id in ids) _byId.Remove(id);
+            }
+            if (ids.Count > 0) SaveToDisk();
+            return ids.Count;
+        }
+
+        // Season reset: clear all listings, the house pool, and lifetime tallies (re-seeds on next boot).
+        public static void ClearForNewSeason()
+        {
+            lock (_lock)
+            {
+                _byId.Clear();
+                _nextId = 1;
+                _houseSilverPool = 0;
+                _lifetimeTradesCompleted = 0;
+                _lifetimeSilverTraded = 0;
+                _housePoolSeeded = false;
+            }
+            SaveToDisk();
         }
 
         public static void SaveToDisk()

@@ -6,14 +6,11 @@ using Newtonsoft.Json;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // Loaded once at bootstrap from KMH-Data/Config/Discord/DiscordConfig.json.
-    //
-    // Kept deliberately small: paste a token, point it at your guild, set the few channels you want, and you're
-    // done. Admin actions, console logs and console-command input all share one Admin channel. The flat
-    // [JsonIgnore] accessors at the bottom map this lean shape onto whatever the individual features ask for, so
-    // the on-disk file stays simple
+    // Deliberately lean on-disk shape (token + guild + a few channels); the [JsonIgnore] accessors below fan it out to
+    // whatever each feature asks for.
     internal class DiscordConfig
     {
+        public int              SchemaVersion   { get; set; } = 1;
         public bool             Enabled         { get; set; } = true;
         public BotSettings      Bot             { get; set; } = new BotSettings();
         public BrandingSettings Branding        { get; set; } = new BrandingSettings();
@@ -28,6 +25,10 @@ namespace KMHServerAddon.Features.Discord
             public string Token            { get; set; } = "";
             public string GuildId          { get; set; } = "";
             public bool   UseSlashCommands { get; set; } = true;
+            // Multi-bot: require a player to @mention THIS bot before a !kmh-* text command runs, so several bots in
+            // one channel don't all answer. Off by default (a single bot needs no mention). Slash commands are already
+            // per-bot, so they're unaffected.
+            public bool   RequireMention   { get; set; } = false;
         }
 
         internal class BrandingSettings
@@ -55,6 +56,10 @@ namespace KMHServerAddon.Features.Discord
             public string[] Moderators    { get; set; } = Array.Empty<string>();
             // Required for /kmh console run when Console.RequireRole is on.
             public string[] ConsoleAccess { get; set; } = Array.Empty<string>();
+            // Mirror KMH guild membership to Discord roles named "<Guild> (<Rank>)" on linked players, kept in sync on
+            // join/leave/promote/demote/unlink. Off by default. Needs the bot to have Manage Roles, and its own role
+            // above the roles it creates. No privileged intent required (uses REST).
+            public bool     SyncGuildRoles { get; set; } = false;
         }
 
         // Which game events get auto-posted as embeds.
@@ -78,6 +83,8 @@ namespace KMHServerAddon.Features.Discord
         [JsonIgnore] public string BotToken      => Bot?.Token ?? "";
         [JsonIgnore] public string CommandPrefix => "!";   // legacy !kmh-* prefix, fixed
         [JsonIgnore] public bool   UseSlashCommandsOn => Bot?.UseSlashCommands ?? true;
+        [JsonIgnore] public bool   RequireMentionForCommands => Bot?.RequireMention ?? false;
+        [JsonIgnore] public bool   SyncGuildRolesOn          => Roles?.SyncGuildRoles ?? false;
 
         [JsonIgnore] public ulong[] AllowedGuildIds
         {
@@ -162,7 +169,8 @@ namespace KMHServerAddon.Features.Discord
   ""Bot"": {
     ""Token"": """",
     ""GuildId"": """",
-    ""UseSlashCommands"": true
+    ""UseSlashCommands"": true,
+    ""RequireMention"": false
   },
 
   ""Branding"": {
@@ -181,7 +189,8 @@ namespace KMHServerAddon.Features.Discord
 
   ""Roles"": {
     ""Moderators"": [],
-    ""ConsoleAccess"": []
+    ""ConsoleAccess"": [],
+    ""SyncGuildRoles"": false
   },
 
   ""Events"": {

@@ -11,8 +11,19 @@ namespace KMHServerAddon.Features.ItemLabels
     {
         public static void Register()
         {
-            KmhRouter.RegisterHandler(KmhProtocol.Kind.ItemLabels, OnPush);
-            KmhRouter.RegisterHandler(KmhProtocol.Kind.ItemValues, OnValues);
+            KmhRouter.RegisterHandler(KmhProtocol.Kind.ItemLabels,    OnPush);
+            KmhRouter.RegisterHandler(KmhProtocol.Kind.ItemValues,    OnValues);
+            KmhRouter.RegisterHandler(KmhProtocol.Kind.ConditionDefs, OnConditions);
+        }
+
+        // GameConditionDef defName -> label (same payload shape as labels) - feeds the discovered-weather pool.
+        private static void OnConditions(ServerClient client, KmhEnvelope env)
+        {
+            ItemLabelsPush payload = env?.DataAs<ItemLabelsPush>();
+            if (payload?.Labels == null || payload.Labels.Count == 0) return;
+            WeatherDefCache.Apply(payload.Labels);
+            ServerLog.Verbose(
+                $"WeatherDefs: received {payload.Labels.Count} condition defs from {client?.GetData<UserFile>()?.Username ?? "?"}");
         }
 
         private static void OnPush(ServerClient client, KmhEnvelope env)

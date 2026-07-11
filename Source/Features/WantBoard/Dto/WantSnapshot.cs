@@ -24,5 +24,13 @@ namespace KMHServerAddon.Features.WantBoard.Dto
         [JsonProperty("listed_utc_ticks")]    public long   ListedUtcTicks   { get; set; } = 0;
         [JsonProperty("ends_utc_ticks")]      public long   EndsUtcTicks     { get; set; } = 0;
         [JsonProperty("visibility")]          public string Visibility       { get; set; } = "public";
+
+        // Match constraints. Safe defaults: clean simple items only. A want never receives tainted/damaged/complex
+        // unless the buyer explicitly opts in - so the buyer can't be handed junk gear.
+        [JsonProperty("min_quality")]         public int    MinQuality       { get; set; } = 0;   // 0 = any
+        [JsonProperty("required_stuff")]      public string RequiredStuff    { get; set; } = "";   // "" = any material
+        [JsonProperty("allow_complex")]       public bool   AllowComplex     { get; set; } = false; // accept full-state items
+        [JsonProperty("allow_tainted")]       public bool   AllowTainted     { get; set; } = false;
+        [JsonProperty("allow_damaged")]       public bool   AllowDamaged     { get; set; } = false;
     }
 }
