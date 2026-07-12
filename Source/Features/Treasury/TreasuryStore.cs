@@ -245,12 +245,7 @@ namespace KMHServerAddon.Features.Treasury
             lock (_lock)
             {
                 TreasurySnapshot v = GetOrCreateLocked(ownerKey, !ownerKey.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase));
-                Items.KmhThingPayload mergeInto = null;
-                if (string.IsNullOrEmpty(payload.ScribeXml))
-                    foreach (Items.KmhThingPayload e in v.ItemPayloads)
-                        if (Items.KmhItemSafety.CanSafelyMerge(e, payload)) { mergeInto = e; break; }
-                if (mergeInto != null) mergeInto.StackCount += payload.StackCount;
-                else                   v.ItemPayloads.Add(payload);
+                AddPayloadLocked(v, payload);
                 RecordTransactionLocked(v, username, TreasuryTransaction.KindDeposit, payload.StackCount,
                     Items.KmhItemSafety.DescribeStateForLedger(payload), note);
             }
@@ -278,11 +273,11 @@ namespace KMHServerAddon.Features.Treasury
                     {
                         granted.Add(e); v.ItemPayloads.Remove(e); remaining -= e.StackCount;
                     }
-                    else if (string.IsNullOrEmpty(e.ScribeXml))   // metadata stack: safe to split
+                    else if (string.IsNullOrEmpty(e.ScribeXml) || e.Mergeable)   // metadata OR fungible: split (same blob, reduced count)
                     {
                         granted.Add(Clone(e, remaining)); e.StackCount -= remaining; remaining = 0;
                     }
-                    // blob entry larger than remaining: atomic, can't split - leave it (skip)
+                    // a unique blob entry (weapon/quality) larger than remaining is atomic - leave it (skip)
                 }
                 if (granted.Count == 0) return null;
                 int taken = 0; foreach (var g in granted) taken += g.StackCount;
@@ -331,7 +326,63 @@ namespace KMHServerAddon.Features.Treasury
             HitPoints = p.HitPoints, MaxHitPoints = p.MaxHitPoints, Quality = p.Quality, Tainted = p.Tainted,
             ScribeXml = p.ScribeXml, Fidelity = p.Fidelity, DisplayLabel = p.DisplayLabel, MarketValue = p.MarketValue,
             Fingerprint = p.Fingerprint, Legacy = p.Legacy, Warnings = new List<string>(p.Warnings ?? new List<string>()),
+            Mergeable = p.Mergeable, RotProgressTicks = p.RotProgressTicks,
         };
+
+        // Add a payload to a vault's ItemPayloads, stacking into an existing entry when it may merge: a fungible
+        // food/resource stacks with an equal-identity one (wear weight-averaged so nothing is refreshed), else the
+        // legacy blob-less rule applies; otherwise it's appended as its own entry. Caller holds _lock.
+        private static void AddPayloadLocked(TreasurySnapshot v, Items.KmhThingPayload payload)
+        {
+            if (payload.Mergeable)
+                foreach (Items.KmhThingPayload e in v.ItemPayloads)
+                    if (Items.KmhItemSafety.CanMergeFungible(e, payload))
+                    { Items.KmhItemSafety.MergeFungible(e, payload); return; }
+
+            if (string.IsNullOrEmpty(payload.ScribeXml))
+                foreach (Items.KmhThingPayload e in v.ItemPayloads)
+                    if (Items.KmhItemSafety.CanSafelyMerge(e, payload)) { e.StackCount += payload.StackCount; return; }
+
+            v.ItemPayloads.Add(payload);
+        }
+
+        // Consolidate legacy fungible payloads: entries stored before the per-payload mergeable flag carry
+        // mergeable=false and never stack. Using the client-vouched fungible set, backfill the flag on matching entries
+        // and merge equal-identity ones (wear weight-averaged, as a live deposit). Idempotent; skips save when nothing merges.
+        public static int CompactFungiblePayloads()
+        {
+            List<string> changedKeys = new List<string>();
+            int totalMerged = 0;
+            lock (_lock)
+            {
+                foreach (KeyValuePair<string, TreasurySnapshot> kv in _vaults)
+                {
+                    TreasurySnapshot v = kv.Value;
+                    if (v?.ItemPayloads == null || v.ItemPayloads.Count < 2) continue;
+                    List<Items.KmhThingPayload> outList = new List<Items.KmhThingPayload>(v.ItemPayloads.Count);
+                    int mergedHere = 0;
+                    foreach (Items.KmhThingPayload p in v.ItemPayloads)
+                    {
+                        if (p == null) continue;
+                        if (!p.Mergeable && Features.ItemLabels.ItemLabelCache.IsFungibleDef(p.DefName)) p.Mergeable = true;
+                        bool merged = false;
+                        if (p.Mergeable)
+                            foreach (Items.KmhThingPayload e in outList)
+                                if (Items.KmhItemSafety.CanMergeFungible(e, p))
+                                { Items.KmhItemSafety.MergeFungible(e, p); merged = true; mergedHere++; break; }
+                        if (!merged) outList.Add(p);
+                    }
+                    if (mergedHere > 0) { v.ItemPayloads = outList; totalMerged += mergedHere; changedKeys.Add(kv.Key); }
+                }
+            }
+            if (totalMerged > 0)
+            {
+                SaveToDisk();
+                foreach (string k in changedKeys) RaiseChanged(k, "fungible payloads consolidated");
+                Diagnostics.ServerLog.Info($"Treasury: consolidated {totalMerged} legacy fungible payload fragment(s) across {changedKeys.Count} vault(s).");
+            }
+            return totalMerged;
+        }
 
         // Withdraw up to `qty` units of payloads matching a want's constraints (def + optional stuff, min quality,
         // taint/damage rules). Returns the popped payloads for delivery; empty when nothing qualifies.
@@ -354,7 +405,7 @@ namespace KMHServerAddon.Features.Treasury
                     if (!allowTainted && e.Tainted) continue;
                     if (!allowDamaged && e.HitPoints >= 0 && e.MaxHitPoints > 0 && e.HitPoints < e.MaxHitPoints) continue;
                     if (e.StackCount <= rem) { granted.Add(e); v.ItemPayloads.Remove(e); rem -= e.StackCount; }
-                    else if (string.IsNullOrEmpty(e.ScribeXml)) { granted.Add(Clone(e, rem)); e.StackCount -= rem; rem = 0; }
+                    else if (string.IsNullOrEmpty(e.ScribeXml) || e.Mergeable) { granted.Add(Clone(e, rem)); e.StackCount -= rem; rem = 0; }
                 }
                 if (granted.Count > 0)
                 {
@@ -614,12 +665,7 @@ namespace KMHServerAddon.Features.Treasury
                         foreach (Items.KmhThingPayload p in d.Payloads)
                         {
                             if (p == null || !Items.KmhItemSafety.ValidatePayload(p)) continue;
-                            Items.KmhThingPayload mergeInto = null;
-                            if (string.IsNullOrEmpty(p.ScribeXml))
-                                foreach (Items.KmhThingPayload e in v.ItemPayloads)
-                                    if (Items.KmhItemSafety.CanSafelyMerge(e, p)) { mergeInto = e; break; }
-                            if (mergeInto != null) mergeInto.StackCount += p.StackCount;
-                            else                   v.ItemPayloads.Add(p);
+                            AddPayloadLocked(v, p);
                             RecordTransactionLocked(v, d.Username, TreasuryTransaction.KindDeposit, p.StackCount,
                                 Items.KmhItemSafety.DescribeStateForLedger(p), d.Note);
                         }

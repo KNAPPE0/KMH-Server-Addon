@@ -35,7 +35,8 @@ namespace KMHServerAddon.Items
             "Implant","Skull","Egg", // fertilized eggs carry state
             // Explicitly-named blockers (defense-in-depth; these are never a plain stackable site output):
             "Techprint","Techprof","SubpersonaCore","AIPersonaCore","Ammo","Shell_","Neurotrainer","Psytrainer",
-            "Gene_","Endogene","GeneRemover","Xenogerm","Eltex","MechSerum",
+            // No bare "Eltex": the raw mineral is a plain stackable; eltex gear is caught by Apparel_/Weapon_/MeleeWeapon_.
+            "Gene_","Endogene","GeneRemover","Xenogerm","MechSerum",
             // Broad risk markers from real modded-catalog coverage (kept specific enough not to catch plain resources):
             "Shield","_Belt","Warhead","Missile","Rocket_","Nuclear","Plutonium","FuelRod","Reactor","PowerCore",
             "Permit","NamePlate","Artifact","Psylink","Orbital","Tornado","Targeter",
@@ -152,6 +153,46 @@ namespace KMHServerAddon.Items
                 && a.HitPoints == b.HitPoints
                 && a.MaxHitPoints == b.MaxHitPoints;
         }
+
+        // Fungible stacking: both payloads are client-vouched Mergeable (a fungible food/resource, never a
+        // weapon/quality/comp item) and share the same stackable identity - def, stuff, quality, taint. Wear (hit
+        // points, rot) is deliberately NOT part of identity here: it's weight-averaged by MergeFungible, so equal
+        // food/resource stacks combine into ONE entry instead of splintering one-per-freshness. Blobs are allowed
+        // (the representative's blob is kept); the rot the client re-applies on withdraw is the averaged value.
+        public static bool CanMergeFungible(KmhThingPayload a, KmhThingPayload b)
+        {
+            if (a == null || b == null || !a.Mergeable || !b.Mergeable) return false;
+            return string.Equals(a.DefName, b.DefName, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(a.StuffDefName ?? "", b.StuffDefName ?? "", StringComparison.OrdinalIgnoreCase)
+                && a.Quality == b.Quality
+                && a.Tainted == b.Tainted;
+        }
+
+        // Stack `incoming` into `target` (same fungible identity): sum the counts and weight-average the wear (hit
+        // points + rot) by count, exactly how RimWorld stacks - the combined stack is neither refreshed to fresh nor
+        // over-rotted. `target` keeps its own blob as the representative.
+        public static void MergeFungible(KmhThingPayload target, KmhThingPayload incoming)
+        {
+            if (target == null || incoming == null) return;
+            long ct = Math.Max(1, target.StackCount);
+            long ci = Math.Max(1, incoming.StackCount);
+            target.HitPoints        = WeightedAvg(target.HitPoints, ct, incoming.HitPoints, ci);
+            target.RotProgressTicks = WeightedAvg(target.RotProgressTicks, ct, incoming.RotProgressTicks, ci);
+            target.StackCount       = (int)Math.Min(int.MaxValue, ct + ci);
+        }
+
+        // Count-weighted average, treating a negative value as "unknown" (skip it). Returns -1 only when both unknown.
+        private static long WeightedAvg(long a, long ca, long b, long cb)
+        {
+            if (a < 0 && b < 0) return -1;
+            if (a < 0) return b;
+            if (b < 0) return a;
+            long denom = ca + cb;
+            return denom <= 0 ? a : (long)Math.Round((a * (double)ca + b * (double)cb) / denom);
+        }
+
+        private static int WeightedAvg(int a, long ca, int b, long cb)
+            => (int)WeightedAvg((long)a, ca, (long)b, cb);
 
         // Fill fingerprint if missing; add warnings for partial/legacy state. Returns false only when unusable.
         public static bool ValidatePayload(KmhThingPayload p)

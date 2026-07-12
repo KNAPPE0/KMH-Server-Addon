@@ -20,9 +20,11 @@ namespace KMHServerAddon.Items
             HitPoints = p.HitPoints, MaxHitPoints = p.MaxHitPoints, Quality = p.Quality, Tainted = p.Tainted,
             ScribeXml = p.ScribeXml, Fidelity = p.Fidelity, DisplayLabel = p.DisplayLabel, MarketValue = p.MarketValue,
             Fingerprint = p.Fingerprint, Legacy = p.Legacy, Warnings = new List<string>(p.Warnings ?? new List<string>()),
+            Mergeable = p.Mergeable, RotProgressTicks = p.RotProgressTicks,
         };
 
-        // Pop up to `qty` units off an escrow list (mutates it). Blob instances are atomic; metadata stacks split.
+        // Pop up to `qty` units off an escrow list (mutates it). Metadata stacks and fungible stacks split (same blob,
+        // reduced count); only a unique blob instance (weapon/quality) is atomic.
         public static List<KmhThingPayload> PopUnits(List<KmhThingPayload> escrow, int qty)
         {
             List<KmhThingPayload> outp = new List<KmhThingPayload>();
@@ -32,7 +34,7 @@ namespace KMHServerAddon.Items
             {
                 if (rem <= 0) break;
                 if (e.StackCount <= rem) { outp.Add(e); escrow.Remove(e); rem -= e.StackCount; }
-                else if (string.IsNullOrEmpty(e.ScribeXml)) { outp.Add(Clone(e, rem)); e.StackCount -= rem; rem = 0; }
+                else if (string.IsNullOrEmpty(e.ScribeXml) || e.Mergeable) { outp.Add(Clone(e, rem)); e.StackCount -= rem; rem = 0; }
             }
             return outp;
         }

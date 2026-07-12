@@ -34,5 +34,13 @@ namespace KMHServerAddon.Items
         [JsonProperty("fingerprint")]    public string Fingerprint   { get; set; } = "";   // storage identity + merge check
         [JsonProperty("legacy")]         public bool   Legacy        { get; set; } = false;
         [JsonProperty("warnings")]       public List<string> Warnings { get; set; } = new List<string>();
+
+        // Fungible-stacking support (additive/back-compatible; old payloads default to non-mergeable).
+        // Mergeable = the client vouched this is a fungible item (stackable food/resource, NOT a weapon/quality/comp
+        // item), so the server may stack equal-identity ones into one entry - weight-averaging the wear below - instead
+        // of splintering the vault. RotProgressTicks (-1 = not rottable/unknown) is the rot the client re-applies on
+        // withdraw, weight-averaged here on merge so nothing is refreshed to fresh.
+        [JsonProperty("mergeable")]          public bool Mergeable        { get; set; } = false;
+        [JsonProperty("rot_progress_ticks")] public long RotProgressTicks { get; set; } = -1;
     }
 }

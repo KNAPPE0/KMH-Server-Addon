@@ -35,8 +35,13 @@ namespace KMHServerAddon.Features.ItemLabels
                 return;
             }
             ItemLabelCache.Apply(payload.Labels);
+            ItemLabelCache.MarkFungible(payload.Fungible);
             ServerLog.Verbose(
                 $"ItemLabels: received {payload.Labels.Count} entries from {client?.GetData<UserFile>()?.Username ?? "?"}");
+            // On the final catalog chunk, consolidate legacy treasury payloads that predate the mergeable flag.
+            // Idempotent: a no-op after the first run.
+            if (payload.ChunkTotal <= 0 || payload.ChunkIndex >= payload.ChunkTotal)
+                Features.Treasury.TreasuryStore.CompactFungiblePayloads();
         }
 
         // defName -> BaseMarketValue (separate envelope from labels - see KmhProtocol.Kind.ItemValues).

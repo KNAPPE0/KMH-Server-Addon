@@ -15,6 +15,10 @@ namespace KMHServerAddon.Features.ItemLabels.Dto
         [JsonProperty("values")]
         public Dictionary<string, long> Values { get; set; } = new Dictionary<string, long>();
 
+        // Fungible defNames in this chunk (mirror of the patch DTO). Additive: an older client omits it.
+        [JsonProperty("fungible")]
+        public List<string> Fungible { get; set; } = new List<string>();
+
         // Chunk metadata for large modpacks (mirror of the patch DTO). 0 = single (old-client) push.
         [JsonProperty("chunk_index")] public int ChunkIndex { get; set; } = 0;
         [JsonProperty("chunk_total")] public int ChunkTotal { get; set; } = 0;

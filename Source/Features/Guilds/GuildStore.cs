@@ -1141,6 +1141,7 @@ namespace KMHServerAddon.Features.Guilds
         {
             switch (rank)
             {
+                case GuildMemberDto.RankOwner:     return -1;
                 case GuildMemberDto.RankAdmin:     return s.AdminDailyWithdrawCap;
                 case GuildMemberDto.RankModerator: return s.ModeratorDailyWithdrawCap;
                 case GuildMemberDto.RankOfficer:   return s.OfficerDailyWithdrawCap;

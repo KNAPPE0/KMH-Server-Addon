@@ -29,6 +29,7 @@ namespace KMHServerAddon.Features.Marketplace
             int    qualityIndex   = env?.GetInt("quality_index", 0) ?? 0;
             int    qty            = env?.GetInt("qty", 0) ?? 0;
             int    price          = env?.GetInt("unit_price_silver", 0) ?? 0;
+            int    priceMilli     = env?.GetInt("unit_price_milli", -1) ?? -1;   // new clients send fractional price; -1 => derive from whole silver
             string visibility     = env?.GetString("visibility", "public") ?? "public";
             int    expiresInHours = env?.GetInt("expires_hours", 0) ?? 0;
             string fingerprint    = env?.GetString("fingerprint") ?? "";
@@ -37,10 +38,10 @@ namespace KMHServerAddon.Features.Marketplace
             string reason;
             // Payload listing: complex item escrowed from the treasury's payload store (state preserved).
             if (!string.IsNullOrEmpty(fingerprint))
-                id = MarketplaceStore.PostPayload(username, fingerprint, qty, price, visibility, expiresInHours, out reason);
+                id = MarketplaceStore.PostPayload(username, fingerprint, qty, price, visibility, expiresInHours, out reason, priceMilli);
             else
                 id = MarketplaceStore.Post(username, itemDefName, qty, price, visibility, expiresInHours, out reason,
-                                            stuffDefName, qualityIndex);
+                                            stuffDefName, qualityIndex, priceMilli);
             if (id == 0)
             {
                 ServerLog.Verbose($"Marketplace post rejected for {username}: {reason}");

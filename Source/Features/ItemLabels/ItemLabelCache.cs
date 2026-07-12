@@ -21,6 +21,10 @@ namespace KMHServerAddon.Features.ItemLabels
             = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
         private static readonly HashSet<string> _valueDivergenceWarned = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+        // Client-vouched fungible defs (plain stackable food/resources; patch-side KmhThingCapture.IsFungible). Used
+        // ONLY to consolidate legacy treasury payloads that predate the per-payload mergeable flag. Additive, persisted.
+        private static HashSet<string> _fungible = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         // Merge an incoming label set into the cache. Last-writer-wins on collisions - newest contributor's
         // spelling/case wins. Saves to disk only if at least one entry was new (cheap dirty check avoids spamming
         // the file on identical re-pushes from the same client across reconnects)
@@ -81,6 +85,27 @@ namespace KMHServerAddon.Features.ItemLabels
                 SaveToDisk();
                 ServerLog.Verbose($"ItemLabels: value cache +{added} first-seen ({_values.Count} total)" + (flagged > 0 ? $", {flagged} divergent ignored" : ""));
             }
+        }
+
+        // Record client-vouched fungible defNames. Returns true if any were newly added, so the caller can run a
+        // one-time treasury compaction. Persisted so the set survives restarts even before a client re-pushes.
+        public static bool MarkFungible(IEnumerable<string> defNames)
+        {
+            if (defNames == null) return false;
+            int added = 0;
+            lock (_lock)
+                foreach (string d in defNames)
+                    if (!string.IsNullOrEmpty(d) && _fungible.Add(d)) added++;
+            if (added > 0) SaveToDisk();
+            return added > 0;
+        }
+
+        // True when a client has vouched this def (bare or composed key) as a plain stackable food/resource.
+        public static bool IsFungibleDef(string defName)
+        {
+            if (string.IsNullOrEmpty(defName)) return false;
+            if (defName.IndexOf(Util.ItemKey.Sep) >= 0) Util.ItemKey.Split(defName, out defName, out _, out _);
+            lock (_lock) return _fungible.Contains(defName);
         }
 
         // RimWorld base market value for a defName (bare or composed key), or 0 when no client has reported it yet.
@@ -287,6 +312,8 @@ namespace KMHServerAddon.Features.ItemLabels
                     _labels = new Dictionary<string, string>(state.Labels, StringComparer.OrdinalIgnoreCase);
                     if (state.Values != null)
                         _values = new Dictionary<string, long>(state.Values, StringComparer.OrdinalIgnoreCase);
+                    if (state.Fungible != null)
+                        _fungible = new HashSet<string>(state.Fungible, StringComparer.OrdinalIgnoreCase);
                 }
                 ServerLog.Info($"ItemLabels: loaded {state.Labels.Count} label(s), {state.Values?.Count ?? 0} value(s) from disk");
             }
@@ -299,14 +326,16 @@ namespace KMHServerAddon.Features.ItemLabels
             {
                 state.Labels = new Dictionary<string, string>(_labels, StringComparer.OrdinalIgnoreCase);
                 state.Values = new Dictionary<string, long>(_values, StringComparer.OrdinalIgnoreCase);
+                state.Fungible = new List<string>(_fungible);
             }
             JsonFileStore.Save(KmhDataPaths.ItemLabelsFile, state);
         }
 
         private class PersistedState
         {
-            public Dictionary<string, string> Labels { get; set; } = new Dictionary<string, string>();
-            public Dictionary<string, long>   Values { get; set; } = new Dictionary<string, long>();
+            public Dictionary<string, string> Labels   { get; set; } = new Dictionary<string, string>();
+            public Dictionary<string, long>   Values   { get; set; } = new Dictionary<string, long>();
+            public List<string>               Fungible { get; set; } = new List<string>();
         }
     }
 }

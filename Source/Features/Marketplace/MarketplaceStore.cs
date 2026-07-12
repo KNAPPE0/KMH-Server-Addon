@@ -57,6 +57,7 @@ namespace KMHServerAddon.Features.Marketplace
                         RemainingQty      = l.RemainingQty,
                         OriginalQty       = l.OriginalQty,
                         UnitPriceSilver   = l.UnitPriceSilver,
+                        UnitPriceMilli    = l.UnitPriceMilli,
                         ListedUtcTicks    = l.ListedUtcTicks,
                         ExpiresUtcTicks   = l.ExpiresUtcTicks,
                         IsAutoListing     = l.IsAutoListing,
@@ -90,7 +91,8 @@ namespace KMHServerAddon.Features.Marketplace
             int    expiresInHours,
             out string reason,
             string stuffDefName = "",
-            int    qualityIndex = 0)
+            int    qualityIndex = 0,
+            int    unitPriceMilli = -1)   // canonical price in milli-silver; -1 => derive from unitPriceSilver
         {
             reason = null;
             if (string.IsNullOrEmpty(sellerUsername)) { reason = "No seller.";        return 0; }
@@ -100,16 +102,18 @@ namespace KMHServerAddon.Features.Marketplace
             stuffDefName = stuffDefName ?? "";
 
             Economy.EconomyConfig cfg = Economy.EconomyConfig.Current;
-            if (unitPriceSilver < cfg.MarketplaceMinUnitPrice)
-            { reason = $"Minimum unit price is {Util.SilverFmt.Format(cfg.MarketplaceMinUnitPrice)}."; return 0; }
-            if (unitPriceSilver > cfg.MarketplaceMaxUnitPrice)
-            { reason = $"Maximum unit price is {Util.SilverFmt.Format(cfg.MarketplaceMaxUnitPrice)}."; return 0; }
-            if (!CheckUnderpricing(itemDefName, sellerUsername, unitPriceSilver, out reason)) return 0;
+            // Canonical price is milli-silver. Old callers (sites/discord/sdk) pass whole silver -> *1000.
+            int milli = unitPriceMilli > 0 ? unitPriceMilli : (int)System.Math.Min(int.MaxValue, (long)System.Math.Max(0, unitPriceSilver) * 1000);
+            if (milli < cfg.MarketplaceMinUnitPriceMilli)
+            { reason = $"Minimum unit price is {(cfg.MarketplaceMinUnitPriceMilli / 1000.0):0.###} silver."; return 0; }
+            if (milli > cfg.MarketplaceMaxUnitPriceMilli)
+            { reason = $"Maximum unit price is {(cfg.MarketplaceMaxUnitPriceMilli / 1000.0):0.###} silver."; return 0; }
+            int priceSilver = (int)System.Math.Round(milli / 1000.0);   // rounded display / old clients
+            if (!CheckUnderpricing(itemDefName, sellerUsername, milli, out reason)) return 0;
 
-            // Cap the listing's total value to int range. Buy computes cost as int (UnitPrice * qty); without this a
-            // large-but-legal listing (high qty * high unit price) would overflow to a negative cost - i.e. pay the
-            // buyer. Every partial buy is <= this total, so guarding here covers Buy too. (Mirrors WantStore.Post.)
-            if ((long)unitPriceSilver * qty > int.MaxValue)
+            // Cap the listing's total value to int range. Buy computes cost = round(milli*qty/1000); guard the biggest
+            // possible total (whole listing) so it can't overflow to a negative cost. Every partial buy is <= this.
+            if ((long)milli * qty / 1000 > int.MaxValue)
             { reason = "That listing's total value is too large - lower the quantity or price."; return 0; }
 
             // Listing lifetime: the client may request a shorter window, but the config lifetime is the ceiling. 0
@@ -151,7 +155,8 @@ namespace KMHServerAddon.Features.Marketplace
                     ItemDefName       = itemDefName,
                     RemainingQty      = qty,
                     OriginalQty       = qty,
-                    UnitPriceSilver   = unitPriceSilver,
+                    UnitPriceSilver   = priceSilver,
+                    UnitPriceMilli    = milli,
                     ListedUtcTicks    = now,
                     ExpiresUtcTicks   = now + TimeSpan.FromHours(lifetimeHours).Ticks,
                     IsAutoListing     = false,
@@ -170,7 +175,7 @@ namespace KMHServerAddon.Features.Marketplace
         // (escrowed as payloads), so the listed item keeps its HP/taint/quality/comp state. Returns
         // the new listing id, or 0 with a reason.
         public static long PostPayload(string sellerUsername, string fingerprint, int qty, int unitPriceSilver,
-            string visibility, int expiresInHours, out string reason)
+            string visibility, int expiresInHours, out string reason, int unitPriceMilli = -1)
         {
             reason = null;
             if (string.IsNullOrEmpty(sellerUsername)) { reason = "No seller.";        return 0; }
@@ -178,11 +183,13 @@ namespace KMHServerAddon.Features.Marketplace
             if (qty <= 0)                             { reason = "Quantity must be > 0."; return 0; }
 
             Economy.EconomyConfig cfg = Economy.EconomyConfig.Current;
-            if (unitPriceSilver < cfg.MarketplaceMinUnitPrice)
-            { reason = $"Minimum unit price is {Util.SilverFmt.Format(cfg.MarketplaceMinUnitPrice)}."; return 0; }
-            if (unitPriceSilver > cfg.MarketplaceMaxUnitPrice)
-            { reason = $"Maximum unit price is {Util.SilverFmt.Format(cfg.MarketplaceMaxUnitPrice)}."; return 0; }
-            if ((long)unitPriceSilver * qty > int.MaxValue)
+            int milli = unitPriceMilli > 0 ? unitPriceMilli : (int)System.Math.Min(int.MaxValue, (long)System.Math.Max(0, unitPriceSilver) * 1000);
+            if (milli < cfg.MarketplaceMinUnitPriceMilli)
+            { reason = $"Minimum unit price is {(cfg.MarketplaceMinUnitPriceMilli / 1000.0):0.###} silver."; return 0; }
+            if (milli > cfg.MarketplaceMaxUnitPriceMilli)
+            { reason = $"Maximum unit price is {(cfg.MarketplaceMaxUnitPriceMilli / 1000.0):0.###} silver."; return 0; }
+            int priceSilver = (int)System.Math.Round(milli / 1000.0);
+            if ((long)milli * qty / 1000 > int.MaxValue)
             { reason = "That listing's total value is too large - lower the quantity or price."; return 0; }
 
             int lifetimeHours = expiresInHours > 0
@@ -205,7 +212,7 @@ namespace KMHServerAddon.Features.Marketplace
 
             // Underpricing check needs the item's def (only known after the escrow pop). If a strict server blocks it,
             // push the escrow back so nothing is lost.
-            if (!CheckUnderpricing(meta.DefName, sellerUsername, unitPriceSilver, out reason))
+            if (!CheckUnderpricing(meta.DefName, sellerUsername, milli, out reason))
             {
                 foreach (Items.KmhThingPayload p in escrow) Treasury.TreasuryStore.DepositPayload(sellerUsername, p, note: "marketplace post rejected - refund");
                 return 0;
@@ -225,7 +232,8 @@ namespace KMHServerAddon.Features.Marketplace
                     QualityIndex      = meta.Quality,
                     RemainingQty      = totalUnits,
                     OriginalQty       = totalUnits,
-                    UnitPriceSilver   = unitPriceSilver,
+                    UnitPriceSilver   = priceSilver,
+                    UnitPriceMilli    = milli,
                     ListedUtcTicks    = now,
                     ExpiresUtcTicks   = now + TimeSpan.FromHours(lifetimeHours).Ticks,
                     IsAutoListing     = false,
@@ -251,7 +259,7 @@ namespace KMHServerAddon.Features.Marketplace
             {
                 if (rem <= 0) break;
                 if (e.StackCount <= rem) { outp.Add(e); l.EscrowPayloads.Remove(e); rem -= e.StackCount; }
-                else if (string.IsNullOrEmpty(e.ScribeXml)) { outp.Add(ClonePayload(e, rem)); e.StackCount -= rem; rem = 0; }
+                else if (string.IsNullOrEmpty(e.ScribeXml) || e.Mergeable) { outp.Add(ClonePayload(e, rem)); e.StackCount -= rem; rem = 0; }
             }
             return outp;
         }
@@ -262,13 +270,14 @@ namespace KMHServerAddon.Features.Marketplace
             HitPoints = p.HitPoints, MaxHitPoints = p.MaxHitPoints, Quality = p.Quality, Tainted = p.Tainted,
             ScribeXml = p.ScribeXml, Fidelity = p.Fidelity, DisplayLabel = p.DisplayLabel, MarketValue = p.MarketValue,
             Fingerprint = p.Fingerprint, Legacy = p.Legacy, Warnings = new List<string>(p.Warnings ?? new List<string>()),
+            Mergeable = p.Mergeable, RotProgressTicks = p.RotProgressTicks,
         };
 
         // Return every escrowed payload on a listing to a user's treasury (cancel/expire refund).
         // Optional underpricing guard: compare a listing's unit price to the item's trusted server-side value. Off by
         // default (returns true). Warns below WarnBelowTrustedValuePercent; blocks below MinPercentOfTrustedValue when
         // BlockSuspiciousUnderpricedListings is on. Unknown value (0) -> can't judge -> allow.
-        private static bool CheckUnderpricing(string itemDefName, string seller, int unitPrice, out string reason)
+        private static bool CheckUnderpricing(string itemDefName, string seller, int unitPriceMilli, out string reason)
         {
             reason = null;
             Economy.EconomyConfig cfg = Economy.EconomyConfig.Current;
@@ -278,15 +287,16 @@ namespace KMHServerAddon.Features.Marketplace
             Util.ItemKey.Split(itemDefName ?? "", out string pureDef, out _, out _);
             long trusted = Items.KmhItemSafety.GetTrustedMarketValue(pureDef);
             if (trusted <= 0) return true;
-            double ratio = unitPrice / (double)trusted;
+            double price = unitPriceMilli / 1000.0;                 // fractional silver, so sub-silver ratios are accurate
+            double ratio = price / trusted;
             if (cfg.MarketplaceBlockSuspiciousUnderpricedListings && cfg.MarketplaceMinPercentOfTrustedValue > 0 &&
                 ratio < cfg.MarketplaceMinPercentOfTrustedValue)
             {
-                reason = $"That price is only {ratio:P0} of the item's value ({Util.SilverFmt.Format(trusted)}); this server requires at least {cfg.MarketplaceMinPercentOfTrustedValue:P0}.";
+                reason = $"That price ({price:0.###} silver) is only {ratio:P1} of the item's value ({Util.SilverFmt.Format(trusted)}); this server requires at least {cfg.MarketplaceMinPercentOfTrustedValue:P0} to prevent near-free transfers.";
                 return false;
             }
             if (cfg.MarketplaceWarnBelowTrustedValuePercent > 0 && ratio < cfg.MarketplaceWarnBelowTrustedValuePercent)
-                Diagnostics.ServerLog.Warn($"Marketplace: {seller} listed {pureDef} at {unitPrice}s = {ratio:P0} of trusted value {trusted}s (underpriced - audit flag).");
+                Diagnostics.ServerLog.Warn($"Marketplace: {seller} listed {pureDef} at {price:0.###}s = {ratio:P1} of trusted value {trusted}s (underpriced - audit flag).");
             return true;
         }
 
@@ -435,7 +445,11 @@ namespace KMHServerAddon.Features.Marketplace
                     return false;
                 qtyToSell = Math.Min(qty, listing.RemainingQty);
                 if (qtyToSell <= 0) return false;
-                long costL = (long)listing.UnitPriceSilver * qtyToSell;
+                // Cost from the canonical milli price, rounded like RimWorld (1000 milli = 1 silver). Old listings
+                // with no milli fall back to whole silver * 1000. Floor at 1 so a tiny sub-silver buy can't round to a
+                // free transfer.
+                long unitMilli = listing.UnitPriceMilli > 0 ? listing.UnitPriceMilli : (long)listing.UnitPriceSilver * 1000;
+                long costL = Math.Max(1, (long)Math.Round(unitMilli * (double)qtyToSell / 1000.0));
                 if (costL > int.MaxValue) return false; // legacy/tampered listing; Post now caps total to int range
                 cost = (int)costL;
 
@@ -446,7 +460,7 @@ namespace KMHServerAddon.Features.Marketplace
                     soldPayloads = PopPayloadsLocked(listing, qtyToSell);
                     qtyToSell = 0; foreach (Items.KmhThingPayload sp in soldPayloads) qtyToSell += sp.StackCount;
                     if (qtyToSell <= 0) return false;
-                    cost = (int)((long)listing.UnitPriceSilver * qtyToSell);
+                    cost = (int)Math.Max(1, Math.Round(unitMilli * (double)qtyToSell / 1000.0));
                 }
                 listing.RemainingQty -= qtyToSell;
                 removedOnReserve = listing.RemainingQty <= 0 && (listing.EscrowPayloads == null || listing.EscrowPayloads.Count == 0);

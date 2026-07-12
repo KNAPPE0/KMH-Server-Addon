@@ -13,7 +13,7 @@ ones who have it.
 
 ## RWT version
 
-Recommended **RWT 26.6.9.1** — KMH v1.2.0 is built and tested around it. It also
+Recommended **RWT 26.6.9.1** — KMH v1.2.1 is built and tested around it. It also
 runs on **RWT 26.5.24.1** (the older RWT generation); the addon auto-detects
 which one it's sitting next to and binds the matching API automatically.
 
