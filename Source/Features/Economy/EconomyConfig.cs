@@ -89,12 +89,20 @@ namespace KMHServerAddon.Features.Economy
 
         public int MarketplaceMaxUnitPrice { get; set; } = 100_000;
 
-        // --- optional underpricing controls (off/loose by default so standard servers allow cheap listings) ---
-        // A listing's unit price is compared to the item's trusted server-side market value (client-reported catalog
-        // value). Punishing servers can warn or block suspiciously cheap transfers; standard servers leave these off.
-        public double MarketplaceMinPercentOfTrustedValue     { get; set; } = 0.0;   // 0 = no floor; e.g. 0.5 = must be >=50% of value
+        // Sub-silver pricing: the real listing floor/ceiling in MILLI-silver (1000 = 1 silver), so items can list below
+        // 1 full silver (e.g. 550 = 0.55). Min defaults to 10 milli (0.01) - fractional pricing works, but not absurd
+        // dust prices where a small buy would round to 0 silver. Max mirrors MarketplaceMaxUnitPrice * 1000.
+        public int MarketplaceMinUnitPriceMilli { get; set; } = 10;
+
+        public int MarketplaceMaxUnitPriceMilli { get; set; } = 100_000_000;
+
+        // --- underpricing anti-cheat: compare a listing's unit price to the item's trusted server-side market value ---
+        // Blocks EGREGIOUS underpricing (near-free transfers used to launder value / wash-trade to an alt) below
+        // MinPercentOfTrustedValue, and audit-warns anything under WarnBelow. Deep-but-legit discounts (fire sales)
+        // pass. Only enforced when the item's value is known from the catalog (unknown -> can't judge -> allowed).
+        public double MarketplaceMinPercentOfTrustedValue     { get; set; } = 0.02;  // block below 2% of trusted value (near-free = laundering)
         public double MarketplaceWarnBelowTrustedValuePercent { get; set; } = 0.25;  // audit-warn below this fraction of value (0 = never)
-        public bool   MarketplaceBlockSuspiciousUnderpricedListings { get; set; } = false; // enforce the min-percent floor as a hard block
+        public bool   MarketplaceBlockSuspiciousUnderpricedListings { get; set; } = true;  // enforce the min-percent floor as a hard block
         public double MarketplaceListingFeePercent            { get; set; } = 0.0;   // reserved: post fee as % of total ask (0 = none)
 
         // --- auctions ---
@@ -185,6 +193,8 @@ namespace KMHServerAddon.Features.Economy
             MarketplaceMaxOpenListingsPerUser = Clamp(MarketplaceMaxOpenListingsPerUser, 1, 10_000);
             MarketplaceMinUnitPrice           = Clamp(MarketplaceMinUnitPrice, 1, 1_000_000);
             MarketplaceMaxUnitPrice           = Clamp(MarketplaceMaxUnitPrice, MarketplaceMinUnitPrice, 1_000_000_000);
+            MarketplaceMinUnitPriceMilli      = Clamp(MarketplaceMinUnitPriceMilli, 1, 1_000_000_000);
+            MarketplaceMaxUnitPriceMilli      = Clamp(MarketplaceMaxUnitPriceMilli, MarketplaceMinUnitPriceMilli, 2_000_000_000);
             MarketplaceMinPercentOfTrustedValue     = ClampD(MarketplaceMinPercentOfTrustedValue, 0.0, 1.0);
             MarketplaceWarnBelowTrustedValuePercent = ClampD(MarketplaceWarnBelowTrustedValuePercent, 0.0, 1.0);
             MarketplaceListingFeePercent            = ClampD(MarketplaceListingFeePercent, 0.0, 0.5);

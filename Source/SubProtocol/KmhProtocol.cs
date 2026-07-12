@@ -10,7 +10,7 @@ namespace KMHServerAddon.SubProtocol
         // Human-readable release version, carried in kmh.hello purely so each side can DETECT a version gap and
         // nudge the player. It never gates the connection (that's CurrentVersion's job) and stays additive: a
         // pre-1.1.0 server omits it, so an empty value received by a client reliably means "older server".
-        public const string BuildVersion = "1.2.0";
+        public const string BuildVersion = "1.2.1";
 
         public const string SystemUsername = "​[KMH-SYS]"; // server -> client
         public const string ClientUsername = "​[KMH-CLI]"; // client -> server

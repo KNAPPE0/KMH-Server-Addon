@@ -44,7 +44,7 @@ namespace KMHServerAddon.Features.Treasury
             int    qty      = isItem ? (env?.GetInt("qty", 0) ?? 0) : 0;
             bool   isPayload= env?.GetBool("is_payload", false) ?? false;
 
-            if (CheckDepositAllowed(username, isItem, amount, itemDef, qty, isPayload, env, out string reason))
+            if (CheckDepositAllowed(username, isItem, amount, itemDef, qty, isPayload, env, out string reason, out bool needsPayload))
             {
                 string token = System.Guid.NewGuid().ToString("N");
                 _preflight[token] = new PreApproval { User = username, Kind = kind, Amount = amount, ItemDefName = itemDef, Qty = qty,
@@ -52,13 +52,15 @@ namespace KMHServerAddon.Features.Treasury
                 ReapPreflight();
                 KmhRouter.SendTo(client, KmhProtocol.Kind.TreasuryDepositApproval, new { req_id = reqId, ok = true, token, ttl = PreflightTtlSeconds });
             }
-            else KmhRouter.SendTo(client, KmhProtocol.Kind.TreasuryDepositApproval, new { req_id = reqId, ok = false, reason = reason ?? "Deposit not allowed right now." });
+            // needs_payload marks the compact-safety rejection so the client retries via the payload path, not gives up.
+            else KmhRouter.SendTo(client, KmhProtocol.Kind.TreasuryDepositApproval, new { req_id = reqId, ok = false, reason = reason ?? "Deposit not allowed right now.", needs_payload = needsPayload });
         }
 
         // Read-only version of the deposit rejectable rules (cap, access, cooldown, vault cap, compact-item safety).
-        private static bool CheckDepositAllowed(string username, bool isItem, long silver, string itemDef, int qty, bool isPayload, KmhEnvelope env, out string reason)
+        private static bool CheckDepositAllowed(string username, bool isItem, long silver, string itemDef, int qty, bool isPayload, KmhEnvelope env, out string reason, out bool needsPayload)
         {
             reason = null;
+            needsPayload = false;
             var cfg = Features.Economy.EconomyConfig.Current;
             if (!isItem)
             {
@@ -69,7 +71,7 @@ namespace KMHServerAddon.Features.Treasury
             {
                 int qtyCap = cfg.MaxItemDepositQtyPerTx;
                 if (qtyCap > 0 && qty > qtyCap) { reason = $"That item deposit is over the per-deposit limit ({qtyCap})."; return false; }
-                if (!isPayload && !Items.KmhItemSafety.IsCompactDepositSafe((itemDef ?? "").Split('|')[0], out reason)) return false;
+                if (!isPayload && !Items.KmhItemSafety.IsCompactDepositSafe((itemDef ?? "").Split('|')[0], out reason)) { needsPayload = true; return false; }
             }
             Features.Economy.EconomyContext ctx = Features.Economy.EconomyContext.FromEnvelope(env);
             if (!Features.Economy.EconomyAccess.CheckAccess(username, false, false, isItem, ctx, out reason)) return false;
@@ -337,9 +339,6 @@ namespace KMHServerAddon.Features.Treasury
             }
         }
 
-        // Cap payload units per withdraw so the grant (which carries the deep blobs) stays under the 64KB frame.
-        private const int MaxPayloadWithdrawPerTx = 10;
-
         private static void OnWithdrawItem(ServerClient client, KmhEnvelope env)
         {
             string username = client?.GetData<UserFile>()?.Username;
@@ -347,10 +346,13 @@ namespace KMHServerAddon.Features.Treasury
             if (req == null) return;
             if (!Gate(client, username, isWithdraw: true, isGuild: false, isItem: true, env)) return;
 
-            // Payload path: withdraw by state fingerprint, materialize the exact captured items.
+            // Payload path: withdraw by state fingerprint, materialize the exact captured items. A fungible stack
+            // grants ONE representative blob regardless of count (frame-safe), so cap at the item deposit cap for
+            // symmetric movement rather than the old fixed 10 that truncated large food/resource stacks.
             if (!string.IsNullOrEmpty(req.Fingerprint))
             {
-                int qty = System.Math.Min(req.Qty, MaxPayloadWithdrawPerTx);
+                int cap = Features.Economy.EconomyConfig.Current.MaxItemDepositQtyPerTx;
+                int qty = cap > 0 ? System.Math.Min(req.Qty, cap) : req.Qty;
                 if (qty <= 0) return;
                 System.Collections.Generic.List<Items.KmhThingPayload> granted =
                     TreasuryStore.WithdrawPayloads(username, req.Fingerprint, qty, note: "");

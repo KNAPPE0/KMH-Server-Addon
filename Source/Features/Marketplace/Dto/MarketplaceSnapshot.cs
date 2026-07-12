@@ -21,7 +21,10 @@ namespace KMHServerAddon.Features.Marketplace.Dto
         [JsonProperty("item_def_name")]       public string ItemDefName     { get; set; } = "";
         [JsonProperty("remaining_qty")]       public int    RemainingQty    { get; set; } = 0;
         [JsonProperty("original_qty")]        public int    OriginalQty     { get; set; } = 0;
-        [JsonProperty("unit_price_silver")]   public int    UnitPriceSilver { get; set; } = 0;
+        [JsonProperty("unit_price_silver")]   public int    UnitPriceSilver { get; set; } = 0;   // rounded display / old-client fallback
+        // Canonical unit price in MILLI-silver (1000 = 1 silver) so items can list below 1 full silver (e.g. 550 =
+        // 0.55). Buy total = round(qty * milli / 1000). 0 on an old listing -> derive from UnitPriceSilver * 1000.
+        [JsonProperty("unit_price_milli")]    public int    UnitPriceMilli  { get; set; } = 0;
         [JsonProperty("listed_utc_ticks")]    public long   ListedUtcTicks  { get; set; } = 0;
         [JsonProperty("expires_utc_ticks")]   public long   ExpiresUtcTicks { get; set; } = 0;
         [JsonProperty("is_auto_listing")]     public bool   IsAutoListing   { get; set; } = false;

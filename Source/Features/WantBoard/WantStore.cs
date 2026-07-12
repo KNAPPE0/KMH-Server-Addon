@@ -315,7 +315,7 @@ namespace KMHServerAddon.Features.WantBoard
             foreach (Items.KmhThingPayload p in taken)
             {
                 if (toBuyer >= p.StackCount) { Items.KmhPayloadEscrow.Deliver(buyer, p, $"want #{wantId} received", $"want #{wantId} received"); toBuyer -= p.StackCount; }
-                else if (toBuyer > 0 && string.IsNullOrEmpty(p.ScribeXml))
+                else if (toBuyer > 0 && (string.IsNullOrEmpty(p.ScribeXml) || p.Mergeable))
                 {
                     Items.KmhPayloadEscrow.Deliver(buyer,  Items.KmhPayloadEscrow.Clone(p, toBuyer), $"want #{wantId} received", $"want #{wantId} received");
                     Items.KmhPayloadEscrow.Deliver(seller, Items.KmhPayloadEscrow.Clone(p, p.StackCount - toBuyer), $"want #{wantId} surplus returned", $"want #{wantId} surplus returned");

@@ -30,7 +30,7 @@ If GameServer.exe isn't in the folder, KMH says so and stops.
 
 Updating from 1.1.1
 -------------------
-Update EVERY player's KMH-Patch mod to 1.2.0 alongside the server. The wire
+Update EVERY player's KMH-Patch mod to 1.2.1 alongside the server. The wire
 protocol advanced to v2 in 1.2.0 (deposit rules changed), so a still-on-1.1.1
 client can't safely use the new economy. Rather than let it half-work and lose
 items, the version gate simply disables KMH for that client - they see a clear
