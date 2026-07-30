@@ -1,4 +1,3 @@
-using GameServer.PacketManager;
 using HarmonyLib;
 
 namespace KMHServerAddon.Features.PlayerStats.Patches

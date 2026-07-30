@@ -45,6 +45,23 @@ function Assert-NoUnexpectedBinaries {
     Write-Host "[deploy] Package guard OK - no unexpected binaries."
 }
 
+# A missing payload starts fine and fails only on that server generation, so check the shipped exe itself
+# rather than trusting the build inputs.
+function Assert-PayloadsEmbedded {
+    param([string]$ExePath)
+
+    $bytes = [System.IO.File]::ReadAllBytes($ExePath)
+    $text = [System.Text.Encoding]::UTF8.GetString($bytes)
+
+    foreach ($name in @("KMHAddon.RTShared.dll", "KMHAddon.RTServer.dll")) {
+        if ($text.IndexOf($name) -lt 0) {
+            throw "Published executable does not embed $name - that RWT generation would be unsupported."
+        }
+    }
+
+    Write-Host "[deploy] Payload embedding OK - both new-generation payloads are inside the executable."
+}
+
 # Self-contained runs with no RWT beside it at publish time, so it must carry Newtonsoft.Json itself.
 function Assert-NewtonsoftPresent {
     param([string]$Path)
@@ -73,22 +90,32 @@ $ext = if ($Rid.StartsWith("win")) { ".exe" } else { "" }
 $publishName = if ($SelfContained) { "$Rid-selfcontained" } else { $Rid }
 $publish = Join-Path $PSScriptRoot "Source\bin\publish\$publishName"
 
-# The launcher embeds bin\payload\KMHAddon.RTShared.dll (the 26.6.x payload); a stale one silently ships old
-# code to every new-generation server. Always rebuild it first, then verify its version matches the project.
-Write-Host "[deploy] Building the RTShared payload (RwtFlavor=New) so the launcher embeds a fresh one."
-& dotnet build $project -c Release -p:RwtFlavor=New -v q | Out-Host
-if ($LASTEXITCODE -ne 0) {
-    throw "Payload build (RwtFlavor=New) failed with exit code $LASTEXITCODE."
+# One payload per new-generation RWT build; a stale one silently ships old code to that generation.
+# Rebuild first, then verify each version.
+$payloads = @(
+    @{ Flavor = "New"; Dll = "KMHAddon.RTShared.dll"; For = "26.6.x (GameServer.dll)" },
+    @{ Flavor = "RT";  Dll = "KMHAddon.RTServer.dll"; For = "renamed build (RTServer.dll)" }
+)
+
+foreach ($p in $payloads) {
+    Write-Host "[deploy] Building the $($p.Flavor) payload for $($p.For) so the launcher embeds a fresh one."
+    & dotnet build $project -c Release -p:RwtFlavor=$($p.Flavor) -v q | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        throw "Payload build (RwtFlavor=$($p.Flavor)) failed with exit code $LASTEXITCODE."
+    }
+
+    $payloadDll = Join-Path $PSScriptRoot "Source\bin\payload\$($p.Dll)"
+    if (-not (Test-Path $payloadDll)) {
+        throw "Payload missing after build: $payloadDll"
+    }
+
+    $payloadVersion = [System.Reflection.AssemblyName]::GetAssemblyName($payloadDll).Version.ToString(3)
+    if ($payloadVersion -ne $version) {
+        throw "Payload version $payloadVersion does not match project version $version - stale payload would ship."
+    }
+
+    Write-Host "[deploy] Payload OK - $([System.IO.Path]::GetFileNameWithoutExtension($p.Dll)) v$payloadVersion matches project v$version."
 }
-$payloadDll = Join-Path $PSScriptRoot "Source\bin\payload\KMHAddon.RTShared.dll"
-if (-not (Test-Path $payloadDll)) {
-    throw "Payload missing after build: $payloadDll"
-}
-$payloadVersion = [System.Reflection.AssemblyName]::GetAssemblyName($payloadDll).Version.ToString(3)
-if ($payloadVersion -ne $version) {
-    throw "Payload version $payloadVersion does not match project version $version - stale payload would ship."
-}
-Write-Host "[deploy] Payload OK - KMHAddon.RTShared v$payloadVersion matches project v$version."
 
 if (Test-Path $publish) {
     Remove-Item $publish -Recurse -Force
@@ -130,6 +157,7 @@ if (-not (Test-Path $exe)) {
 }
 
 Assert-NoUnexpectedBinaries -Path $publish
+Assert-PayloadsEmbedded -ExePath $(if ($SelfContained) { Join-Path $publish "KMHServerAddon.dll" } else { $exe })
 
 if ($SelfContained) {
     Assert-NewtonsoftPresent -Path $publish
@@ -204,9 +232,11 @@ Write-Host "[deploy] Done." -ForegroundColor Green
 Write-Host "[deploy] Release asset: $zip ($zipMb MB)"
 Write-Host "[deploy] App:           $exe ($exeMb MB)"
 
+$rwtExe = "GameServer$ext / RTServer$ext"
+
 if ($SelfContained) {
-    Write-Host "[deploy] Install: extract the full zip beside the official GameServer$ext and run KMHServerAddon$ext."
+    Write-Host "[deploy] Install: extract the full zip beside the official RWT server ($rwtExe) and run KMHServerAddon$ext."
 }
 else {
-    Write-Host "[deploy] Install: place KMHServerAddon$ext beside the official GameServer$ext and run KMHServerAddon$ext. Requires .NET 8."
+    Write-Host "[deploy] Install: place KMHServerAddon$ext beside the official RWT server ($rwtExe) and run KMHServerAddon$ext. Requires .NET 8."
 }

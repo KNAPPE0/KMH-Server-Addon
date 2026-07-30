@@ -1,12 +1,11 @@
-// Maps RWT's renamed 26.6.9.1 API onto the names the codebase uses, so one source tree builds against both RWT
-// generations (csproj RwtFlavor Old/New)
+// The ONLY place RWT's renames live (csproj RwtFlavor Old/New/RT). Feature code imports through these global
+// usings, so it never names a generation itself.
 #if RWT_NEW
 global using RTNetwork.Components;
 global using RTNetwork.Packets;
 global using RTShared;
 global using RTShared.Misc;
 global using RTShared.Commands;
-global using UserFile = RTShared.Files.ServerClient.FL_Player;
 global using TCPNetwork = RTNetwork.Components;
 global using Shared = RTShared;
 #else
@@ -16,6 +15,24 @@ global using TCPNetwork.Files.Client;
 global using Shared;
 global using Shared.Misc;
 global using Shared.Commands;
+#endif
+
+// 26.7.x renamed the server assembly and every namespace in it, GameServer -> RTServer.
+#if RWT_RT
+global using RTServer.PacketManagers;
+global using RTServer.Core;
+global using RTServer.Misc;
+#else
+global using GameServer.PacketManager;
+global using GameServer.Core;
+global using GameServer.Misc;
+#endif
+
+// Same release moved the player save file out of Files.ServerClient into Files.Player.
+#if RWT_RT
+global using UserFile = RTShared.Files.Player.FL_Player;
+#elif RWT_NEW
+global using UserFile = RTShared.Files.ServerClient.FL_Player;
 #endif
 
 namespace KMHServerAddon

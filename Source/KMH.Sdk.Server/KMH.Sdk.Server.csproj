@@ -9,9 +9,9 @@
     <Nullable>disable</Nullable>
     <LangVersion>latest</LangVersion>
     <ImplicitUsings>enable</ImplicitUsings>
-    <Version>1.2.1</Version>
-    <AssemblyVersion>1.2.1.0</AssemblyVersion>
-    <FileVersion>1.2.1.0</FileVersion>
+    <Version>1.2.2</Version>
+    <AssemblyVersion>1.2.2.0</AssemblyVersion>
+    <FileVersion>1.2.2.0</FileVersion>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CS1591</NoWarn>
   </PropertyGroup>
@@ -31,7 +31,7 @@
     <RepositoryType>git</RepositoryType>
     <PackageLicenseFile>LICENSE</PackageLicenseFile>
     <PackageReadmeFile>EXTENSIONS.md</PackageReadmeFile>
-    <PackageReleaseNotes>1.2.1 - Treasury hotfix: fungible food/resource stacking + one-time consolidation of legacy vault fragments, complex-classified items (e.g. eltex) deposit via payload fallback, payload withdraws no longer capped at 10. 1.2.0 - Economy integrity update (auto treasury reset on new save, custom-site value-underreport hardening, disabled-feature dashboard clarity). 1.1.1 - Transport hardening hotfix (loopback-by-default API, auth, connection caps, failed-auth throttle, reconnect-race fix, security test harness). See EXTENSIONS.md.</PackageReleaseNotes>
+    <PackageReleaseNotes>1.2.2 - Compatibility release for the RWT build that renamed the server assembly (GameServer.dll -> RTServer.dll) and its namespaces: KMH now identifies the RWT server by its contents instead of its file name, ships a matching payload for the renamed generation, invalidates a stale .rwt-runtime cache after an RWT update, and reports exactly what it searched for when no server is found. 1.2.1 - Treasury hotfix: fungible food/resource stacking + one-time consolidation of legacy vault fragments, complex-classified items (e.g. eltex) deposit via payload fallback, payload withdraws no longer capped at 10. 1.2.0 - Economy integrity update (auto treasury reset on new save, custom-site value-underreport hardening, disabled-feature dashboard clarity). 1.1.1 - Transport hardening hotfix (loopback-by-default API, auth, connection caps, failed-auth throttle, reconnect-race fix, security test harness). See EXTENSIONS.md.</PackageReleaseNotes>
     <PackageOutputPath>..\..\Releases</PackageOutputPath>
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>

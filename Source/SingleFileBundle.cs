@@ -1,18 +1,14 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Text;
 
 namespace KMHServerAddon
 {
-    // Extracts the managed assemblies from a .NET single-file bundle. We use it to unpack KMH's OWN payload (this
-    // exe bundles our hook + Harmony + Discord.Net) onto disk next to GameServer.exe, so GameServer's runtime can
-    // load our startup hook. We ship nothing of RWT's; we never read RWT here
-    //
-    // Bundle format (Microsoft.NET.HostModel): a 16-byte signature sits near the end; the int64 just before it is
-    // the manifest offset. The manifest is major/minor/fileCount/bundleId, then (major>=2) five int64s, then per
-    // file: offset, size, (major>=6) compressedSize, type byte, 7-bit-len path. Type 1 = managed assembly;
-    // compressedSize>0 means deflate-compressed
+    // Reads .NET single-file bundles (Microsoft.NET.HostModel): a 16-byte signature near the end, preceded by an
+    // int64 manifest offset. Manifest = major/minor/fileCount/bundleId, then (major>=2) 40 bytes, then per file:
+    // offset, size, (major>=6) compressedSize, type byte, 7-bit-len path. Type 1 = managed, compressedSize>0 = deflate.
     internal static class SingleFileBundle
     {
         private static readonly byte[] Signature =
@@ -21,23 +17,73 @@ namespace KMHServerAddon
             0x72, 0x7b, 0x93, 0x02, 0x14, 0xd7, 0xa0, 0x32,
         };
 
-        // Extract the bundle's managed assemblies into targetDir (once - a marker keyed to the exe's size skips
-        // re-extraction). Returns how many DLLs are available afterward
-        public static int Extract(string exePath, string targetDir, string sentinelDll)
+        private struct Entry
+        {
+            public string Name;
+            public long   Offset;
+            public long   Size;
+            public long   Comp;
+        }
+
+        // Identifies what an executable IS without writing anything. Empty = unreadable or not a bundle.
+        public static List<string> ListManagedNames(string exePath)
+        {
+            List<string> names = new List<string>();
+            try
+            {
+                byte[] data = File.ReadAllBytes(exePath);
+                foreach (Entry e in Walk(data)) names.Add(e.Name);
+            }
+            catch { /* caller treats it as "not a server" */ }
+            return names;
+        }
+
+        // Skips re-extraction only when the fingerprint matches AND the expected server assembly is present.
+        public static int Extract(string exePath, string targetDir, string fingerprint, string sentinelDll)
         {
             Directory.CreateDirectory(targetDir);
-            long len = new FileInfo(exePath).Length;
             string marker = Path.Combine(targetDir, ".source");
-            if (File.Exists(marker) && File.ReadAllText(marker) == len.ToString()
-                && File.Exists(Path.Combine(targetDir, sentinelDll)))
+            if (File.Exists(marker) && SafeRead(marker) == fingerprint
+                && (string.IsNullOrEmpty(sentinelDll) || File.Exists(Path.Combine(targetDir, sentinelDll))))
             {
                 return Count(targetDir);
             }
 
+            // Different RWT build. Purge first: after a rename a merged cache would still hold the old server
+            // assembly, and generation detection would key off a file the installed server no longer ships.
+            PurgeStaleCache(targetDir, marker);
+
             byte[] data = File.ReadAllBytes(exePath);
-            // The 16-byte signature can occur by chance inside a bundled assembly, so we can't just take the last
-            // match - find the one whose preceding int64 points to a header that actually parses as a valid bundle
-            // manifest
+            int n = 0;
+            foreach (Entry e in Walk(data))
+            {
+                // R2R images bake in dependency identity; skip so the runtime JITs plain IL.
+                if (e.Name.EndsWith(".r2r.dll", StringComparison.OrdinalIgnoreCase)) continue;
+                // A second Newtonsoft with a different identity crashes Harmony's JIT hook; bind to RWT's.
+                if (e.Name.Equals("Newtonsoft.Json.dll", StringComparison.OrdinalIgnoreCase)) continue;
+
+                string outPath = Path.Combine(targetDir, e.Name);
+                if (e.Comp > 0)
+                {
+                    using var src = new MemoryStream(data, (int)e.Offset, (int)e.Comp, false);
+                    using var inflate = new DeflateStream(src, CompressionMode.Decompress);
+                    using var outFs = File.Create(outPath);
+                    inflate.CopyTo(outFs);
+                }
+                else
+                {
+                    using var outFs = File.Create(outPath);
+                    outFs.Write(data, (int)e.Offset, (int)e.Size);
+                }
+                n++;
+            }
+
+            File.WriteAllText(marker, fingerprint);
+            return n;
+        }
+
+        private static IEnumerable<Entry> Walk(byte[] data)
+        {
             long pos = FindValidHeader(data);
             if (pos < 0) throw new InvalidDataException("not a .NET single-file bundle (no valid manifest)");
 
@@ -47,7 +93,6 @@ namespace KMHServerAddon
             ReadStr(data, ref pos);                       // bundleId
             if (major >= 2) pos += 40;                    // deps/runtimeconfig/flags
 
-            int n = 0;
             for (int i = 0; i < fileCount; i++)
             {
                 long offset = ReadI64(data, ref pos);
@@ -60,31 +105,27 @@ namespace KMHServerAddon
                 string name = Path.GetFileName(rel);
                 if (string.IsNullOrEmpty(name)) continue;
 
-                // R2R composite native images bake in dependency identity - skip them so the runtime JITs the plain
-                // IL instead
-                if (name.EndsWith(".r2r.dll", StringComparison.OrdinalIgnoreCase)) continue;
-                // Don't ship our Newtonsoft - RWT's GameServer process already has one (13.x); a second copy with a
-                // different identity makes Harmony's JIT hook crash. Our code binds to RWT's at runtime
-                if (name.Equals("Newtonsoft.Json.dll", StringComparison.OrdinalIgnoreCase)) continue;
-
-                string outPath = Path.Combine(targetDir, name);
-                if (comp > 0)
-                {
-                    using var src = new MemoryStream(data, (int)offset, (int)comp, false);
-                    using var inflate = new DeflateStream(src, CompressionMode.Decompress);
-                    using var outFs = File.Create(outPath);
-                    inflate.CopyTo(outFs);
-                }
-                else
-                {
-                    using var outFs = File.Create(outPath);
-                    outFs.Write(data, (int)offset, (int)size);
-                }
-                n++;
+                yield return new Entry { Name = name, Offset = offset, Size = size, Comp = comp };
             }
+        }
 
-            File.WriteAllText(marker, len.ToString());
-            return n;
+        // Removes only what a previous extraction wrote.
+        private static void PurgeStaleCache(string dir, string marker)
+        {
+            try
+            {
+                if (File.Exists(marker)) File.Delete(marker);
+                foreach (string f in Directory.GetFiles(dir, "*.dll"))
+                {
+                    try { File.Delete(f); } catch { /* locked by a running process - extraction will overwrite */ }
+                }
+            }
+            catch { }
+        }
+
+        private static string SafeRead(string path)
+        {
+            try { return File.ReadAllText(path); } catch { return null; }
         }
 
         private static int Count(string dir)
@@ -92,8 +133,8 @@ namespace KMHServerAddon
             try { return Directory.GetFiles(dir, "*.dll").Length; } catch { return 0; }
         }
 
-        // Scan from the end for a signature whose preceding int64 points to a header that parses as a sane manifest
-        // (version + file count in range). Returns the manifest offset, or -1
+        // The signature can occur by chance inside a bundled assembly, so take the last one whose preceding
+        // int64 points at a header that actually parses. Returns the manifest offset, or -1.
         private static long FindValidHeader(byte[] data)
         {
             for (long i = data.Length - Signature.Length; i >= 8; i--)

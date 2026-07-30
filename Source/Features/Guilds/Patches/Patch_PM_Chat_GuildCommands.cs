@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using GameServer.PacketManager;
 using HarmonyLib;
 using KMHServerAddon.Diagnostics;
 using KMHServerAddon.SubProtocol;
@@ -18,7 +17,7 @@ namespace KMHServerAddon.Features.Guilds.Patches
         private static bool Prefix(ServerClient client, byte[] bytes)
         {
             PKT_Chat pkt;
-            try { pkt = Shared.Serializer.ConvertBytesToObject<PKT_Chat>(bytes); }
+            try { pkt = Serializer.ConvertBytesToObject<PKT_Chat>(bytes); }
             catch { return true; }
             if (pkt == null || !pkt.IsCommand) return true;
 

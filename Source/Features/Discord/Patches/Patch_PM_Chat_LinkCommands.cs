@@ -1,5 +1,4 @@
 using System;
-using GameServer.PacketManager;
 using HarmonyLib;
 using KMHServerAddon.Diagnostics;
 using KMHServerAddon.Features.LinkedAccounts;
@@ -27,7 +26,7 @@ namespace KMHServerAddon.Features.Discord.Patches
         private static bool Prefix(ServerClient client, byte[] bytes)
         {
             PKT_Chat pkt;
-            try { pkt = Shared.Serializer.ConvertBytesToObject<PKT_Chat>(bytes); }
+            try { pkt = Serializer.ConvertBytesToObject<PKT_Chat>(bytes); }
             catch { return true; }
             if (pkt == null || !pkt.IsCommand) return true;
 

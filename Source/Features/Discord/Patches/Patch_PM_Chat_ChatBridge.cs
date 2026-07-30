@@ -1,5 +1,4 @@
 using System;
-using GameServer.PacketManager;
 using HarmonyLib;
 using KMHServerAddon.Diagnostics;
 using KMHServerAddon.SubProtocol;

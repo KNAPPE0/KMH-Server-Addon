@@ -30,7 +30,7 @@ namespace KMHServerAddon.Features.World.Dto
         [JsonProperty("magnitude")]         public double Magnitude       { get; set; } = 0;
         [JsonProperty("target")]            public string Target          { get; set; } = "";
         [JsonProperty("started_utc_ticks")] public long   StartedUtcTicks { get; set; } = 0;
-        [JsonProperty("ends_utc_ticks")]    public long   EndsUtcTicks    { get; set; } = 0; // 0 = instantaneous (no duration)
+        [JsonProperty("ends_utc_ticks")]    public long   EndsUtcTicks    { get; set; } = 0; // <= now means over; 0 only in pre-1.2.2 data
     }
 
     // A server-owned quest (distinct from player-posted), funded from the house pool.

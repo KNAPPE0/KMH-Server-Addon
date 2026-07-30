@@ -1,6 +1,5 @@
 using System.Collections.Generic;
 using System.IO;
-using GameServer.Core;
 
 namespace KMHServerAddon.Persistence
 {
