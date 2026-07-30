@@ -5,16 +5,20 @@ Two files, dropped together. That's the whole install:
 
     your-server-folder\
         GameServer.exe        <- the official RimWorld Together server
+                                 (named RTServer.exe on newer RWT builds)
         KMHServerAddon.exe     <- this
 
-Then run KMHServerAddon.exe (NOT GameServer.exe).
+Then run KMHServerAddon.exe (NOT the RWT server).
 
-KMHServerAddon.exe is a single file. It works with the GameServer.exe you put
-next to it, adds the KMH features, and starts the server. It detects which
-server version it sits next to (RWT 26.5.24.1 or 26.6.9.1) and uses the matching
-build automatically. Recommended RWT version: 26.6.9.1. On RWT 26.6.23.1 and
-newer, RWT chat is not a reliable KMH carrier - keep the KMH API transport
-enabled (the default since v1.2.0); it's the recommended/required path there.
+KMHServerAddon.exe is a single file. It works with the RWT server you put next
+to it, adds the KMH features, and starts the server. It detects which server
+version it sits next to (RWT 26.5.24.1, 26.6.9.1, or the newer builds that
+renamed the server to RTServer) and uses the matching build automatically. It
+identifies the server by what the file actually contains, not by its name, so a
+renamed or panel-mangled server file is still found. Recommended RWT version:
+26.6.9.1. On RWT 26.6.23.1 and newer, RWT chat is not a reliable KMH carrier -
+keep the KMH API transport enabled (the default since v1.2.0); it's the
+recommended/required path there.
 On first run it creates KMH-Data/ (configs + state), kmh-extensions/, and a
 small .rwt-runtime/ cache next to itself.
 
@@ -26,11 +30,17 @@ The .NET 8 runtime installed on the server:
 runtime - it can't reach the one baked inside the self-contained GameServer.exe.
 That's the one thing the owner installs once.)
 
-If GameServer.exe isn't in the folder, KMH says so and stops.
+If no RWT server is in the folder, KMH says so and stops. It prints every file
+name it looked for, which one it picked, and why it skipped the others - so a
+"not found" is always explainable.
+
+After an RWT update KMH re-reads the server automatically; its .rwt-runtime/
+cache is keyed to the exact server file, so a stale cache can't survive an
+upgrade. Deleting .rwt-runtime/ is always safe - it is rebuilt on next start.
 
 Updating from 1.1.1
 -------------------
-Update EVERY player's KMH-Patch mod to 1.2.1 alongside the server. The wire
+Update EVERY player's KMH-Patch mod to 1.2.2 alongside the server. The wire
 protocol advanced to v2 in 1.2.0 (deposit rules changed), so a still-on-1.1.1
 client can't safely use the new economy. Rather than let it half-work and lose
 items, the version gate simply disables KMH for that client - they see a clear
@@ -59,6 +69,10 @@ run KMHServerAddon.exe. Two ways to fix it:
         rename  KMHServerAddon.exe   ->  GameServer.exe
     Linux (no .exe):  GameServer -> GameServer.rwt ,  KMHServerAddon -> GameServer
     (then: chmod +x GameServer)
+    If your RWT server file is named RTServer instead, rename that one:
+        RTServer.exe -> RTServer.rwt.exe   (Linux: RTServer -> RTServer.rwt)
+    KMH never mistakes itself for the server - it checks what each file
+    contains, not what it is called or how big it is - so the swap is safe.
     Redo the two renames after any RWT update - it restores the stock launcher.
     On a host without .NET 8, use the -selfcontained zip for this.
 

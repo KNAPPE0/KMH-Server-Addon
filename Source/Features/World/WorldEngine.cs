@@ -215,7 +215,7 @@ namespace KMHServerAddon.Features.World
             WorldEventDto e = WorldStore.AddEvent(type, title, desc, mag, target, minutes);
             ApplyInstantEffect(e);
             WorldHandler.BroadcastSnapshot();
-            NotifyAll($"🌍 {title} - {desc}");
+            NotifyAll($"World event: {title} - {desc}");
             Announce(title, desc, new Color(0x4A, 0x90, 0xE2));
             ServerLog.Info($"World: event '{type}' fired by {actor} (magnitude {mag}, {FmtDuration(minutes)})");
             Extensibility.KmhEventBus.Instance.RaiseWorldEventFired(new KMH.Sdk.Server.Events.WorldEventFiredEvent
@@ -290,7 +290,7 @@ namespace KMHServerAddon.Features.World
 
             ServerQuestDto q = WorldStore.CreateQuest(kind, objective, targetDef, finalTitle, finalDesc, goalQty, reward, minutes, reserved);
             WorldHandler.BroadcastSnapshot();
-            NotifyAll($"📜 New global quest: {q.Title} - {q.Description}");
+            NotifyAll($"New global quest: {q.Title} - {q.Description}");
             Announce($"📜 {q.Title}", $"{q.Description}\nReward pool: {Util.SilverFmt.Format(reward)}", new Color(0xC8, 0x8A, 0x2A));
             ServerLog.Info($"World: quest #{q.Id} '{q.Title}' ({kind}/{objective} {targetDef} x{goalQty}, reward {reward}" +
                            (minted > 0 ? $" [{reserved} pool + {minted} minted]" : "") + $") by {actor}");
@@ -349,7 +349,7 @@ namespace KMHServerAddon.Features.World
             PayOut(payouts);
             if (string.Equals(q.Kind, ServerQuestDto.KindCompetitive, StringComparison.OrdinalIgnoreCase))
             {
-                NotifyAll($"🏆 Global quest won: {q.Title} - {q.Winner} took {Util.SilverFmt.Format(q.RewardPool)}!");
+                NotifyAll($"Global quest won: {q.Title} - {q.Winner} took {Util.SilverFmt.Format(q.RewardPool)}!");
                 Announce($"🏆 {q.Title} - won by {q.Winner}",
                          $"First to {q.GoalQty} took the pot of {Util.SilverFmt.Format(q.RewardPool)}.",
                          new Color(0xF5, 0xC2, 0x42));
@@ -357,7 +357,7 @@ namespace KMHServerAddon.Features.World
             else
             {
                 int n = q.Contributors.Count;
-                NotifyAll($"✅ Global quest complete: {q.Title} - {n} colonist(s) shared {Util.SilverFmt.Format(q.RewardPool)}!");
+                NotifyAll($"Global quest complete: {q.Title} - {n} colonist(s) shared {Util.SilverFmt.Format(q.RewardPool)}!");
                 Announce($"✅ {q.Title} - complete",
                          $"{n} contributor(s) shared the reward pool of {Util.SilverFmt.Format(q.RewardPool)}.",
                          new Color(0x7C, 0xD3, 0x7C));

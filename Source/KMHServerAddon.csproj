@@ -1,10 +1,12 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- Built once per RWT server generation (dotnet build -p:RwtFlavor=Old|New).
-       Old = the KMHServerAddon.exe launcher (binds Shared/TCPNetwork,
-       26.5.24.1). New = a library payload (binds RTShared/RTNetwork, 26.6.9.1+)
-       that the launcher embeds and loads when it finds a new-generation server
-       next to it - so ONE exe serves both server versions. -->
+  <!-- One build per RWT server generation (dotnet build -p:RwtFlavor=Old|New|RT):
+         Old = the KMHServerAddon.exe launcher   (Shared/TCPNetwork,    26.5.24.1)
+         New = a library payload                 (RTShared + GameServer, 26.6.9.1)
+         RT  = a library payload                 (RTShared + RTServer,   26.7.25.1+)
+       The launcher embeds both payloads and loads whichever matches the server beside
+       it, so ONE exe serves every version. Build payloads BEFORE the launcher. -->
+
   <PropertyGroup>
     <RwtFlavor Condition="'$(RwtFlavor)' == ''">Old</RwtFlavor>
     <TargetFramework>net8.0</TargetFramework>
@@ -12,9 +14,9 @@
     <Nullable>disable</Nullable>
     <LangVersion>latest</LangVersion>
     <ImplicitUsings>enable</ImplicitUsings>
-    <Version>1.2.1</Version>
-    <AssemblyVersion>1.2.1.0</AssemblyVersion>
-    <FileVersion>1.2.1.0</FileVersion>
+    <Version>1.2.2</Version>
+    <AssemblyVersion>1.2.2.0</AssemblyVersion>
+    <FileVersion>1.2.2.0</FileVersion>
     <IntermediateOutputPath>obj\$(RwtFlavor)\$(Configuration)\</IntermediateOutputPath>
 
     <!-- Same RID set the RWT server uses so the addon publishes across
@@ -39,19 +41,61 @@
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <RwtServerBuildPath Condition="'$(RwtServerBuildPath)' == ''">E:\RWT Related\rwt-26.6.9.1\Server</RwtServerBuildPath>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(RwtFlavor)' == 'RT'">
+    <OutputType>Library</OutputType>
+    <AssemblyName>KMHAddon.RTServer</AssemblyName>
+    <!-- RWT_NEW too: still RTShared/RTNetwork, so shims keyed to it apply. RWT_RT only picks the renamed server. -->
+    <DefineConstants>$(DefineConstants);RWT_NEW;RWT_RT</DefineConstants>
+    <OutputPath>bin\payload</OutputPath>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <RwtServerBuildPath Condition="'$(RwtServerBuildPath)' == ''">E:\RWT Related\rwt-RTServer\Server</RwtServerBuildPath>
+  </PropertyGroup>
 
-  <!-- The launcher embeds the new-generation payload when it has been built
-       (build New before Old for release; a plain dev build still works without). -->
+  <!-- The launcher embeds each payload that has been built (build New + RT before Old for release; a plain dev
+       build still works without them). -->
   <ItemGroup Condition="'$(RwtFlavor)' == 'Old' and Exists('bin\payload\KMHAddon.RTShared.dll')">
     <EmbeddedResource Include="bin\payload\KMHAddon.RTShared.dll" LogicalName="KMHAddon.RTShared.dll" />
   </ItemGroup>
+  <ItemGroup Condition="'$(RwtFlavor)' == 'Old' and Exists('bin\payload\KMHAddon.RTServer.dll')">
+    <EmbeddedResource Include="bin\payload\KMHAddon.RTServer.dll" LogicalName="KMHAddon.RTServer.dll" />
+  </ItemGroup>
 
-  <!-- 26.6.x servers run the EMBEDDED payload. If source changed since the payload was last built, the launcher
-       ships stale New-flavor code (missing handlers/features - e.g. a "No handler for kind" flood). Warn loudly. -->
+  <!-- Committed source only: @(Compile) also carries obj/ files regenerated every build, which are always newer
+       than the payloads and would make the staleness check below cry wolf on a clean release build. -->
+  <ItemGroup Condition="'$(RwtFlavor)' == 'Old'">
+    <KmhPayloadSource Include="**\*.cs" Exclude="obj\**\*.cs;bin\**\*.cs;KMH.Sdk.Server\**\*.cs" />
+  </ItemGroup>
+
+  <!-- New-generation servers run an EMBEDDED payload. If source changed since a payload was last built, the
+       launcher ships stale code (missing handlers/features - e.g. a "No handler for kind" flood). Warn loudly. -->
   <Target Name="WarnStalePayload" BeforeTargets="Build"
           Condition="'$(RwtFlavor)' == 'Old' and Exists('bin\payload\KMHAddon.RTShared.dll')"
-          Inputs="@(Compile)" Outputs="bin\payload\KMHAddon.RTShared.dll">
+          Inputs="@(KmhPayloadSource)" Outputs="bin\payload\KMHAddon.RTShared.dll">
     <Warning Text="KMHAddon.RTShared.dll (the 26.6.x payload) is OLDER than source - rebuild it before releasing: dotnet build -p:RwtFlavor=New. A stale payload ships old code to new-generation servers (e.g. missing message handlers)." />
+  </Target>
+  <Target Name="WarnStaleRtPayload" BeforeTargets="Build"
+          Condition="'$(RwtFlavor)' == 'Old' and Exists('bin\payload\KMHAddon.RTServer.dll')"
+          Inputs="@(KmhPayloadSource)" Outputs="bin\payload\KMHAddon.RTServer.dll">
+    <Warning Text="KMHAddon.RTServer.dll (the renamed-assembly payload) is OLDER than source - rebuild it before releasing: dotnet build -p:RwtFlavor=RT. A stale payload ships old code to RTServer-generation servers." />
+  </Target>
+  <!-- BuildVersion is a const (the file stays byte-comparable with the client's copy) and has shipped stale
+       before, so fail the build rather than let the handshake report a version that wasn't built. -->
+  <Target Name="VerifyBuildVersion" BeforeTargets="CoreCompile">
+    <PropertyGroup>
+      <_ProtocolFile>SubProtocol\KmhProtocol.cs</_ProtocolFile>
+      <_ProtocolText>$([System.IO.File]::ReadAllText('$(MSBuildProjectDirectory)\$(_ProtocolFile)'))</_ProtocolText>
+      <_DeclaredBuildVersion>$([System.Text.RegularExpressions.Regex]::Match($(_ProtocolText), 'BuildVersion\s*=\s*"([^"]*)"').Groups[1].Value)</_DeclaredBuildVersion>
+    </PropertyGroup>
+    <Error Condition="'$(_DeclaredBuildVersion)' != '$(Version)'"
+           Text="KmhProtocol.BuildVersion is &quot;$(_DeclaredBuildVersion)&quot; but the project version is &quot;$(Version)&quot;. Update $(_ProtocolFile) so the handshake reports the version actually shipped." />
+  </Target>
+
+  <!-- A launcher built without a payload silently loses support for that generation, so say so at build time. -->
+  <Target Name="WarnMissingPayloads" BeforeTargets="Build" Condition="'$(RwtFlavor)' == 'Old'">
+    <Warning Condition="!Exists('bin\payload\KMHAddon.RTShared.dll')"
+             Text="No KMHAddon.RTShared.dll payload - this launcher will NOT support 26.6.x servers. Build it first: dotnet build -p:RwtFlavor=New." />
+    <Warning Condition="!Exists('bin\payload\KMHAddon.RTServer.dll')"
+             Text="No KMHAddon.RTServer.dll payload - this launcher will NOT support RTServer-generation servers. Build it first: dotnet build -p:RwtFlavor=RT." />
   </Target>
 
   <!-- Harmony bundled with our addon - RWT server doesn't ship it.
@@ -140,12 +184,21 @@
   <!-- RWT server assemblies, compile-time only (Private=False), never copied into our output. At runtime the exe
        loads them from the RWT server folder it runs in, so the admin drops KMHServerAddon.exe there and runs it. -->
   <ItemGroup>
+    <Reference Include="Newtonsoft.Json">
+      <HintPath>$(RwtServerBuildPath)\Newtonsoft.Json.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+  <!-- The server assembly itself was renamed GameServer -> RTServer, so it is referenced per flavor. -->
+  <ItemGroup Condition="'$(RwtFlavor)' != 'RT'">
     <Reference Include="GameServer">
       <HintPath>$(RwtServerBuildPath)\GameServer.dll</HintPath>
       <Private>False</Private>
     </Reference>
-    <Reference Include="Newtonsoft.Json">
-      <HintPath>$(RwtServerBuildPath)\Newtonsoft.Json.dll</HintPath>
+  </ItemGroup>
+  <ItemGroup Condition="'$(RwtFlavor)' == 'RT'">
+    <Reference Include="RTServer">
+      <HintPath>$(RwtServerBuildPath)\RTServer.dll</HintPath>
       <Private>False</Private>
     </Reference>
   </ItemGroup>
@@ -159,7 +212,7 @@
       <Private>False</Private>
     </Reference>
   </ItemGroup>
-  <ItemGroup Condition="'$(RwtFlavor)' == 'New'">
+  <ItemGroup Condition="'$(RwtFlavor)' == 'New' or '$(RwtFlavor)' == 'RT'">
     <Reference Include="RTShared">
       <HintPath>$(RwtServerBuildPath)\RTShared.dll</HintPath>
       <Private>False</Private>

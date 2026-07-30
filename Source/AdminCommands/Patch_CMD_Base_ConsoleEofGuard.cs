@@ -1,6 +1,5 @@
 using System.Reflection;
 using System.Threading;
-using GameServer.PacketManager;
 using HarmonyLib;
 
 namespace KMHServerAddon.AdminCommands

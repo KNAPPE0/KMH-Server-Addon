@@ -13,9 +13,12 @@ ones who have it.
 
 ## RWT version
 
-Recommended **RWT 26.6.9.1** — KMH v1.2.1 is built and tested around it. It also
-runs on **RWT 26.5.24.1** (the older RWT generation); the addon auto-detects
-which one it's sitting next to and binds the matching API automatically.
+Recommended **RWT 26.6.9.1** — KMH v1.2.2 is built and tested around it. It also
+runs on **RWT 26.5.24.1** (the older RWT generation) and on the newer RWT builds
+that renamed the server assembly to `RTServer` (tested against **26.7.25.1**).
+The addon auto-detects which one it's sitting next to and binds the matching API
+automatically — it identifies the RWT server by what the executable actually
+contains, so a renamed server file is still found.
 
 **On RWT 26.6.23.1 and newer, RWT chat is not a reliable KMH carrier — keep the
 KMH API transport enabled (the default since v1.2.0); it's the recommended/required
@@ -100,10 +103,11 @@ Update the **KMH Server Addon** and the **KMH Patch** together so both sides mat
 
 ## Install & update
 
-Drop `KMHServerAddon.exe` next to the official `GameServer.exe` and run the
-addon (not `GameServer.exe`). It needs the **.NET 8 runtime** on the server and
-loads RWT's own DLLs from that folder at runtime — it never bundles RimWorld
-Together. Full steps in [SETUP.txt](SETUP.txt).
+Drop `KMHServerAddon.exe` next to the official RWT server executable
+(`GameServer.exe`, or `RTServer.exe` on newer builds) and run the addon, not the
+RWT server. It needs the **.NET 8 runtime** on the server and loads RWT's own
+DLLs from that folder at runtime — it never bundles RimWorld Together. Full
+steps in [SETUP.txt](SETUP.txt).
 
 On a host without .NET 8, or a managed panel (Bisect, Pterodactyl, …) that runs
 a fixed `GameServer` launcher, use the **`-selfcontained`** zip (bundles .NET 8)

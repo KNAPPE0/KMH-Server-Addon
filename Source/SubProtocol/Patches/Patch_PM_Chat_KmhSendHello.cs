@@ -1,4 +1,3 @@
-using GameServer.PacketManager;
 using HarmonyLib;
 using KMHServerAddon.Diagnostics;
 

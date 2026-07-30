@@ -1,5 +1,4 @@
 using System;
-using GameServer.Misc;
 using HarmonyLib;
 using KMHServerAddon.Diagnostics;
 

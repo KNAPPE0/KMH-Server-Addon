@@ -88,7 +88,10 @@ namespace KMHServerAddon.Features.World
                     Magnitude = magnitude,
                     Target = target ?? "",
                     StartedUtcTicks = now,
-                    EndsUtcTicks = durationMinutes > 0 ? now + TimeSpan.FromMinutes(durationMinutes).Ticks : 0,
+                    // No duration = instantaneous, so it ends immediately. Writing a real timestamp (not a 0
+                    // sentinel) is what lets the sweep below collect it; 0 used to mean "never expires" and left
+                    // instantaneous and force-ended events active forever.
+                    EndsUtcTicks = durationMinutes > 0 ? now + TimeSpan.FromMinutes(durationMinutes).Ticks : now,
                 };
                 _events.Add(e);
             }
@@ -96,23 +99,25 @@ namespace KMHServerAddon.Features.World
             return e;
         }
 
-        // Collects ended timed events and removes them from active state.
+        // Removes every event whose end time has passed - including legacy rows saved with a 0 end, which older
+        // builds never collected. Only events that actually ran for a while are RETURNED (and so announced as
+        // ended); an instantaneous one has nothing to announce the end of.
         public static List<WorldEventDto> CollectEndedEvents(long now)
         {
             List<WorldEventDto> ended = new List<WorldEventDto>();
+            bool removedAny = false;
             lock (_lock)
             {
                 for (int i = _events.Count - 1; i >= 0; i--)
                 {
                     WorldEventDto e = _events[i];
-                    if (e.EndsUtcTicks != 0 && e.EndsUtcTicks <= now)
-                    {
-                        ended.Add(e);
-                        _events.RemoveAt(i);
-                    }
+                    if (e.EndsUtcTicks > now) continue;
+                    if (e.EndsUtcTicks > e.StartedUtcTicks) ended.Add(e);
+                    _events.RemoveAt(i);
+                    removedAny = true;
                 }
             }
-            if (ended.Count > 0) SaveToDisk();
+            if (removedAny) SaveToDisk();
             return ended;
         }
 
@@ -126,8 +131,7 @@ namespace KMHServerAddon.Features.World
             lock (_lock)
             {
                 foreach (WorldEventDto e in _events)
-                    if (string.Equals(e.Type, type, StringComparison.OrdinalIgnoreCase)
-                        && (e.EndsUtcTicks == 0 || e.EndsUtcTicks > now))
+                    if (string.Equals(e.Type, type, StringComparison.OrdinalIgnoreCase) && e.EndsUtcTicks > now)
                         return e;
             }
             return null;

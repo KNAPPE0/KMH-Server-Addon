@@ -100,6 +100,17 @@ namespace KMHServerAddon.Maintenance
             Check("World engine", () =>
                 (true, $"{Features.World.WorldStore.ActiveEvents().Count} event(s), {Features.World.WorldStore.ActiveQuests().Count} global quest(s)"));
 
+            // Pre-1.2.2 wrote 0 for instantaneous/force-ended events and the sweep skipped 0, so they stayed
+            // "active" forever and kept rebroadcasting. Nothing live should still carry an elapsed end time.
+            Check("No stuck world events", () =>
+            {
+                long now = DateTime.UtcNow.Ticks;
+                int stuck = 0;
+                foreach (var e in Features.World.WorldStore.ActiveEvents())
+                    if (e != null && e.EndsUtcTicks <= now) stuck++;
+                return (stuck == 0, stuck == 0 ? "none" : $"{stuck} event(s) past their end time are still active");
+            });
+
             // Economy invariant: the house pool can never be negative.
             Check("Economy invariant", () =>
             {
@@ -110,6 +121,13 @@ namespace KMHServerAddon.Maintenance
             // Discord must be queryable whether on, off, or failed - "Discord down doesn't break the server".
             Check("Discord bridge safe", () =>
                 (true, Features.Discord.DiscordBridge.DescribeStatus()));
+
+            // A failure here means a future RWT rename would strand owners on the "no server found" screen.
+            Check("RWT server discovery", () =>
+            {
+                bool ok = KmhRwtDiscoverySelfTest.Run(reply, out string detail);
+                return (ok, detail);
+            });
 
             reply(fail == 0
                 ? $"=== RESULT: PASS ({pass}/{pass + fail} checks) ==="

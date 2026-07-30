@@ -38,5 +38,12 @@ Releases/
 /Source/Temp/
 /Source/kmh-data/
 
+# Runtime folders a server run drops wherever it is launched. gitignore is case-sensitive, so these PascalCase
+# names need their own entries - lowercase /kmh-data/ above does not cover them.
+KMH-Data/
+KMH-Data-Backups/
+kmh-extensions/
+.rwt-runtime/
+
 Thumbs.db
 .DS_Store

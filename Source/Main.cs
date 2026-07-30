@@ -21,18 +21,37 @@ namespace KMHServerAddon
         public static Harmony  HarmonyInstance { get; private set; }
         public static System.DateTime BootstrapUtc { get; private set; } = System.DateTime.MinValue;
 
+        // Assembly-qualified so we bind RWT's own assembly, not something same-named. Newest first.
+        private static readonly string[] ServerEntryTypeNames =
+        {
+            "RTServer.Core.Program, RTServer",
+            "GameServer.Core.Program, GameServer",
+        };
+
         // Patch + register KMH, then start RWT's own server in this process.
         public static int RunAndStartServer(string[] args)
         {
             RunKmhBoot();
             try
             {
-                System.Type prog = System.Type.GetType("GameServer.Core.Program, GameServer", throwOnError: true);
+                // Try both identities rather than hard-coding one; RWT renamed the assembly mid-life.
+                System.Type prog = null;
+                foreach (string tn in ServerEntryTypeNames)
+                {
+                    prog = System.Type.GetType(tn, throwOnError: false);
+                    if (prog != null) break;
+                }
+                if (prog == null)
+                {
+                    System.Console.Error.WriteLine($"{Constants.LogPrefix} Could not find RWT's Program type - tried: "
+                        + string.Join(" / ", ServerEntryTypeNames));
+                    return 1;
+                }
                 MethodInfo entry = prog.GetMethod("Main", BindingFlags.NonPublic | BindingFlags.Static)
                                    ?? prog.GetMethod("Main", BindingFlags.Public | BindingFlags.Static);
                 if (entry == null)
                 {
-                    System.Console.Error.WriteLine($"{Constants.LogPrefix} Could not find GameServer.Core.Program.Main - RWT may have renamed it.");
+                    System.Console.Error.WriteLine($"{Constants.LogPrefix} Could not find {prog.FullName}.Main - RWT may have renamed it.");
                     return 1;
                 }
                 // RWT's Main may be Main() or Main(string[]) - pass args only if it takes them.
