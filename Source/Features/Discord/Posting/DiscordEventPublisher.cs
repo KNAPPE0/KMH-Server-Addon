@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Linq;
 using Discord;
 using KMH.Sdk.Server.Events;
@@ -11,10 +11,7 @@ using KMHServerAddon.Util;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // Turns in-game events into branded Discord embeds by subscribing to the KmhEventBus, so no feature needs to know
-    // Discord exists. Each post is gated by its Post* toggle + a configured channel, and is fire-and-forget via
-    // DiscordBridge so a slow/down Discord never stalls the game thread. Player join/leave stay with
-    // DiscordPlayerAnnouncer (it dedups those), so we don't double up here.
+    // Subscribes to the event bus, so no feature has to know Discord exists.
     internal static class DiscordEventPublisher
     {
         private static bool _started;
@@ -34,8 +31,7 @@ namespace KMHServerAddon.Features.Discord
             ServerLog.Info("Discord: event publisher subscribed to the KMH event bus");
         }
 
-        // Called from DiscordBridge.OnReady once the bot is connected. Posts a single "server online" announcement
-        // per process (Ready can re-fire on reconnects, so we guard it)
+        // Guarded because Ready re-fires on every reconnect, which would announce the server online again.
         public static void OnBridgeReady()
         {
             if (_announcedStart) return;
@@ -51,15 +47,13 @@ namespace KMHServerAddon.Features.Discord
                 DiscordIcons.Logo);
         }
 
-        // -------- event handlers --------
-
         private static void OnMarketplacePost(MarketplacePostEvent e)
         {
             try
             {
                 DiscordConfig cfg = DiscordBridge.Config;
                 if (!MarketEventsOn(cfg)) return;
-                // Only surface public listings - guild-only posts shouldn't leak to a shared channel
+                // A guild-only listing must not leak into a channel the whole server can read.
                 if (!string.Equals(e.Visibility, "public", StringComparison.OrdinalIgnoreCase)) return;
                 ulong ch = cfg.MarketplaceChannelId;
                 if (ch == 0) return;
@@ -109,8 +103,7 @@ namespace KMHServerAddon.Features.Discord
                     return;
                 }
 
-                // built - name what it produces. Use the unfiltered by-tile lookup, NOT a visibility-scoped snapshot:
-                // a guild-only site is invisible to an empty caller, which used to drop the Produces field entirely.
+                // The unfiltered lookup, since a visibility-scoped one hides a guild site from an empty caller.
                 string produces = "";
                 try
                 {
@@ -162,15 +155,13 @@ namespace KMHServerAddon.Features.Discord
             catch (Exception ex) { ServerLog.Verbose($"Discord: guild embed failed: {ex.Message}"); }
         }
 
-        // -------- gating helpers --------
-
         private static bool MarketEventsOn(DiscordConfig cfg)
             => cfg != null && cfg.IsEnabled && cfg.PostMarketplaceEvents;
 
         private static bool ServerEventsOn(DiscordConfig cfg)
             => cfg != null && cfg.IsEnabled && cfg.PostServerEvents;
 
-        // Escapes too - these names land in markdown-rendered embed descriptions/fields.
+        // Escaped because these names land in markdown-rendered embed text.
         private static string Name(string s) => DiscordText.Escape(string.IsNullOrEmpty(s) ? "?" : s);
     }
 }

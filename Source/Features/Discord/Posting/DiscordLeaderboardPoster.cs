@@ -6,9 +6,7 @@ using KMHServerAddon.Diagnostics;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // Periodic auto-poster for the player leaderboard. Edits a single live message in place (state persisted to
-    // discord_leaderboard_state .json) and rolls over every leaderboard_rollover_hours so the channel gets a daily
-    // archive trail instead of one post per tick. Self-exits when the bridge is off or the config is invalid
+    // Edits one live message in place and rolls it over periodically, so the channel gets an archive rather than a post per tick.
     internal static class DiscordLeaderboardPoster
     {
         private static CancellationTokenSource _cts;
@@ -18,7 +16,6 @@ namespace KMHServerAddon.Features.Discord
             DiscordConfig cfg = DiscordBridge.Config;
             if (cfg == null || !cfg.IsEnabled)
             {
-                // Bridge will log its own disabled state; no extra noise.
                 return;
             }
             if (cfg.LeaderboardChannelId == 0)
@@ -32,9 +29,8 @@ namespace KMHServerAddon.Features.Discord
                 return;
             }
 
-            // Cancel any previous loop (defensive - Start is only called once from Main, but we may invoke it again
-            // from a future reload-config command)
-            try { _cts?.Cancel(); } catch { /* ignore */ }
+            // A reload can call Start again, and two loops would post twice per tick.
+            try { _cts?.Cancel(); } catch { }
             _cts = new CancellationTokenSource();
             Task.Run(() => Loop(_cts.Token));
             ServerLog.Info(
@@ -52,7 +48,7 @@ namespace KMHServerAddon.Features.Discord
         {
             DiscordLeaderboardState state = DiscordLeaderboardState.LoadOrDefault();
 
-            // Warm-up (30s) before the first tick so the Discord connection + Ready have a chance to settle.
+            // Waits for the gateway to reach Ready, since posting before that just fails.
             try { await Task.Delay(TimeSpan.FromSeconds(30), ct).ConfigureAwait(false); }
             catch (TaskCanceledException) { return; }
 
@@ -85,8 +81,7 @@ namespace KMHServerAddon.Features.Discord
             if (topN < 1)  topN = 10;
             if (topN > 25) topN = 25;
 
-            // Detect rollover. LiveStartedUtcTicks is stamped on the very first post; rollover hours = 0 means
-            // "never rollover"
+            // Zero hours means never roll over, which is why every check below is guarded on it.
             int rolloverHours = cfg.LeaderboardRolloverHours;
             if (rolloverHours < 0) rolloverHours = 0;
             DateTime now = DateTime.UtcNow;
@@ -100,9 +95,7 @@ namespace KMHServerAddon.Features.Discord
 
             if (rolloverDue)
             {
-                // Edit the current live message one last time with the finalized banner, then drop our ref so the
-                // next post creates a fresh live message underneath. Edit failure here is non-fatal - worst case
-                // the previous message stays "live"-tagged in chat history, and we still open a fresh one
+                // A failed edit is tolerated: the old message keeps its live banner, but a fresh one still opens.
                 Embed[] finals = BuildBoards(topN, isFinalized: true, started, null, 0);
                 if (finals != null)
                 {
@@ -116,12 +109,11 @@ namespace KMHServerAddon.Features.Discord
                 ServerLog.Info("Discord: leaderboard rolled over - previous live message finalized");
             }
 
-            // Build the live player + guild boards for this tick and edit-or-post as one message.
             DateTime? resetsAt = rolloverHours > 0 ? started.AddHours(rolloverHours) : (DateTime?)null;
             Embed[] live = BuildBoards(topN, isFinalized: false, started, resetsAt, cfg.LeaderboardIntervalMinutes);
             if (live == null)
             {
-                // No data yet - stay quiet so first-run servers don't spam an empty embed every hour
+                // Quiet rather than empty, or a first-run server posts a blank board every hour.
                 return;
             }
 
@@ -129,13 +121,11 @@ namespace KMHServerAddon.Features.Discord
                 .ConfigureAwait(false);
             if (newId == 0)
             {
-                // Failed to post + failed to edit - leave state as-is so the next tick retries. Loud log so it's
-                // debuggable
+                // State is left untouched, so the next tick retries rather than orphaning the live message.
                 ServerLog.Warn("Discord: leaderboard post/edit returned 0 - see prior warnings");
                 return;
             }
 
-            // First-ever post stamps the rollover-start clock.
             if (state.LiveStartedUtcTicks == 0)
             {
                 state.LiveStartedUtcTicks = now.Ticks;
@@ -145,8 +135,7 @@ namespace KMHServerAddon.Features.Discord
             state.Save();
         }
 
-        // Player board + guild board as one message; guild board is skipped while no guilds exist. Null when
-        // there's no player data at all
+        // Null means no player data at all, which the caller treats as "post nothing".
         private static Embed[] BuildBoards(int topN, bool isFinalized,
                                            DateTime startedUtc, DateTime? resetsAtUtc, int updateEveryMin)
         {

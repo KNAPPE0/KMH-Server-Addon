@@ -1,14 +1,11 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using KMHServerAddon.Diagnostics;
 using KMHServerAddon.SubProtocol;
 
 namespace KMHServerAddon.Features.Economy
 {
-    // Client-reported context for a treasury action. The standalone server can't see the game, so (like deposit
-    // amounts) these are trusted flags the client sends. Access modes are soft server policy on top of them; a
-    // modified client could spoof context, which is inherent to the design. Known=false when no context was sent
-    // (e.g. an old client or a chat command) - the checks then fall back to permissive rather than break.
+    // Client-asserted and therefore spoofable, which the standalone server cannot avoid; Known=false falls back permissive.
     internal readonly struct EconomyContext
     {
         public readonly bool Known;
@@ -16,11 +13,19 @@ namespace KMHServerAddon.Features.Economy
         public readonly bool HasCaravan;
         public readonly bool InRaid;
         public readonly bool HostileEvent;
-        public readonly bool NearGuildHall;     // future (P8) - always false until Guild Halls exist
-        public readonly bool NearTreasurySite;  // future - always false until Treasury Sites exist
+        public readonly bool NearGuildHall;     // a colony OR the selected caravan is within the hall's radius
+        public readonly bool NearTreasurySite;
 
-        public EconomyContext(bool known, bool colony, bool caravan, bool raid, bool hostile, bool guildHall, bool site)
-        { Known = known; HasColony = colony; HasCaravan = caravan; InRaid = raid; HostileEvent = hostile; NearGuildHall = guildHall; NearTreasurySite = site; }
+        // Tracked separately from its value, because an older client sends neither and must keep working.
+        public readonly bool CaravanNearHall;
+        public readonly bool CaravanNearHallKnown;
+
+        public bool CaravanIsNearHall => CaravanNearHallKnown ? CaravanNearHall : NearGuildHall;
+
+        public EconomyContext(bool known, bool colony, bool caravan, bool raid, bool hostile, bool guildHall, bool site,
+                              bool caravanNearHall = false, bool caravanNearHallKnown = false)
+        { Known = known; HasColony = colony; HasCaravan = caravan; InRaid = raid; HostileEvent = hostile; NearGuildHall = guildHall; NearTreasurySite = site;
+          CaravanNearHall = caravanNearHall; CaravanNearHallKnown = caravanNearHallKnown; }
 
         public static EconomyContext FromEnvelope(KmhEnvelope env)
         {
@@ -32,19 +37,16 @@ namespace KMHServerAddon.Features.Economy
                 env.GetBool("ctx_in_raid"),
                 env.GetBool("ctx_hostile_event"),
                 env.GetBool("ctx_near_guild_hall"),
-                env.GetBool("ctx_near_treasury_site"));
+                env.GetBool("ctx_near_treasury_site"),
+                env.GetBool("ctx_caravan_near_hall"),
+                env.Data["ctx_caravan_near_hall"] != null);
         }
     }
 
-    // Centralized treasury access gate. EVERY economy action that moves treasury value routes its allow/deny check
-    // here so the mode is enforced in one place. Pending-deposit safety is separate and always applies - access
-    // checks never make pending value spendable.
+    // Every treasury move routes its allow/deny check here, so a mode is enforced in exactly one place.
     internal static class EconomyAccess
     {
-        // Guild Halls are implemented: GuildHallRequired / CaravanNearGuildHall now enforce via the client's
-        // near_guild_hall context (true when the guild has no hall, so pre-P8 guilds keep working). Treasury Sites are
-        // still a future system, so those modes fail gracefully (allow + one-time owner warning) instead of locking
-        // people out. static readonly (not const) so the fallback branches don't compile to "unreachable code".
+        // static readonly rather than const, or the unimplemented-mode fallbacks compile away as dead code.
         private static readonly bool GuildHallsImplemented   = true;
         private static readonly bool TreasurySitesImplemented = false;
 
@@ -58,14 +60,12 @@ namespace KMHServerAddon.Features.Economy
 
         public static EconomyPolicy Policy => EconomyConfig.Current.ResolvePolicy();
 
-        // Master gate. isWithdraw = withdraw vs deposit; isGuild = guild vault vs personal; isItem = item move (vs
-        // silver). Returns false + a player-facing reason when denied.
         public static bool CheckAccess(string username, bool isWithdraw, bool isGuild, bool isItem, EconomyContext ctx, out string reason)
         {
             reason = null;
             EconomyPolicy p = Policy;
 
-            // Danger blocks - only when the client actually reported context.
+            // Only when context was actually reported, or an older client would be blocked outright.
             if (ctx.Known)
             {
                 if (p.BlockDuringRaid && ctx.InRaid) { reason = "Treasury is blocked during raids or hostile map events."; return false; }
@@ -99,6 +99,9 @@ namespace KMHServerAddon.Features.Economy
             }
         }
 
+        internal static bool CheckGuildForTest(string mode, EconomyContext ctx, out string reason)
+            => CheckGuild(mode, ctx, out reason);
+
         private static bool CheckGuild(string mode, EconomyContext ctx, out string reason)
         {
             reason = null;
@@ -111,7 +114,7 @@ namespace KMHServerAddon.Features.Economy
                     return true;
                 case "caravannearguildhall":
                     if (!GuildHallsImplemented) { WarnUnsupportedOnce("GuildTreasuryAccessMode=CaravanNearGuildHall"); return true; }
-                    if (ctx.Known && (!ctx.HasCaravan || !ctx.NearGuildHall)) { reason = "Guild treasury requires a caravan near your Guild Hall."; return false; }
+                    if (ctx.Known && (!ctx.HasCaravan || !ctx.CaravanIsNearHall)) { reason = "Guild treasury requires a caravan near your Guild Hall."; return false; }
                     return true;
                 default: return true;   // Remote
             }
@@ -123,7 +126,7 @@ namespace KMHServerAddon.Features.Economy
             ServerLog.Warn($"Economy: {what} is set, but that physical system isn't implemented yet - treating treasury access as Remote until it ships. Use a different mode to enforce now.");
         }
 
-        // --- cooldowns (read then record-on-success, so a denied/failed action doesn't start the timer) ---
+        // Read here but recorded only on success, so a denied action never starts the timer.
 
         public static bool OnCooldown(string username, bool isWithdraw, out int remainingSec)
         {
@@ -152,9 +155,6 @@ namespace KMHServerAddon.Features.Economy
             }
         }
 
-        // --- silver caps (deposit/contribution) ---
-
-        // True (+reason) when crediting `add` to a `current` balance would exceed the configured cap.
         public static bool WouldExceedCap(bool isGuild, long current, long add, out string reason)
         {
             reason = null;
@@ -166,8 +166,7 @@ namespace KMHServerAddon.Features.Economy
             return true;
         }
 
-        // --- fees (silver only; a treasury service charge removed from circulation) ---
-
+        // A fee is destroyed rather than paid to anyone, which is what takes silver out of circulation.
         public static int DepositFeeOn(int amount)  => FeeOn(amount, Policy.DepositFeePct);
         public static int WithdrawFeeOn(int amount) => FeeOn(amount, Policy.WithdrawFeePct);
         private static int FeeOn(int amount, double pct)
@@ -177,8 +176,7 @@ namespace KMHServerAddon.Features.Economy
             return Math.Max(0, Math.Min(amount - 1, fee));   // never fee the whole amount away
         }
 
-        // --- audit: flag suspicious remote-treasury patterns (advisory logging only) ---
-
+        // Advisory logging only: nothing here ever denies an action.
         public static void Audit(string username, bool isWithdraw, bool isGuild, long amount)
         {
             if (string.IsNullOrEmpty(username)) return;
@@ -203,7 +201,6 @@ namespace KMHServerAddon.Features.Economy
                 ServerLog.Warn($"Economy audit: {username} made {count} treasury actions in 60s - possible deposit/withdraw loop.");
         }
 
-        // Short human description of the active policy (startup banner + audit report).
         public static string Describe()
         {
             EconomyPolicy p = Policy;

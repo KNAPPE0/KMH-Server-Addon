@@ -1,12 +1,9 @@
-using KMHServerAddon.Features.Economy;
+﻿using KMHServerAddon.Features.Economy;
 using KMHServerAddon.Features.Guilds.Dto;
 
 namespace KMHServerAddon.Features.Guilds
 {
-    // Server-authoritative Guild Hall rule checks. All rules are OFF by default, so standard servers never see
-    // any of these denials. Proximity (ctx.NearGuildHall) is client-computed against the server-owned hall tile+radius
-    // - best available, since the standalone server can't do world-tile math (documented caveat). A guild with NO hall
-    // is never blocked by proximity; the Require* flags are what force a hall to exist first.
+    // Proximity is client-computed because the standalone server cannot do world-tile maths of its own.
     internal static class GuildHallRules
     {
         private static bool HasHall(GuildSnapshot g) => g?.Hall != null && g.Hall.HasHall;
@@ -31,7 +28,7 @@ namespace KMHServerAddon.Features.Guilds
                 reason = "Your guild needs a Guild Hall before members can contribute - a leader must set one first.";
                 return false;
             }
-            if (cfg.RequireCaravanNearGuildHallForContribution && HasHall(g) && ctx.Known && !ctx.NearGuildHall)
+            if (cfg.RequireCaravanNearGuildHallForContribution && HasHall(g) && ctx.Known && !ctx.CaravanIsNearHall)
             {
                 reason = "Contributions require a caravan near your Guild Hall.";
                 return false;

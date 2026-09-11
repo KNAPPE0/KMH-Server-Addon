@@ -1,77 +1,107 @@
-using KMHServerAddon.Persistence;
+﻿using KMHServerAddon.Persistence;
 using Newtonsoft.Json;
 
 namespace KMHServerAddon.Features.Sites
 {
-    // Tunables for KMH custom sites, loaded from KMH-Data/Config/Sites.json and generated with defaults on first
-    // boot. Clamped on load so a hand-edited file can't break the economy. Reload via /kmh server reload-economy
     internal sealed class SitesConfig
     {
-        // Schema version for forward-compatible migrations (absent = 1). Changes so far are additive; this is the
-        // anchor a future field rename would key on.
         public int SchemaVersion { get; set; } = 1;
 
-        // Master switch - when false, build requests are rejected.
+        // Gates custom OUTPUT; AllowCustomArchetype below gates the Custom ARCHETYPE, which is a different thing.
         public bool AllowCustomSites { get; set; } = true;
 
-        // Build cost = max(500, marketValue * amount * this). Higher = pricier.
+        // Off withdraws existing segments from the snapshot too, or disabling it would leave roads orphaned on the shared map.
+        public bool AllowRoadworks { get; set; } = true;
+
+        // Demolishing refunds nothing, so a building is a sink and never stored value.
+        public int SiteBuildingCostSilver { get; set; } = 750;
+
+        // Nothing in KMH lowers stability on its own, so this only matters alongside an admin command or an extension.
+        public int SiteRepairCostPerPoint { get; set; } = 25;
+
+        // Lives here rather than in Frontier.json because the claim UI reads it from the site snapshot.
+        public int OutpostClaimWindowMinutes { get; set; } = 60;
+
+        // A GLOBAL scalar over every archetype despite the name; Custom's own 1.35 premium is applied separately.
         public double CustomSitePriceMultiplier { get; set; } = 3.0;
 
-        // Build cost also floored at amount * this (client can't fake amount). 0 = off.
         public double MinBuildCostPerUnit { get; set; } = 20.0;
 
-        // Cycle minutes added per amount/cycle, so big sites are paced by throughput. 0 = value-only.
         public double CycleMinutesPerRewardUnit { get; set; } = 1.5;
 
-        // Cap on items produced per cycle (anti-abuse on the chosen amount).
         public int CustomSiteMaxRewardAmount { get; set; } = 50;
 
-        // Global multiplier on worker cycle XP. 1.0 = default.
         public double WorkerXpMultiplier { get; set; } = 1.0;
 
-        // Poll cadence ONLY - how often the sweeper checks sites for a due payout. This is NOT the payout timer: each
-        // site's own EffectiveCycleMinutes (base cycle / worker speed) decides when it actually produces. Lowering
-        // this just checks more often; it does not make sites pay out faster.
-        public int RewardIntervalSeconds { get; set; } = 60;
-
-        // Restrict site outputs to simple generated resources (no quality/HP/comp state to lose). Off = legacy
-        // behavior (any def). Keep ON until full item-payload support ships.
-        public bool RestrictOutputsToSimpleResources { get; set; } = true;
-        // Extra defNames treated as simple resources beyond the built-in list (plain stackables only).
+        // Widens what counts as a simple resource; the output tiers below still decide what may actually be produced.
         public string[] ExtraSimpleResourceDefs { get; set; } = System.Array.Empty<string>();
 
-        // --- server-authoritative output tiers (server decides what a site can print, and how hard) ---
-        // Classify each output into a tier; the tier gates allow/block, amount cap, cost/cycle multipliers, and how
-        // much workers can scale speed vs output. Unknown/suspicious items default to Tier 4 (disabled) so a site can
-        // never become a dev-mode printer for gear/tech/drugs. See SiteOutputRules.
         public bool UseSiteOutputTiers       { get; set; } = true;
-        public int  DefaultUnknownOutputTier { get; set; } = 4;   // where auto-classify puts anything it doesn't recognize
-        public int  MaxAllowedSiteOutputTier { get; set; } = 3;   // tiers above this are blocked server-wide
-        // Owner is NOT a worker. Off by default so no fake account-worker is created; a site produces only once real
-        // pawns are assigned. A private/solo host can opt back in.
+
+        // Tier 4 is disabled, so anything unrecognised is refused rather than guessed into a producible tier.
+        public int  DefaultUnknownOutputTier { get; set; } = 4;
+        public int  MaxAllowedSiteOutputTier { get; set; } = 3;
+
+        // Off so no fake account-worker is created; a site produces only once real pawns are assigned.
         public bool AutoAddOwnerAsSiteWorker { get; set; } = false;
-        // New sites need a real pawn (caravan -> assign), not an account. Account-only joins are rejected; existing
-        // account workers load as legacy/disabled until a pawn replaces them.
+
+        // Existing account workers load as legacy/disabled rather than being dropped when this is on.
         public bool RequirePawnSiteWorkers   { get; set; } = true;
-        // Off by default: a complex/gear item can be produced ONLY if the owner exact-allowlists it (defName or label)
-        // AND flips this on. Keyword allowlists never bypass complex safety.
+
+        // A complex item also needs an exact owner allowlist entry, so keyword allowlists can never bypass this.
         public bool AllowExplicitComplexSiteOutputs { get; set; } = false;
         public SiteOutputTier[] OutputTiers  { get; set; } = SiteOutputTier.Defaults();
 
-        // How a cycle's output is shared. SplitTotal (default, safe): ONE pool split between owner+workers - production
-        // does NOT multiply by worker count. OwnerOnly: owner gets it all, workers earn XP only. PerWorkerCopy: legacy
-        // high-economy mode where every recipient gets a full copy (an output multiplier - off by default).
+        // SplitTotal shares one pool; PerWorkerCopy gives each recipient a full copy and so multiplies output.
         public string SiteRewardDistributionMode { get; set; } = "SplitTotal";
-        // Unsafe legacy escape hatch: only when UseSiteOutputTiers=false AND this is true will Sites fall back to the
-        // old all-def behavior. Loud startup + audit warnings. Normal players never see a generic all-def picker.
+
+        // Only reachable with UseSiteOutputTiers off, and restores the old unrestricted all-def behaviour.
         public bool AllowUnsafeLegacySiteOutputs { get; set; } = false;
 
-        // Anti-spam / economy caps (0 = unlimited).
+        // 0 = unlimited.
         public int MaxSitesPerPlayer      { get; set; } = 3;
         public int MaxSitesPerGuild       { get; set; } = 10;
         public int MaxSitesServerWide     { get; set; } = 200;
         public int MaxWorkerSitesPerPlayer { get; set; } = 5;
-        public int BuildCooldownMinutes   { get; set; } = 10;   // between a player's site builds
+        public int BuildCooldownMinutes   { get; set; } = 10;
+
+        // Off makes every site a Custom site at the Custom cost, which is how sites behaved before archetypes existed.
+        public bool ArchetypesEnabled { get; set; } = true;
+
+        // Gates the Custom ARCHETYPE; AllowCustomSites above gates custom OUTPUT.
+        public bool AllowCustomArchetype { get; set; } = true;
+
+        // "defName=family" corrections for content the classifier misreads; an unknown family is ignored, not applied.
+        public string[] OutputFamilyOverrides { get; set; } = System.Array.Empty<string>();
+
+        // Left empty deliberately, because guessing a family is what made everything fall back to Crafting.
+        public string UnknownOutputFamily { get; set; } = "";
+
+        // Resolved once per config load, or a few hundred entries would be re-parsed for every item in the catalog.
+        private System.Collections.Generic.Dictionary<string, string> _overrideMap;
+
+        public string FamilyOverrideFor(string defName)
+        {
+            if (string.IsNullOrWhiteSpace(defName)) return "";
+            if (_overrideMap == null) BuildOverrideMap();
+            return _overrideMap.TryGetValue(defName.Trim(), out string f) ? f : "";
+        }
+
+        private void BuildOverrideMap()
+        {
+            var map = new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase);
+            foreach (string raw in OutputFamilyOverrides ?? System.Array.Empty<string>())
+            {
+                if (string.IsNullOrWhiteSpace(raw)) continue;
+                int eq = raw.IndexOf('=');
+                if (eq <= 0 || eq >= raw.Length - 1) continue;
+                string def = raw.Substring(0, eq).Trim();
+                string fam = raw.Substring(eq + 1).Trim().ToLowerInvariant();
+                if (def.Length == 0 || !SiteOutputFamilies.IsKnown(fam)) continue;
+                map[def] = fam;
+            }
+            _overrideMap = map;
+        }
 
         private static SitesConfig _current;
         public static SitesConfig Current => _current ?? (_current = LoadOrDefault());
@@ -92,7 +122,8 @@ namespace KMHServerAddon.Features.Sites
 
         public static void Reload() => _current = LoadOrDefault();
 
-        private void Clamp()
+        // Internal rather than private so the self-test can prove a hand-edited file really is safe afterwards.
+        internal void Clamp()
         {
             if (CustomSitePriceMultiplier < 0.1) CustomSitePriceMultiplier = 0.1;
             if (CustomSitePriceMultiplier > 100) CustomSitePriceMultiplier = 100;
@@ -104,9 +135,11 @@ namespace KMHServerAddon.Features.Sites
             if (CustomSiteMaxRewardAmount > 10000) CustomSiteMaxRewardAmount = 10000;
             if (WorkerXpMultiplier < 0) WorkerXpMultiplier = 0;
             if (WorkerXpMultiplier > 100) WorkerXpMultiplier = 100;
-            if (RewardIntervalSeconds < 10) RewardIntervalSeconds = 10;
-            if (RewardIntervalSeconds > 3600) RewardIntervalSeconds = 3600;
             ExtraSimpleResourceDefs = ExtraSimpleResourceDefs ?? System.Array.Empty<string>();
+            OutputFamilyOverrides   = OutputFamilyOverrides   ?? System.Array.Empty<string>();
+            _overrideMap = null;   // a reloaded config must not keep the previous file's overrides
+            string uf = (UnknownOutputFamily ?? "").Trim().ToLowerInvariant();
+            UnknownOutputFamily = SiteOutputFamilies.IsKnown(uf) ? uf : "";
             if (MaxSitesPerPlayer < 0) MaxSitesPerPlayer = 0;
             if (MaxSitesPerGuild < 0) MaxSitesPerGuild = 0;
             if (MaxSitesServerWide < 0) MaxSitesServerWide = 0;
@@ -122,9 +155,13 @@ namespace KMHServerAddon.Features.Sites
                 : string.Equals(m, "PerWorkerCopy", System.StringComparison.OrdinalIgnoreCase) ? "PerWorkerCopy"
                 : "SplitTotal";
             if (OutputTiers == null || OutputTiers.Length < 4) OutputTiers = SiteOutputTier.Defaults();
-            foreach (SiteOutputTier t in OutputTiers)
+            SiteOutputTier[] tierDefaults = SiteOutputTier.Defaults();
+            for (int i = 0; i < OutputTiers.Length; i++)
             {
-                if (t == null) continue;
+                // A JSON null passes the length check above and would then throw the first time a tier is read.
+                if (OutputTiers[i] == null)
+                    OutputTiers[i] = i < tierDefaults.Length ? tierDefaults[i] : new SiteOutputTier();
+                SiteOutputTier t = OutputTiers[i];
                 if (t.MaxAmount < 1) t.MaxAmount = 1;
                 if (t.CostMultiplier < 0.01) t.CostMultiplier = 0.01;
                 if (t.CycleMultiplier < 0.01) t.CycleMultiplier = 0.01;

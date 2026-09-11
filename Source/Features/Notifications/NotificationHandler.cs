@@ -4,8 +4,7 @@ using KMHServerAddon.SubProtocol;
 
 namespace KMHServerAddon.Features.Notifications
 {
-    // Server -> client only: there's no inbound kind to register. On login the handshake calls DeliverQueuedTo,
-    // which drains the user's mailbox and pushes it as one batch for the client to render as letters.
+    // No Register(): this direction is server-to-client only, so there is no inbound kind to route.
     internal static class NotificationHandler
     {
         public static void DeliverQueuedTo(ServerClient client)
@@ -17,8 +16,7 @@ namespace KMHServerAddon.Features.Notifications
             List<NotificationDto> queued = NotificationStore.Drain(user);
             if (queued.Count == 0) return;
 
-            // Drain removed them from the mailbox - if the hand-off fails (client dropped mid-login), put them back
-            // so they're not silently lost.
+            // Drain already removed them, so a failed hand-off has to put them back or they are lost silently.
             if (!KmhRouter.SendTo(client, KmhProtocol.Kind.NotifyQueued, new NotificationBatch { Notifications = queued }))
             {
                 NotificationStore.Restore(user, queued);

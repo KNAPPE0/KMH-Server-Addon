@@ -1,19 +1,17 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using KMHServerAddon.Diagnostics;
+using SR = KMHServerAddon.Features.Transport.KmhApiServer.SendResult;
 
 namespace KMHServerAddon.SubProtocol
 {
-    // Server-side router for KMH sub-protocol traffic. Security: handlers must trust ServerClient.UserFile.Username as
-    // identity, never an envelope field - a client can fake KMH chat but only ever as themselves (no impersonation).
+    // A handler must take identity from ServerClient.UserFile.Username, never from an envelope field.
     public static class KmhRouter
     {
         private static readonly Dictionary<string, Action<ServerClient, KmhEnvelope>> Handlers
             = new Dictionary<string, Action<ServerClient, KmhEnvelope>>();
 
-        // Generous-but-bounded cap. KMH envelopes can carry feature payloads (treasury entries, marketplace
-        // listings) larger than the 512-char chat limit, but we still don't want a malicious or buggy client to
-        // push multi-MB envelopes through us
+        // Well above the 512-char chat limit a feature payload needs, but still short of a multi-MB envelope.
         public const int MaxEnvelopeBytes = 64 * 1024;
 
         public static void RegisterHandler(string kind, Action<ServerClient, KmhEnvelope> handler)
@@ -23,22 +21,17 @@ namespace KMHServerAddon.SubProtocol
                 ServerLog.Warn("RegisterHandler called with null/empty kind");
                 return;
             }
-            // Surface accidental clobbers. Core handlers each register a distinct kind exactly once at bootstrap,
-            // so a duplicate here means either a double-register bug or an extension reaching past the SDK guard -
-            // either way the admin should see it
+            // A duplicate means a double-register bug or an extension past the SDK guard, so the owner sees it.
             if (Handlers.ContainsKey(kind))
                 ServerLog.Warn($"Handler for kind '{kind}' is being overwritten - previous registration replaced");
             Handlers[kind] = handler;
             ServerLog.Verbose($"Registered handler '{kind}'");
         }
 
-        // True if a handler is already registered for this kind. Used by the SDK host to refuse extension
-        // registrations that would collide with a core kmh.* handler or with an earlier extension's kind
         public static bool IsRegistered(string kind)
             => !string.IsNullOrEmpty(kind) && Handlers.ContainsKey(kind);
 
-        // Called from the chat-intercept Harmony patch when an inbound message is identified as KMH protocol. Never
-        // throws - handler errors are caught and logged so a bad message can't take down the chat pipeline
+        // Never throws, or one bad message would take down the whole chat pipeline.
         public static void HandleInbound(ServerClient client, PKT_Chat pkt)
         {
             if (pkt == null || string.IsNullOrEmpty(pkt.Message)) return;
@@ -50,22 +43,102 @@ namespace KMHServerAddon.SubProtocol
                 return;
             }
 
-            KmhEnvelope env = KmhEnvelope.TryParse(pkt.Message);
+            KmhEnvelope parsed = KmhEnvelope.TryParse(pkt.Message);
+            if (parsed != null && KmhFragments.IsFragment(parsed.Kind)) { HandleInbound(client, parsed, overChat: true); return; }
+
+            KmhEnvelope env = parsed;
             if (env == null || string.IsNullOrEmpty(env.Kind))
             {
                 ServerLog.Warn($"Malformed envelope from {client?.GetData<UserFile>()?.Username ?? "?"}");
                 return;
             }
-            HandleInbound(client, env);
+            HandleInbound(client, env, overChat: true);
         }
 
-        // Dispatch a parsed envelope - shared by the chat path and the KMH API transport. Never throws.
-        public static void HandleInbound(ServerClient client, KmhEnvelope env)
+        // KmhRateWindow is not self-synchronizing, so both windows are locked.
+        public const int MaxInboundPerWindow  = 120;
+        public const int InboundWindowSeconds = 10;
+        private static readonly object _inboundLock = new object();
+        private static readonly Util.KmhRateWindow _inbound    = new Util.KmhRateWindow();
+        private static readonly Util.KmhRateWindow _floodLog   = new Util.KmhRateWindow();
+
+        // Named and pinned by a test, because a third exemption would hand a client an uncapped channel.
+        internal static bool CountsTowardInboundCap(string kind)
+            => !string.IsNullOrEmpty(kind)
+            && kind != KmhProtocol.Kind.Ping
+            && kind != KmhProtocol.Kind.HelloAck;
+
+        // The exempt kinds still answer, so they need a cap of their own - sized well clear of the client's 15s heartbeat: a ceiling on abuse, not a schedule.
+        public const int MaxHandshakePerWindow  = 12;
+        public const int HandshakeWindowSeconds = 60;
+        private static readonly Util.KmhRateWindow _handshake = new Util.KmhRateWindow();
+
+        private static bool AllowHandshake(ServerClient client)
+        {
+            string who = client?.GetData<UserFile>()?.Username;
+            if (string.IsNullOrEmpty(who)) return true;   // pre-auth traffic is already gated above
+            lock (_inboundLock)
+                return _handshake.Allow(who, DateTime.UtcNow.Ticks, MaxHandshakePerWindow, HandshakeWindowSeconds);
+        }
+
+        private static bool AllowInbound(ServerClient client)
+        {
+            string who = client?.GetData<UserFile>()?.Username;
+            if (string.IsNullOrEmpty(who)) return true;   // pre-auth traffic is already gated above
+            long now = DateTime.UtcNow.Ticks;
+            lock (_inboundLock)
+            {
+                if (_inbound.Allow(who, now, MaxInboundPerWindow, InboundWindowSeconds)) return true;
+                if (_floodLog.Allow(who, now, 1, 30))
+                    ServerLog.Warn($"Inbound flood from {who}: over {MaxInboundPerWindow} msgs/{InboundWindowSeconds}s - dropping until it settles.");
+            }
+            return false;
+        }
+
+        // One per session, so no other connection can consume this one's budget or hand it a half-assembled envelope.
+        private static readonly Dictionary<ServerClient, KmhFragments.Assembler> _assemblers =
+            new Dictionary<ServerClient, KmhFragments.Assembler>();
+
+        public static void ForgetPeer(ServerClient client)
+        {
+            if (client == null) return;
+            lock (_assemblers) _assemblers.Remove(client);
+        }
+
+        // Reference identity against RWT's live set - the only thing that separates a session from its successor under the same username.
+        public static bool IsLive(ServerClient client)
+            => client != null && client.IsVerified && Network.ServerClients.ContainsKey(client);
+
+        public static void HandleInbound(ServerClient client, KmhEnvelope env) => HandleInbound(client, env, overChat: false);
+
+        public static void HandleInbound(ServerClient client, KmhEnvelope env, bool overChat)
         {
             if (env == null || string.IsNullOrEmpty(env.Kind)) return;
 
-            // Protocol enforcement: before a compatible handshake only ack + ping pass; all feature/economy traffic is
-            // dropped, so a wrong-version or modified client that ignores its own gate still can't half-use v1.2.0 flows.
+            // Enforced on arrival: a modified client that ignores the advertised policy must not run the economy over chat anyway.
+            if (overChat && !ChatMayCarry(env.Kind))
+            {
+                ServerLog.Verbose($"Blocked '{env.Kind}' from {client?.GetData<UserFile>()?.Username ?? "?"} - feature traffic over RWT chat is off on this server.");
+                return;
+            }
+
+            // Counted as one logical message, or a large legitimate transfer would trip the flood cap.
+            if (KmhFragments.IsFragment(env.Kind))
+            {
+                if (client == null) return;
+                KmhFragments.Assembler asm;
+                lock (_assemblers)
+                {
+                    if (!_assemblers.TryGetValue(client, out asm))
+                        _assemblers[client] = asm = new KmhFragments.Assembler();
+                }
+                KmhEnvelope whole = asm.Accept(env, out string why);
+                if (why != null) ServerLog.Warn($"Transport: dropped fragment from {client.GetData<UserFile>()?.Username ?? "?"} - {why}");
+                if (whole != null) HandleInbound(client, whole, overChat);
+                return;
+            }
+
+            // Enforced server-side, so a modified client that ignores its own version gate still cannot proceed.
             if (env.Kind != KmhProtocol.Kind.HelloAck && env.Kind != KmhProtocol.Kind.Ping
                 && !KmhHandshakeHandler.IsCompatible(client))
             {
@@ -73,12 +146,33 @@ namespace KMHServerAddon.SubProtocol
                 return;
             }
 
-            // Owner feature switches: drop a disabled feature's requests. The client is told at handshake and shows it
-            // as disabled, so a normal client won't reach here; this is the server-side block behind that.
+            // Dropped silently, since every request rebuilds a whole snapshot and the client's next refresh recovers.
+            if (CountsTowardInboundCap(env.Kind))
+            {
+                if (!AllowInbound(client)) return;
+            }
+            else if (!AllowHandshake(client)) return;
+
+            // The server-side block behind the disabled state the client already shows.
             string feature = Features.FeaturesConfig.FeatureForKind(env.Kind);
             if (feature != null && !Features.FeaturesConfig.Current.IsEnabled(feature))
             {
                 ServerLog.Verbose($"Blocked '{env.Kind}' - {feature} disabled by server config");
+                return;
+            }
+
+            // Mutations only, reads still pass: handlers are registered before their stores load, and files rewritten underneath the economy must not be crossed.
+            bool mutation = Maintenance.KmhMaintenanceGate.WouldBlock(env.Kind);
+            if (mutation && !Maintenance.KmhReadiness.IsReady)
+            {
+                ServerLog.Verbose($"Blocked '{env.Kind}' - {Maintenance.KmhReadiness.Describe()}");
+                Notify(client, "negative", Results.KmhErrorText.SafeMessage(Results.KmhErrorCode.InvalidState));
+                return;
+            }
+            if (Maintenance.KmhMaintenanceGate.ShouldBlock(env.Kind))
+            {
+                ServerLog.Verbose($"Blocked '{env.Kind}' - {Maintenance.KmhMaintenanceGate.Describe()}");
+                Notify(client, "negative", Results.KmhErrorText.SafeMessage(Results.KmhErrorCode.InvalidState));
                 return;
             }
 
@@ -88,7 +182,6 @@ namespace KMHServerAddon.SubProtocol
                 return;
             }
 
-            // Note the client is active in this feature, so BroadcastToInterested pushes updates only to viewers.
             KmhInterest.Touch(client?.GetData<UserFile>()?.Username, env.Kind);
 
             try
@@ -99,10 +192,15 @@ namespace KMHServerAddon.SubProtocol
             {
                 ServerLog.Error($"Handler '{env.Kind}' threw", ex);
             }
+            finally
+            {
+                // Sent from here rather than per handler: a client that never hears this cannot tell a deliberate repeat from a retry.
+                if (!string.IsNullOrEmpty(env.OpId))
+                    SendTo(client, KmhProtocol.Kind.OpResult, new { op = env.OpId });
+            }
         }
 
-        // Rate-limited pre-handshake drop accounting: count per user, log ONE compact line per 10s window instead of
-        // a wall of per-packet warnings (a briefly-racing client can burst dozens of early packets).
+        // One line per window, because a briefly-racing client can burst dozens of early packets.
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (int Count, long WindowTicks)> _earlyDrops
             = new System.Collections.Concurrent.ConcurrentDictionary<string, (int, long)>(StringComparer.OrdinalIgnoreCase);
         private static void NoteEarlyDrop(string username)
@@ -116,9 +214,49 @@ namespace KMHServerAddon.SubProtocol
             }
         }
 
-        // Send a typed message to a specific client. Use for replies and per-client pushes (kmh.hello, snapshot
-        // pushes, etc.)
+        // The handshake always rides chat - it is how a client discovers the API at all; AllowChatTransportFallback governs FEATURE traffic only.
+        internal static bool IsTransportControlKind(string kind)
+            => kind == KmhProtocol.Kind.Hello || kind == KmhProtocol.Kind.HelloAck
+            || kind == KmhProtocol.Kind.Ping  || kind == KmhProtocol.Kind.Pong;
+
+        internal static bool ChatMayCarry(string kind)
+            => IsTransportControlKind(kind) || Features.Transport.TransportConfig.Current.AllowChatTransportFallback;
+
         public static bool SendTo(ServerClient client, string kind, object data)
+            => SendPrepared(client, kind, new Prepared(new KmhEnvelope(kind, data)));
+
+        // One payload bound for many clients: serializing, encoding and framing happen here once, not once per client.
+        private sealed class Prepared
+        {
+            internal Prepared(KmhEnvelope env) { Env = env; }
+            internal readonly KmhEnvelope Env;
+            internal string Wire;                                  // only a chat fallback or a fragment cut needs the string
+            internal Features.Transport.KmhApiServer.Framed Frame; // the API path's encoded frame
+            internal bool   FrameTried;                            // a payload that will not serialize must not be retried per client
+            internal int    SplitLimit;                            // the frame budget Parts were cut to; 0 = nothing cut yet
+            internal List<Features.Transport.KmhApiServer.Framed> Parts;
+
+            internal string WireOnce() => Wire ?? (Wire = Env.Serialize());
+
+            internal Features.Transport.KmhApiServer.Framed FrameOnce()
+            {
+                if (!FrameTried) { FrameTried = true; Frame = Features.Transport.KmhApiServer.Encode(Env); }
+                return Frame;
+            }
+
+            // Peers negotiate the same budget in practice, so the cut is reused; a different one re-cuts and replaces it.
+            internal List<Features.Transport.KmhApiServer.Framed> PartsFor(string kind, int limit)
+            {
+                if (Parts != null && SplitLimit == limit) return Parts;
+                List<KmhEnvelope> cut = KmhFragments.Split(kind, WireOnce(), limit);
+                if (cut == null) return null;
+                Parts      = Features.Transport.KmhApiServer.EncodeAll(cut);
+                SplitLimit = Parts == null ? 0 : limit;
+                return Parts;
+            }
+        }
+
+        private static bool SendPrepared(ServerClient client, string kind, Prepared prep)
         {
             if (client?.Listener == null)
             {
@@ -128,21 +266,71 @@ namespace KMHServerAddon.SubProtocol
 
             try
             {
-                KmhEnvelope env = new KmhEnvelope(kind, data);
+                string user = client.GetData<UserFile>()?.Username;
 
-                // prefer the API transport if this client is on it; else chat
-                if (Features.Transport.KmhApiServer.TrySend(client.GetData<UserFile>()?.Username, env))
+                // Connection first, THEN encode: a peer on the chat fallback must not pay to build API bytes.
+                SR api = SR.NotConnected;
+                if (Features.Transport.KmhApiServer.IsConnected(client))
+                {
+                    Features.Transport.KmhApiServer.Framed framed = prep.FrameOnce();
+                    api = framed == null ? SR.SerializationFailure
+                                         : Features.Transport.KmhApiServer.Send(client, framed);
+                }
+                if (api == SR.Sent) return true;
+
+                // Fragmenting is what lets a feature outgrow the frame ceiling without inventing its own chunking.
+                if (api == SR.TooLarge)
+                {
+                    if (!Features.Transport.KmhApiServer.PeerSupportsFragments(client))
+                    {
+                        ServerLog.Warn($"Transport: '{kind}' is too large for {user}, whose client cannot reassemble fragments - update the client.");
+                        return false;
+                    }
+                    var parts = prep.PartsFor(kind, Features.Transport.KmhApiServer.SafeFrameBytesFor(client));
+                    if (parts == null) return false;
+                    api = Features.Transport.KmhApiServer.SendFragments(client, parts);
+                    if (api == SR.Sent)
+                    {
+                        ServerLog.Verbose($"Transport: '{kind}' to {user} sent as {parts.Count} fragment(s), {prep.Wire.Length} logical bytes.");
+                        return true;
+                    }
+                }
+
+                // A write that threw may still have reached the peer, so nothing is retried: snapshots return on the next refresh, and owed value is recovered by its own record.
+                if (api != SR.NotConnected)
+                {
+                    ServerLog.Verbose($"Transport: '{kind}' to {user} failed mid-write ({api}) - not resent over chat, since the peer may already have it.");
+                    return false;
+                }
+
+                if (!ChatMayCarry(kind))
+                {
+                    ServerLog.Verbose($"Transport: '{kind}' to {user} dropped - the API link is down and this server does not allow feature traffic over RWT chat.");
+                    return false;
+                }
+
+                string wire = prep.WireOnce();
+                // The chat fallback carries the same ceiling, so an oversized envelope must not go there either.
+                if (wire.Length > MaxEnvelopeBytes)
+                {
+                    List<KmhEnvelope> chatParts = KmhFragments.Split(kind, wire, MaxEnvelopeBytes);
+                    if (chatParts == null) return false;
+                    foreach (KmhEnvelope part in chatParts)
+                    {
+                        client.Listener.EnqueuePacket(RwtCompat.ChatHeader, new PKT_Chat
+                        { Username = KmhProtocol.SystemUsername, Message = part.Serialize(), IsCommand = false });
+                    }
+                    ServerLog.Verbose($"Transport: '{kind}' to {user} sent as {chatParts.Count} chat fragment(s).");
                     return true;
-
+                }
                 PKT_Chat pkt = new PKT_Chat
                 {
                     Username  = KmhProtocol.SystemUsername,
-                    Message   = env.Serialize(),
+                    Message   = wire,
                     IsCommand = false,
                 };
 
-                // Guard serialize + enqueue: a client dropping mid-send (or a payload that won't serialize) must
-                // surface as a failed SendTo, not an exception escaping into a broadcast loop or sweeper
+                // A client dropping mid-send must fail this call, not throw out into a broadcast loop.
                 client.Listener.EnqueuePacket(RwtCompat.ChatHeader, pkt);
                 return true;
             }
@@ -153,36 +341,66 @@ namespace KMHServerAddon.SubProtocol
             }
         }
 
-        // Push a per-caller snapshot only to verified clients currently interested in this kind's feature (they have
-        // its dialog open and polling). Replaces broadcast-to-everyone on mutation: same instant update for viewers,
-        // no wasted packets or client-side deserialization for the rest. buildFor returns each recipient's payload.
-        public static void BroadcastToInterested(string kind, Func<string, object> buildFor)
+        // For state the player sees without opening a KMH window, where interest gating leaves the map stale.
+        public static void BroadcastToVerified(string kind, Func<string, object> buildFor)
         {
             if (buildFor == null) return;
             foreach (ServerClient c in Network.ServerClients.Keys)
             {
                 if (c?.IsVerified != true) continue;
                 string u = c.GetData<UserFile>()?.Username;
-                if (string.IsNullOrEmpty(u) || !KmhInterest.IsInterested(u, kind)) continue;
+                if (string.IsNullOrEmpty(u)) continue;
                 SendTo(c, kind, buildFor(u));
             }
         }
 
-        // Transient toast to a client. level is positive / negative / neutral.
+        // Only clients with the feature open, so a mutation costs no packets for everyone else.
+        public static void BroadcastToInterested(string kind, Func<string, object> buildFor)
+        {
+            BroadcastToInterested(kind, null, buildFor);
+        }
+
+        // A shared key promises identical bytes, so the payload is built once per key; null falls back to reference equality.
+        public static void BroadcastToInterested(string kind, Func<string, string> shareKey, Func<string, object> buildFor)
+        {
+            if (buildFor == null) return;
+
+            object lastData = null; Prepared last = null; string lastKey = null;
+
+            foreach (ServerClient c in Network.ServerClients.Keys)
+            {
+                if (c?.IsVerified != true) continue;
+                string u = c.GetData<UserFile>()?.Username;
+                if (string.IsNullOrEmpty(u) || !KmhInterest.IsInterested(u, kind)) continue;
+
+                string key = shareKey?.Invoke(u);
+                bool reuse = last != null && key != null && key == lastKey;
+                if (!reuse)
+                {
+                    object data = buildFor(u);
+                    // A new payload object needs its own encoding; the same one back again reuses everything.
+                    if (last == null || !ReferenceEquals(data, lastData))
+                    {
+                        lastData = data;
+                        last     = new Prepared(new KmhEnvelope(kind, data));
+                    }
+                    lastKey = key;
+                }
+                SendPrepared(c, kind, last);
+            }
+        }
+
+        // level is positive, negative or neutral.
         public static void Notify(ServerClient client, string level, string text)
             => SendTo(client, KmhProtocol.Kind.Notice, new { level, text });
 
-        // Look up a verified connected client by username and send to them. Returns false silently if the named
-        // player isn't currently online (most-common case for "tell the other party about a state change they
-        // didn't initiate" - they'll catch up on the patch mod's 8s auto-refresh tick if they reconnect
-        // mid-session)
+        // False when offline, which is ordinary: they catch up on the client's next refresh.
         public static bool SendToUsername(string username, string kind, object data)
         {
             ServerClient c = ResolveClient(username);
             return c != null && SendTo(c, kind, data);
         }
 
-        // verified online client by username, or null. Used by SendToUsername and the KMH API transport.
         public static ServerClient ResolveClient(string username)
         {
             if (string.IsNullOrEmpty(username)) return null;

@@ -1,33 +1,29 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using KMHServerAddon.Diagnostics;
 using KMHServerAddon.Persistence;
 
 namespace KMHServerAddon.Features.ItemLabels
 {
-    // Headless server's defName -> label cache, union of clients' catalogs (persisted). Security: labels are UI-only
-    // (last-writer-wins, vary by mod/language); defName is the security key and values are first-seen-wins (anti-poison).
+    // defName is the security key; a label is UI-only and may vary by mod or language.
     internal static class ItemLabelCache
     {
         private static readonly object _lock = new object();
         private static Dictionary<string, string> _labels
             = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-        // defName -> RimWorld BaseMarketValue, contributed by clients (the live game economy). Lets the World Engine
-        // value-scale quest rewards to what the requested goods are actually worth. FIRST-SEEN WINS (see ApplyValues):
-        // once a value is recorded it isn't overwritten by a later client, so one modified client can't poison the
-        // trusted value used for Site pricing.
+        // First-seen wins and is never overwritten, so one modified client cannot poison the value Site pricing trusts.
         private static Dictionary<string, long> _values
             = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
         private static readonly HashSet<string> _valueDivergenceWarned = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        // Client-vouched fungible defs (plain stackable food/resources; patch-side KmhThingCapture.IsFungible). Used
-        // ONLY to consolidate legacy treasury payloads that predate the per-payload mergeable flag. Additive, persisted.
+        // Never changed by a client push, which is what makes a poisoned first-seen value fixable.
+        private static HashSet<string> _ownerPinned = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // Used only to consolidate legacy payloads that predate the per-payload mergeable flag.
         private static HashSet<string> _fungible = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        // Merge an incoming label set into the cache. Last-writer-wins on collisions - newest contributor's
-        // spelling/case wins. Saves to disk only if at least one entry was new (cheap dirty check avoids spamming
-        // the file on identical re-pushes from the same client across reconnects)
+        // Saved only when something was new, or an identical re-push on every reconnect would rewrite the file.
         public static void Apply(Dictionary<string, string> incoming)
         {
             if (incoming == null || incoming.Count == 0) return;
@@ -62,6 +58,7 @@ namespace KMHServerAddon.Features.ItemLabels
                 foreach (KeyValuePair<string, long> kv in incoming)
                 {
                     if (string.IsNullOrEmpty(kv.Key) || kv.Value <= 0) continue;
+                    if (_ownerPinned.Contains(kv.Key)) continue;   // owner set this by hand - client can't change it
                     if (!_values.TryGetValue(kv.Key, out long existing))
                     {
                         _values[kv.Key] = kv.Value;   // first-seen wins - this becomes the trusted baseline
@@ -69,8 +66,7 @@ namespace KMHServerAddon.Features.ItemLabels
                     }
                     else if (existing != kv.Value)
                     {
-                        // A later client reported a DIFFERENT value. Keep the trusted baseline (anti-poison); flag a
-                        // large divergence once per def so an owner can spot a modified client skewing values.
+                        // The baseline is kept, and a large divergence is flagged once so an owner can spot a modified client.
                         double ratio = existing > 0 ? (double)kv.Value / existing : 0;
                         if ((ratio > 1.5 || ratio < 0.5) && _valueDivergenceWarned.Add(kv.Key))
                         {
@@ -87,8 +83,27 @@ namespace KMHServerAddon.Features.ItemLabels
             }
         }
 
-        // Record client-vouched fungible defNames. Returns true if any were newly added, so the caller can run a
-        // one-time treasury compaction. Persisted so the set survives restarts even before a client re-pushes.
+        // A value of 0 or less unpins and reverts the def to whatever clients vouched for it.
+        public static void OwnerSetValue(string defName, long value)
+        {
+            if (string.IsNullOrEmpty(defName)) return;
+            lock (_lock)
+            {
+                if (value > 0) { _values[defName] = value; _ownerPinned.Add(defName); }
+                else           { _ownerPinned.Remove(defName); }   // unpin; keep whatever value is there
+            }
+            SaveToDisk();
+        }
+
+        // (value, pinned) for owner inspection; value 0 means unknown.
+        public static (long value, bool pinned) ValueInfo(string defName)
+        {
+            if (string.IsNullOrEmpty(defName)) return (0, false);
+            lock (_lock)
+                return (_values.TryGetValue(defName, out long v) ? v : 0, _ownerPinned.Contains(defName));
+        }
+
+        // True only when something was newly added, so the caller runs its treasury compaction once rather than every push.
         public static bool MarkFungible(IEnumerable<string> defNames)
         {
             if (defNames == null) return false;
@@ -118,8 +133,7 @@ namespace KMHServerAddon.Features.ItemLabels
                 return _values.TryGetValue(defName, out long v) ? v : 0;
         }
 
-        // Returns the label for a defName, or the defName itself when unknown. Same fallback behavior as the
-        // patch-side ItemLabels helper - the player always sees *something* readable
+        // Falls back to the defName, matching the patch side, so a player always sees something readable.
         public static string LabelFor(string defName)
         {
             if (string.IsNullOrEmpty(defName)) return "?";
@@ -145,16 +159,14 @@ namespace KMHServerAddon.Features.ItemLabels
             return q.Length > 0 ? $"{q} {baseLabel}" : baseLabel;
         }
 
-        // Friendly-name -> defName for Discord input. Unambiguous -> defName; multiple matches -> null + candidates.
-        // Tries exact label, exact defName, then substring on each.
+        // Returns null plus candidates when ambiguous, so a Discord command never guesses which item was meant.
         public static string ResolveDefNameByQuery(string query, out List<string> candidates)
         {
             candidates = null;
             if (string.IsNullOrWhiteSpace(query)) return null;
             string q = query.Trim();
 
-            // Single O(N) pass into priority buckets (hot path with thousands of labels); short-circuits on a lone
-            // exact match.
+            // One pass into priority buckets, because this runs over thousands of labels.
             List<string> exactLabel = null;
             string       exactDef   = null;
             List<string> labelHits  = null;
@@ -185,8 +197,7 @@ namespace KMHServerAddon.Features.ItemLabels
                         exactDef = defName;
                     }
 
-                    // Priority 3 + 4: substring buckets, capped to avoid unbounded allocations during fuzzy
-                    // matches
+                    // Capped, or a one-letter query would allocate a bucket the size of the whole catalog.
                     if (labelHits == null || labelHits.Count < CandidateCap)
                     {
                         if (label.IndexOf(q, StringComparison.OrdinalIgnoreCase) >= 0)
@@ -207,23 +218,19 @@ namespace KMHServerAddon.Features.ItemLabels
                 }
             }
 
-            // Priority 1 wins outright.
             if (exactLabel != null)
             {
                 if (exactLabel.Count == 1) return exactLabel[0];
                 candidates = exactLabel;
                 return null;
             }
-            // Priority 2.
             if (exactDef != null) return exactDef;
-            // Priority 3.
             if (labelHits != null)
             {
                 if (labelHits.Count == 1) return labelHits[0];
                 candidates = labelHits;
                 return null;
             }
-            // Priority 4.
             if (defHits != null)
             {
                 if (defHits.Count == 1) return defHits[0];
@@ -274,9 +281,7 @@ namespace KMHServerAddon.Features.ItemLabels
             return pool[rng.Next(pool.Count)];
         }
 
-        // Returns up to `max` entries sorted alphabetically by defName, optionally filtered to entries whose
-        // defName OR label contains `query` (case-insensitive, empty query = no filter). Used by !kmh-items /
-        // !kmh-catalog for discovery without exposing the raw underlying dictionary
+        // Copies out, so a Discord command cannot hold or mutate the live dictionary.
         public static List<KeyValuePair<string, string>> Sample(string query, int max)
         {
             List<KeyValuePair<string, string>> result = new List<KeyValuePair<string, string>>();
@@ -301,7 +306,6 @@ namespace KMHServerAddon.Features.ItemLabels
             return result;
         }
 
-        // --- persistence ---
 
         public static void LoadFromDisk()
         {
@@ -314,6 +318,8 @@ namespace KMHServerAddon.Features.ItemLabels
                         _values = new Dictionary<string, long>(state.Values, StringComparer.OrdinalIgnoreCase);
                     if (state.Fungible != null)
                         _fungible = new HashSet<string>(state.Fungible, StringComparer.OrdinalIgnoreCase);
+                    if (state.Pinned != null)
+                        _ownerPinned = new HashSet<string>(state.Pinned, StringComparer.OrdinalIgnoreCase);
                 }
                 ServerLog.Info($"ItemLabels: loaded {state.Labels.Count} label(s), {state.Values?.Count ?? 0} value(s) from disk");
             }
@@ -327,6 +333,7 @@ namespace KMHServerAddon.Features.ItemLabels
                 state.Labels = new Dictionary<string, string>(_labels, StringComparer.OrdinalIgnoreCase);
                 state.Values = new Dictionary<string, long>(_values, StringComparer.OrdinalIgnoreCase);
                 state.Fungible = new List<string>(_fungible);
+                state.Pinned = new List<string>(_ownerPinned);
             }
             JsonFileStore.Save(KmhDataPaths.ItemLabelsFile, state);
         }
@@ -336,6 +343,7 @@ namespace KMHServerAddon.Features.ItemLabels
             public Dictionary<string, string> Labels   { get; set; } = new Dictionary<string, string>();
             public Dictionary<string, long>   Values   { get; set; } = new Dictionary<string, long>();
             public List<string>               Fungible { get; set; } = new List<string>();
+            public List<string>               Pinned   { get; set; } = new List<string>();
         }
     }
 }

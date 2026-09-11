@@ -1,16 +1,13 @@
-using KMHServerAddon.Diagnostics;
+﻿using KMHServerAddon.Diagnostics;
 using KMHServerAddon.Features.Treasury.Dto;
 using KMHServerAddon.SubProtocol;
 
 namespace KMHServerAddon.Features.Treasury
 {
-    // Server-side handler for kmh.treasury.* (counterpart to the client's TreasuryHandler). Flow: request -> send the
-    // caller's vault snapshot; deposit/withdraw silver|item -> adjust the ledger (if sufficient), log the tx, broadcast.
-    // Deposits are per-tx capped (EconomyConfig) as an anti-mint guard on the client-trusted amount.
+    // A deposit amount is client-asserted, so the per-transaction cap applies whatever the access mode says.
     internal static class TreasuryHandler
     {
-        // Grace before a full reconcile will revert an unlisted pending deposit (guards a just-made-but-not-yet-saved
-        // deposit from being wrongly reverted on the reconnect that races it).
+        // Guards a just-made deposit against the reconnect that races its first save.
         private const int ReconcileGraceSeconds = 120;
 
         public static void Register()
@@ -25,9 +22,15 @@ namespace KMHServerAddon.Features.Treasury
             KmhRouter.RegisterHandler(KmhProtocol.Kind.TreasuryDepositPreflight, OnDepositPreflight);
         }
 
-        // Preflight: approve a deposit (read-only cap/access/cooldown/vault/safety) BEFORE the client removes goods, then
-        // mint a short-lived token it echoes on the real deposit (which skips re-checking). A rejection removes nothing.
-        private struct PreApproval { public string User, Kind, ItemDefName; public long Amount; public int Qty; public long ExpiryTicks; }
+        // Owner is the exact session, not the username: a token waives the cooldown and the per-deposit cap, so a reconnect must not spend it.
+        private struct PreApproval
+        {
+            public string User, Kind, ItemDefName;
+            public long   Amount;
+            public int    Qty;
+            public long   ExpiryTicks;
+            public ServerClient Owner;
+        }
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, PreApproval> _preflight
             = new System.Collections.Concurrent.ConcurrentDictionary<string, PreApproval>();
         private const int PreflightTtlSeconds = 30;
@@ -48,7 +51,7 @@ namespace KMHServerAddon.Features.Treasury
             {
                 string token = System.Guid.NewGuid().ToString("N");
                 _preflight[token] = new PreApproval { User = username, Kind = kind, Amount = amount, ItemDefName = itemDef, Qty = qty,
-                    ExpiryTicks = DateTime.UtcNow.Ticks + TimeSpan.FromSeconds(PreflightTtlSeconds).Ticks };
+                    ExpiryTicks = DateTime.UtcNow.Ticks + TimeSpan.FromSeconds(PreflightTtlSeconds).Ticks, Owner = client };
                 ReapPreflight();
                 KmhRouter.SendTo(client, KmhProtocol.Kind.TreasuryDepositApproval, new { req_id = reqId, ok = true, token, ttl = PreflightTtlSeconds });
             }
@@ -56,12 +59,16 @@ namespace KMHServerAddon.Features.Treasury
             else KmhRouter.SendTo(client, KmhProtocol.Kind.TreasuryDepositApproval, new { req_id = reqId, ok = false, reason = reason ?? "Deposit not allowed right now.", needs_payload = needsPayload });
         }
 
-        // Read-only version of the deposit rejectable rules (cap, access, cooldown, vault cap, compact-item safety).
+        // Read-only, so a preflight can answer without moving anything.
         private static bool CheckDepositAllowed(string username, bool isItem, long silver, string itemDef, int qty, bool isPayload, KmhEnvelope env, out string reason, out bool needsPayload)
         {
             reason = null;
             needsPayload = false;
             var cfg = Features.Economy.EconomyConfig.Current;
+
+            // Refused before the client removes anything, or parking the goods in recovery duplicates what it still holds.
+            if (TooManyUnconfirmed(username, out string backlog)) { reason = backlog; return false; }
+
             if (!isItem)
             {
                 long cap = cfg.MaxSilverDepositPerTx;
@@ -84,11 +91,27 @@ namespace KMHServerAddon.Features.Treasury
             return true;
         }
 
-        // Consume a preflight token that exactly matches this deposit (user + kind + amount/def/qty) and is unexpired.
-        private static bool TryConsumePreflight(string username, string kind, long amount, string itemDef, int qty, string token)
+        // Test seam: an approval waives the cooldown and the per-deposit cap, so prove who may spend one.
+        internal static string IssuePreflightForTest(ServerClient client, string user, string kind, long amount, string itemDef, int qty)
+        {
+            string token = System.Guid.NewGuid().ToString("N");
+            _preflight[token] = new PreApproval { User = user, Kind = kind, Amount = amount, ItemDefName = itemDef, Qty = qty,
+                ExpiryTicks = DateTime.UtcNow.Ticks + TimeSpan.FromSeconds(PreflightTtlSeconds).Ticks, Owner = client };
+            return token;
+        }
+
+        internal static bool ConsumePreflightForTest(ServerClient client, string user, string kind, long amount, string itemDef, int qty, string token)
+            => TryConsumePreflight(client, user, kind, amount, itemDef, qty, token);
+
+        internal static int OutstandingPreflightForTest => _preflight.Count;
+        internal static void ReapPreflightForTest() => ReapPreflight();
+
+        private static bool TryConsumePreflight(ServerClient client, string username, string kind, long amount, string itemDef, int qty, string token)
         {
             if (string.IsNullOrEmpty(token) || !_preflight.TryRemove(token, out PreApproval a)) return false;
             if (a.ExpiryTicks < DateTime.UtcNow.Ticks) return false;
+            // The session that was approved, not merely the name on it.
+            if (!ReferenceEquals(a.Owner, client)) return false;
             return string.Equals(a.User, username, StringComparison.OrdinalIgnoreCase) && a.Kind == kind
                 && a.Amount == amount && a.Qty == qty
                 && string.Equals(a.ItemDefName ?? "", itemDef ?? "", StringComparison.OrdinalIgnoreCase);
@@ -98,15 +121,30 @@ namespace KMHServerAddon.Features.Treasury
         {
             long now = DateTime.UtcNow.Ticks;
             foreach (var kv in _preflight)
-                if (kv.Value.ExpiryTicks < now) _preflight.TryRemove(kv.Key, out _);
+                // Dropped with the session too, so an approval never outlives the connection it was given to.
+                if (kv.Value.ExpiryTicks < now || !KmhRouter.IsLive(kv.Value.Owner)) _preflight.TryRemove(kv.Key, out _);
         }
 
-        // Client reports these deposit txns are now durably saved locally -> commit them (make spendable).
+        // Only reconcile acts on a true result; the confirm path has no complete durable set to compare against.
+        private static bool NoteSaveGeneration(string username, KmhEnvelope env, string source)
+        {
+            long gen = env?.GetLong("epoch", 0) ?? 0;
+            if (gen <= 0) return false;                       // client doesn't report one - never treated as a rollback
+            long seen = TreasuryStore.NoteSaveGeneration(username, gen);
+            if (!TreasuryStore.SaveGenerationWentBackwards(seen, gen)) return false;
+            // A generation counts saves of one file, so a different colony reports a low number without any rollback.
+            ServerLog.Error($"Treasury: {username} reported save generation {gen} after trusted generation {seen} on {source} - " +
+                            $"possible rollback or a different save. Backwards state was NOT accepted (still trusting {seen}). " +
+                            $"Review with 'kmh audit-player {username}'.");
+            return true;
+        }
+
         private static void OnDepositConfirm(ServerClient client, KmhEnvelope env)
         {
             string username = client?.GetData<UserFile>()?.Username;
             if (string.IsNullOrEmpty(username)) return;
             System.Collections.Generic.List<string> ids = env?.GetStringList("txn_ids");
+            NoteSaveGeneration(username, env, "confirm");
             int committed = TreasuryStore.ConfirmDeposits(username, ids);
             if (committed > 0)
             {
@@ -115,17 +153,25 @@ namespace KMHServerAddon.Features.Treasury
             }
         }
 
-        // Full reconcile on (re)connect: the client's complete set of durably-saved deposit txns. Commit any pending
-        // in the set; revert stale pendings the client no longer has (a local rollback).
         private static void OnDepositReconcile(ServerClient client, KmhEnvelope env)
         {
             string username = client?.GetData<UserFile>()?.Username;
             if (string.IsNullOrEmpty(username)) return;
             System.Collections.Generic.List<string> ids = env?.GetStringList("committed") ?? new System.Collections.Generic.List<string>();
-            (int committed, int reverted) = TreasuryStore.ReconcileDeposits(username, ids, ReconcileGraceSeconds);
-            if (committed > 0 || reverted > 0)
+            // Goods already removed but not yet saved must not be reverted; an older client omits this and uses the grace window.
+            System.Collections.Generic.List<string> unsaved = env?.GetStringList("pending") ?? new System.Collections.Generic.List<string>();
+            bool rolledBack = NoteSaveGeneration(username, env, "reconcile");
+            (int committed, int reverted) = TreasuryStore.ReconcileDeposits(username, ids, unsaved, ReconcileGraceSeconds);
+
+            // Gated on an observed rollback, or a client merely omitting an id would cost a player their vault.
+            int undone = 0, flagged = 0;
+            if (rolledBack)
+                (undone, flagged) = TreasuryStore.ReverseRolledBackCommits(username, ids, unsaved, ReconcileGraceSeconds);
+
+            if (committed > 0 || reverted > 0 || undone > 0 || flagged > 0)
             {
-                ServerLog.Info($"Treasury: reconciled {username} deposits - {committed} committed, {reverted} reverted (local rollback).");
+                ServerLog.Info($"Treasury: reconciled {username} deposits - {committed} committed, {reverted} reverted (local rollback)" +
+                               (undone + flagged > 0 ? $", {undone} committed deposit(s) undone, {flagged} flagged" : "") + ".");
                 SendSnapshotTo(client);
             }
         }
@@ -144,22 +190,18 @@ namespace KMHServerAddon.Features.Treasury
                 ServerLog.Verbose($"Treasury deposit_silver rejected (amount={amount}) for {username}");
                 return;
             }
-            // Preflight token (client got approval BEFORE removing goods) skips re-checking the rejectable rules; without
-            // one, the removal->Recovery-hold safety net below still guarantees no loss.
-            bool preApproved = TryConsumePreflight(username, "silver", amount, "", 0, env?.GetString("deposit_token") ?? "");
+            // A preflight token skips the re-check; without one the Recovery hold below still prevents any loss.
+            bool preApproved = TryConsumePreflight(client, username, "silver", amount, "", 0, env?.GetString("deposit_token") ?? "");
             long cap = Features.Economy.EconomyConfig.Current.MaxSilverDepositPerTx;
             if (!preApproved && cap > 0 && amount > cap)
             {
-                // Over the per-deposit limit - reject + warn (a cheat signal). NO grant-back: a modified client may
-                // not have removed the silver, so returning it could mint. The default cap is high enough that a
-                // legitimate single deposit never trips this.
+                // No grant-back: a modified client may never have removed the silver, so returning it could mint.
                 ServerLog.Warn($"Treasury: {username} deposit_silver {amount}s REJECTED - over cap {cap}s (possible cheat)");
                 KmhRouter.Notify(client, "negative", $"That deposit is over the server's per-deposit limit ({Util.SilverFmt.Format(cap)}).");
                 SendSnapshotTo(client);
                 return;
             }
-            // Access gate + cooldown + fee + cap. The client already removed the silver, so a policy rejection parks
-            // it in Recovery instead of dropping it (no honest-player loss).
+            // The client already removed the silver, so a policy rejection parks it in Recovery rather than dropping it.
             if (!preApproved && !Gate(client, username, isWithdraw: false, isGuild: false, isItem: false, env))
             { HoldRejectedDeposit(client, username, amount, null, "deposit blocked (cooldown or access mode)"); return; }
             int fee = Features.Economy.EconomyAccess.DepositFeeOn(amount);
@@ -167,8 +209,7 @@ namespace KMHServerAddon.Features.Treasury
             if (!preApproved && Features.Economy.EconomyAccess.WouldExceedCap(false, TreasuryStore.GetPersonalSilver(username), net, out string capReason))
             { HoldRejectedDeposit(client, username, amount, null, capReason); KmhRouter.Notify(client, "negative", capReason); SendSnapshotTo(client); return; }
 
-            // Durable path: new clients send a txn id -> hold PENDING until the save confirms (fixes the rollback dupe).
-            // The fee rides on the pending record and credits the house pool only when it COMMITS, never if it reverts.
+            // Held pending until the save confirms, and the fee rides along so it only lands if the deposit commits.
             string txnId = env?.GetString("txn_id") ?? "";
             if (Features.Economy.EconomyConfig.Current.RequireDurableLocalSaveForDeposits && !string.IsNullOrEmpty(txnId))
             {
@@ -186,7 +227,7 @@ namespace KMHServerAddon.Features.Treasury
                 ServerLog.Warn($"Treasury: {username} deposited {amount}s immediately (old client, no durable txn) - rollback dupe risk.");
             if (TreasuryStore.DepositSilver(username, net, note: fee > 0 ? $"deposit (fee {fee}s)" : ""))
             {
-                if (fee > 0) Marketplace.MarketplaceStore.CreditHousePool(fee, $"treasury deposit fee ({username})");
+                if (fee > 0) Marketplace.MarketplaceStore.CreditFeeToHousePool(username, fee, $"treasury deposit fee ({username})");
                 ServerLog.Info($"Treasury: {username} deposited {net}s (fee {fee}s -> house pool)");
                 Features.Economy.EconomyAccess.RecordAction(username, false);
                 Features.Economy.EconomyAccess.Audit(username, false, false, amount);
@@ -194,8 +235,7 @@ namespace KMHServerAddon.Features.Treasury
             }
         }
 
-        // Centralized gate: access mode + cooldown. Notifies + refreshes the client's snapshot on denial. Pending-
-        // deposit safety is separate and always applies.
+        // Pending-deposit safety is separate from this gate and applies regardless of what it answers.
         private static bool Gate(ServerClient client, string username, bool isWithdraw, bool isGuild, bool isItem, KmhEnvelope env)
         {
             Features.Economy.EconomyContext ctx = Features.Economy.EconomyContext.FromEnvelope(env);
@@ -215,8 +255,21 @@ namespace KMHServerAddon.Features.Treasury
             return true;
         }
 
-        // A rejected deposit (client already removed the goods) is parked in Recovery instead of dropped so an honest
-        // player never loses it. Mint-safe: value stays server-side, so a fake deposit just fills the queue for nothing.
+        internal static bool WouldRefuseForBacklogForTest(string username, out string reason) => TooManyUnconfirmed(username, out reason);
+
+        // Mint-safe: the value stays server-side, so a fabricated deposit only fills the queue and gains nothing.
+        private static bool TooManyUnconfirmed(string username, out string reason)
+        {
+            reason = null;
+            int cap = Features.Economy.EconomyConfig.Current.MaxUnconfirmedDepositsPerPlayer;
+            if (cap <= 0) return false;
+            int open = TreasuryStore.UnconfirmedDepositCount(username);
+            if (open < cap) return false;
+            reason = $"Deposit paused: {open} earlier deposit(s) are still waiting for your game to save. "
+                   + "Save your game to finalize them, then deposit again.";
+            return true;
+        }
+
         private static void HoldRejectedDeposit(ServerClient client, string username, int silver, Dto.TreasuryItemRequest req, string reason)
         {
             if (string.IsNullOrEmpty(username)) return;
@@ -239,22 +292,33 @@ namespace KMHServerAddon.Features.Treasury
             int    amount   = env?.GetInt("amount", 0) ?? 0;
             if (amount <= 0) return;
             if (!Gate(client, username, isWithdraw: true, isGuild: false, isItem: false, env)) return;
+            // Extension veto hooks (banking rules); player-initiated only, before the debit -> side-effect-free denial.
+            KMH.Sdk.Server.Hooks.KmhHookVerdict wv = Extensibility.KmhHooks.Instance.CheckTreasuryWithdraw(
+                new KMH.Sdk.Server.Hooks.KmhTreasuryWithdrawContext(username, isItem: false, itemDefName: "", quantity: 0, silverAmount: amount));
+            if (wv.Denied) { KmhRouter.Notify(client, "negative", wv.Reason); return; }
+
+            var op = new Security.KmhOpClaim("treasury.withdraw_silver", username, env);
+            if (!op.Begin()) { SendSnapshotTo(client); return; }
+
             if (TreasuryStore.WithdrawSilver(username, amount, note: ""))
             {
                 // Withdraw fee: debited gross from the vault, net delivered, the difference credited to the house pool.
                 int fee = Features.Economy.EconomyAccess.WithdrawFeeOn(amount);
                 int net = amount - fee;
-                if (fee > 0) Marketplace.MarketplaceStore.CreditHousePool(fee, $"treasury withdraw fee ({username})");
+                if (fee > 0) Marketplace.MarketplaceStore.CreditFeeToHousePool(username, fee, $"treasury withdraw fee ({username})");
                 ServerLog.Info($"Treasury: {username} withdrew {amount}s (fee {fee}s -> house pool, delivered {net}s)");
                 Features.Economy.EconomyAccess.RecordAction(username, true);
                 Features.Economy.EconomyAccess.Audit(username, true, false, amount);
-                // Grant first so the client materializes the silver into the colony only after the server has
-                // actually debited it
-                KmhRouter.SendTo(client, KmhProtocol.Kind.TreasuryGrant, new { kind = "silver", amount = net });
+                // Debited and owed durably before sending: the transport cannot be asked afterwards whether it arrived.
+                Delivery.OutboundDelivery d = Delivery.DeliveryStore.OweForOperation(
+                    username, Transactions.KmhTxType.Withdrawal, $"withdraw {net}s", net, null, null);
+                if (d != null) Delivery.DeliveryHandler.Send(client, d);
+                else Items.KmhPayloadEscrow.DeliverSilver(username, net, "withdrawal could not be recorded for delivery", "withdrawal could not be returned");
                 SendSnapshotTo(client);
             }
             else
             {
+                op.Release();
                 ServerLog.Verbose($"Treasury withdraw_silver rejected (insufficient) for {username}");
                 KmhRouter.Notify(client, "negative", "Withdraw failed - not enough silver, or you've hit your guild withdraw limit.");
                 // Push a corrective snapshot so the patch's optimistic UI gets truth.
@@ -267,15 +331,12 @@ namespace KMHServerAddon.Features.Treasury
             string username = client?.GetData<UserFile>()?.Username;
             Dto.TreasuryItemRequest req = env?.DataAs<Dto.TreasuryItemRequest>();
             if (req == null) return;
-            // Preflight token skips re-checking; without one the removal->Recovery-hold net below still prevents loss.
-            bool preApproved = TryConsumePreflight(username, "item", 0, req.ItemDefName ?? "", req.Qty, env?.GetString("deposit_token") ?? "");
-            // Client already removed the items; a policy rejection parks them in Recovery instead of dropping them.
+            bool preApproved = TryConsumePreflight(client, username, "item", 0, req.ItemDefName ?? "", req.Qty, env?.GetString("deposit_token") ?? "");
             if (!preApproved && !Gate(client, username, isWithdraw: false, isGuild: false, isItem: true, env))
             { HoldRejectedDeposit(client, username, 0, req, "item deposit blocked (cooldown or access mode)"); return; }
             int  qtyCap  = Features.Economy.EconomyConfig.Current.MaxItemDepositQtyPerTx;
             bool durable = Features.Economy.EconomyConfig.Current.RequireDurableLocalSaveForDeposits && !string.IsNullOrEmpty(req.TxnId);
 
-            // Payload path: state-preserving complex items.
             if (req.Payloads != null && req.Payloads.Count > 0)
             {
                 int total = 0; foreach (Items.KmhThingPayload p in req.Payloads) total += p?.StackCount ?? 0;
@@ -303,12 +364,10 @@ namespace KMHServerAddon.Features.Treasury
                 return;
             }
 
-            // Legacy/simple path: def|stuff|quality key + count.
             string itemDefName = req.ItemDefName ?? "";
             int    qty         = req.Qty;
             if (string.IsNullOrEmpty(itemDefName) || qty <= 0) return;
-            // Backstop: block a modified client smuggling a complex/unsafe item through the compact path; reject to
-            // Recovery (honest deposits never lost). Item safety is ALWAYS enforced - a preflight token never waives it.
+            // Item safety is always enforced here, and a preflight token never waives it.
             if (!Items.KmhItemSafety.IsCompactDepositSafe(itemDefName.Split('|')[0], out string unsafeReason))
             {
                 ServerLog.Warn($"Treasury: {username} compact deposit {itemDefName} x{qty} REJECTED - {unsafeReason}");
@@ -345,10 +404,15 @@ namespace KMHServerAddon.Features.Treasury
             Dto.TreasuryItemRequest req = env?.DataAs<Dto.TreasuryItemRequest>();
             if (req == null) return;
             if (!Gate(client, username, isWithdraw: true, isGuild: false, isItem: true, env)) return;
+            // Extension veto hooks (banking rules); player-initiated only, before the debit -> side-effect-free denial.
+            KMH.Sdk.Server.Hooks.KmhHookVerdict wv = Extensibility.KmhHooks.Instance.CheckTreasuryWithdraw(
+                new KMH.Sdk.Server.Hooks.KmhTreasuryWithdrawContext(username, isItem: true, req.ItemDefName, req.Qty, silverAmount: 0));
+            if (wv.Denied) { KmhRouter.Notify(client, "negative", wv.Reason); return; }
 
-            // Payload path: withdraw by state fingerprint, materialize the exact captured items. A fungible stack
-            // grants ONE representative blob regardless of count (frame-safe), so cap at the item deposit cap for
-            // symmetric movement rather than the old fixed 10 that truncated large food/resource stacks.
+            var op = new Security.KmhOpClaim("treasury.withdraw_item", username, env);
+            if (!op.Begin()) { SendSnapshotTo(client); return; }
+
+            // A fungible stack grants one representative blob whatever its count, so the cap can match the deposit cap.
             if (!string.IsNullOrEmpty(req.Fingerprint))
             {
                 int cap = Features.Economy.EconomyConfig.Current.MaxItemDepositQtyPerTx;
@@ -360,37 +424,45 @@ namespace KMHServerAddon.Features.Treasury
                 {
                     int taken = 0; foreach (var g in granted) taken += g.StackCount;
                     ServerLog.Info($"Treasury: {username} withdrew x{taken} full-state item(s).");
-                    KmhRouter.SendTo(client, KmhProtocol.Kind.TreasuryGrant, new { kind = "item_payloads", payloads = granted });
+                    Delivery.OutboundDelivery d = Delivery.DeliveryStore.OweForOperation(
+                        username, Transactions.KmhTxType.Withdrawal, $"withdraw x{taken} full-state item(s)", 0, null, granted);
+                    if (d != null) Delivery.DeliveryHandler.Send(client, d);
+                    else foreach (Items.KmhThingPayload g in granted)
+                        Items.KmhPayloadEscrow.Deliver(username, g, "withdrawal could not be recorded for delivery", "withdrawal could not be returned");
                     SendSnapshotTo(client);
                 }
                 else
                 {
-                    KmhRouter.Notify(client, "negative", "Item withdraw failed - nothing matched in the vault.");
+                    op.Release();
+                    // Almost always a row the player drained a moment ago, so say that rather than implying a mismatch.
+                    KmhRouter.Notify(client, "negative", "Nothing left to withdraw from that row - your vault view has been refreshed.");
                     SendSnapshotTo(client);
                 }
                 return;
             }
 
-            // Legacy/simple path.
             string itemDefName = req.ItemDefName ?? "";
             int    legacyQty   = req.Qty;
-            if (string.IsNullOrEmpty(itemDefName) || legacyQty <= 0) return;
+            if (string.IsNullOrEmpty(itemDefName) || legacyQty <= 0) { op.Release(); return; }
             if (TreasuryStore.WithdrawItem(username, itemDefName, legacyQty, note: ""))
             {
                 ServerLog.Info($"Treasury: {username} withdrew x{legacyQty} {itemDefName}");
-                KmhRouter.SendTo(client, KmhProtocol.Kind.TreasuryGrant, new { kind = "item", def_name = itemDefName, amount = legacyQty });
+                Delivery.OutboundDelivery d = Delivery.DeliveryStore.OweForOperation(
+                    username, Transactions.KmhTxType.Withdrawal, $"withdraw x{legacyQty} {itemDefName}", 0,
+                    new System.Collections.Generic.Dictionary<string, int> { { itemDefName, legacyQty } }, null);
+                if (d != null) Delivery.DeliveryHandler.Send(client, d);
+                else Items.KmhPayloadEscrow.DeliverCompact(username, itemDefName, legacyQty, "withdrawal could not be recorded for delivery", "withdrawal could not be returned");
                 SendSnapshotTo(client);
             }
             else
             {
+                op.Release();
                 ServerLog.Verbose($"Treasury withdraw_item rejected (insufficient) for {username}");
                 KmhRouter.Notify(client, "negative", "Item withdraw failed - not enough in the vault, or no permission.");
                 SendSnapshotTo(client);
             }
         }
 
-        // Send the caller-scoped snapshot to a single client. Caller-scoped because the snapshot's CanDeposit /
-        // CanWithdraw flags depend on who's asking
         private static void SendSnapshotTo(ServerClient client)
         {
             string username = client?.GetData<UserFile>()?.Username;

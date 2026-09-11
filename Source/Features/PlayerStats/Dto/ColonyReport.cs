@@ -3,9 +3,7 @@ using Newtonsoft.Json;
 
 namespace KMHServerAddon.Features.PlayerStats.Dto
 {
-    // Client -> server: a player's colony summary + their colonist pawn. Byte-identical to the patch-side DTO.
-    // The compact fields drive the leaderboard row; the nested ColonistProfile is stored server-side and served
-    // on demand to anyone who opens the colonist modal (so the owner needn't be online).
+    // Mirrors the patch-side DTO - a field changed here has to change there too.
     public class ColonyReport
     {
         [JsonProperty("save_id")]           public string SaveId          { get; set; } = "";
@@ -27,15 +25,23 @@ namespace KMHServerAddon.Features.PlayerStats.Dto
         [JsonProperty("top_colonist_kills")]    public int    TopColonistKills   { get; set; } = 0;
         [JsonProperty("colonist")]          public ColonistProfile Colonist { get; set; }
         [JsonProperty("roster")]            public List<ColonistEntry> Roster { get; set; } = new List<ColonistEntry>();
+        [JsonProperty("settlements")]       public List<SettlementReport> Settlements { get; set; } = new List<SettlementReport>();
     }
 
-    // Server -> client: every colony's reported colonists, flattened, for the per-skill Colonist Records boards.
+    // Breakdown of the single Wealth figure above; the sum of these is that figure, so a reader can see where it sits.
+    public class SettlementReport
+    {
+        [JsonProperty("name")]       public string Name       { get; set; } = "";
+        [JsonProperty("wealth")]     public long   Wealth     { get; set; } = 0;
+        [JsonProperty("population")] public int    Population { get; set; } = 0;
+    }
+
     public class ColonistRosterSnapshot
     {
         [JsonProperty("colonists")] public List<ColonistEntry> Colonists { get; set; } = new List<ColonistEntry>();
     }
 
-    // One compact colonist row. Owner + colony are stamped server-side when the roster snapshot is built.
+    // Owner and colony are stamped server-side, never taken from the client's row.
     public class ColonistEntry
     {
         [JsonProperty("owner")]   public string Owner  { get; set; } = "";
@@ -52,37 +58,31 @@ namespace KMHServerAddon.Features.PlayerStats.Dto
         [JsonProperty("sk_construction")] public int SkConstruction { get; set; } = 0;
     }
 
-    // Server -> client: the full colonist profile for one player, fetched on demand (kmh.colonist.profile).
     public class ColonistProfileEnvelope
     {
         [JsonProperty("username")] public string        Username { get; set; } = "";
         [JsonProperty("detail")]   public ColonistProfile Detail  { get; set; }
     }
 
-    // Full colonist pawn profile (Bio / Health / Combat). Sections map to the modal tabs.
     public class ColonistProfile
     {
-        // header
         [JsonProperty("name")]           public string Name          { get; set; } = "";
         [JsonProperty("title")]          public string Title         { get; set; } = "";   // role, e.g. "Combat Engineer"
         [JsonProperty("gender_age")]     public string GenderAge     { get; set; } = "";   // "Female, age 44 (131)"
         [JsonProperty("descriptor")]     public string Descriptor    { get; set; } = "";   // "Baseliner • Colony"
         [JsonProperty("days_in_colony")] public int    DaysInColony  { get; set; } = 0;
 
-        // bio
         [JsonProperty("childhood")]      public string Childhood     { get; set; } = "";
         [JsonProperty("adulthood")]      public string Adulthood     { get; set; } = "";
         [JsonProperty("traits")]         public List<string>          Traits    { get; set; } = new List<string>();
         [JsonProperty("skills")]         public List<ColonistSkill>   Skills    { get; set; } = new List<ColonistSkill>();
         [JsonProperty("incapable")]      public List<string>          Incapable { get; set; } = new List<string>();
 
-        // health
         [JsonProperty("health_pct")]     public int    HealthPct     { get; set; } = 0;
         [JsonProperty("pain_pct")]       public int    PainPct       { get; set; } = 0;
         [JsonProperty("capacities")]     public List<ColonistCapacity> Capacities { get; set; } = new List<ColonistCapacity>();
         [JsonProperty("conditions")]     public List<string>           Conditions { get; set; } = new List<string>();
 
-        // combat
         [JsonProperty("total_kills")]    public int    TotalKills     { get; set; } = 0;
         [JsonProperty("humanlike_kills")] public int   HumanlikeKills { get; set; } = 0;
         [JsonProperty("mechanoid_kills")] public int   MechanoidKills { get; set; } = 0;

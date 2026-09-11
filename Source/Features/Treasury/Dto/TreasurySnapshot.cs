@@ -1,10 +1,9 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using Newtonsoft.Json;
 
 namespace KMHServerAddon.Features.Treasury.Dto
 {
-    // Mirror of the patch mod's KMHPatch.Features.Treasury.Dto. TreasurySnapshot - same JSON property names, same
-    // field set, same wire semantics. Drift here = the patch dialog renders broken data
+    // Mirrors the patch-side DTO - a field changed here has to change there too.
     public class TreasurySnapshot
     {
         [JsonProperty("owner_key")]            public string OwnerKey         { get; set; } = "";
@@ -14,33 +13,42 @@ namespace KMHServerAddon.Features.Treasury.Dto
         [JsonProperty("lifetime_silver_in")]   public long   LifetimeSilverIn { get; set; } = 0;
         [JsonProperty("lifetime_silver_out")]  public long   LifetimeSilverOut{ get; set; } = 0;
 
-        // Simple/legacy compact items (def|stuff|quality key -> count). Lossless only for proven-simple resources;
-        // pre-payload complex entries here are legacy/partial.
+        // Keyed def|stuff|quality, and lossless only for proven-simple resources.
         [JsonProperty("items")]                public Dictionary<string, int> Items
             { get; set; } = new Dictionary<string, int>();
 
-        // State-preserving complex items (weapons/apparel/minified/comp-heavy...). Merged only by fingerprint.
-        // ScribeXml is stripped from wire snapshots (kept on disk); it rides the grant on withdraw.
+        // Merged only by fingerprint, and ScribeXml is stripped from the wire while staying on disk.
         [JsonProperty("item_payloads")]        public List<Items.KmhThingPayload> ItemPayloads
             { get; set; } = new List<Items.KmhThingPayload>();
 
         [JsonProperty("recent_transactions")]  public List<TreasuryTransaction> RecentTransactions
             { get; set; } = new List<TreasuryTransaction>();
 
-        // Deposits held pending durable local-save confirmation (not counted in silver_balance/items - never
-        // spendable until committed). Persisted on disk; blobs stripped on the wire. See PendingDeposit.
+        // Never counted in silver_balance or items, so nothing here is spendable until it commits.
         [JsonProperty("pending_deposits")]     public List<PendingDeposit> PendingDeposits
             { get; set; } = new List<PendingDeposit>();
 
-        // Ring of recently-committed deposit txn ids - kept server-side (not sent on the wire) so a duplicate
-        // BeginPendingDeposit for an already-committed txn can't double-book. Bounded on commit.
+        // Server-side only, so a duplicate BeginPendingDeposit for an already-committed txn cannot double-book.
         [JsonProperty("recent_committed_txns")] public List<string> RecentCommittedTxns
             { get; set; } = new List<string>();
 
-        // Per-caller permissions - computed by the server when building the snapshot for a specific client (depends
-        // on rank / ownership)
+        // The id alone does not say what was credited, and without that a commit could never be undone.
+        [JsonProperty("committed_deposits")] public List<PendingDeposit> CommittedDeposits
+            { get; set; } = new List<PendingDeposit>();
+
+        // Server-side only, written in the same commit that removes the payloads, so a crash cannot leave them owned by nobody.
+        [JsonProperty("pending_takes")] public List<PendingTake> PendingTakes
+            { get; set; } = new List<PendingTake>();
+
+        // A lower generation arriving means the client loaded an older save, which is the duplication rollback.
+        [JsonProperty("last_save_generation")] public long LastSaveGeneration { get; set; } = 0;
+
+        // Computed per caller when the snapshot is built, because they depend on rank and ownership.
         [JsonProperty("can_deposit")]          public bool CanDeposit  { get; set; } = false;
         [JsonProperty("can_withdraw")]         public bool CanWithdraw { get; set; } = false;
+
+        // Stamped on the outgoing copy only, so a late snapshot cannot overwrite a newer one on the client.
+        [JsonProperty("revision")]             public long Revision    { get; set; } = 0;
     }
 
     public class TreasuryTransaction
@@ -62,26 +70,23 @@ namespace KMHServerAddon.Features.Treasury.Dto
         [JsonProperty("note")]           public string Note        { get; set; } = "";
     }
 
-    // A deposit whose local goods-removal is not yet confirmed durably saved. Held out of the spendable balance;
-    // committed only when the client reports the txn is in a saved game, reverted if it never confirms (rollback).
+    // Committed only once the client reports the txn is in a saved game, so goods removed locally are not lost.
     public class PendingDeposit
     {
+        // Only two states exist: reconcile skips anything that is not Pending, so a third would hold value forever.
         public const string StatePending     = "pending";
         public const string StateCommitted   = "committed";
-        public const string StateReverted    = "reverted";
-        public const string StateExpired     = "expired";
-        public const string StateAdminReview = "admin_review";
 
         public const string KindSilver  = "silver";
         public const string KindItem    = "item";
         public const string KindPayload = "payload";
-        // Guild donation: silver already left the donor's spendable balance; the GUILD vault is credited only when
-        // the donor's save confirms. Revert/timeout refunds the donor - the guild never sees unconfirmed silver.
+        // The guild vault is credited only on confirm, so it never sees silver the donor might roll back.
         public const string KindGuildDonate = "guild_donate";
 
         [JsonProperty("txn_id")]          public string TxnId          { get; set; } = "";
         [JsonProperty("username")]        public string Username       { get; set; } = "";
         [JsonProperty("created_utc")]     public long   CreatedUtcTicks{ get; set; } = 0;
+        [JsonProperty("committed_utc")]   public long   CommittedUtcTicks { get; set; } = 0;   // set when it became spendable
         [JsonProperty("state")]           public string State          { get; set; } = StatePending;
         [JsonProperty("kind")]            public string Kind           { get; set; } = KindSilver;
 
@@ -90,9 +95,22 @@ namespace KMHServerAddon.Features.Treasury.Dto
         [JsonProperty("qty")]             public int    Qty            { get; set; } = 0;
         [JsonProperty("payloads")]        public List<Items.KmhThingPayload> Payloads { get; set; } = new List<Items.KmhThingPayload>();
         [JsonProperty("note")]            public string Note           { get; set; } = "";
-        // Silver deposit fee held aside - credited to the house pool only when this deposit COMMITS, never if it reverts.
+        // Diagnostic only: a stale pending and one whose goods a later save removed look alike without it.
+        [JsonProperty("save_gen_at_open")] public long  SaveGenAtOpen  { get; set; } = 0;
+        // Held aside and credited to the house pool only on commit, never on a revert.
         [JsonProperty("fee")]             public int    Fee            { get; set; } = 0;
-        // Target guild for KindGuildDonate entries.
         [JsonProperty("guild_name")]      public string GuildName      { get; set; } = "";
+    }
+
+    // Payloads gone from the vault under a take marker but not yet named by a transaction row; the vault owns them until a row does.
+    public class PendingTake
+    {
+        [JsonProperty("marker")]        public string TakeMarker   { get; set; } = "";
+        // The key any return is deduplicated on, so the inline refund and boot recovery cannot both pay it back.
+        [JsonProperty("refund_marker")] public string RefundMarker { get; set; } = "";
+        [JsonProperty("username")]      public string Username     { get; set; } = "";
+        [JsonProperty("taken_utc")]     public long   TakenUtcTicks{ get; set; } = 0;
+        [JsonProperty("note")]          public string Note         { get; set; } = "";
+        [JsonProperty("payloads")]      public List<Items.KmhThingPayload> Payloads { get; set; } = new List<Items.KmhThingPayload>();
     }
 }

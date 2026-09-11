@@ -4,34 +4,54 @@ All icons ship from Source/Assets/Icons and are staged into KMH-Data/Icons on bu
 Source/license: Google Noto Emoji (https://github.com/googlefonts/noto-emoji), Apache License 2.0.
 Do not add images from unlicensed/unknown sources.
 
-Present
--------
-  kmh_logo.png        KMH branding (Discord embeds etc.). PLACEHOLDER - server owners can replace it
+Which embeds actually carry an icon
+-----------------------------------
+Only these post an embed WITH a thumbnail. Everything else posts without one (see below).
+
+  kmh_logo.png        "Server online" announcement. Also the fallback whenever a requested
+                      icon has no file. PLACEHOLDER (a castle) - server owners can replace it
                       by dropping their own kmh_logo.png into KMH-Data/Icons.
-  guild.png           guild features (Discord embeds, announcements)
-  treasury.png        treasury/economy embeds
-  marketplace.png     marketplace embeds
-  quest.png           quest embeds
-  leaderboard.png     standings/leaderboard embeds
-  site_created.png    site created event
-  site_destroyed.png  site removed event
-  warning.png         warnings
-  error.png           errors
+  marketplace.png     "New listing" and "Item sold"
+  site_created.png    "New site built"
+  site_destroyed.png  "Site removed"
+  quest.png           "Quest completed"
+  guild.png           "New guild"
+  warning.png         owner notice (KmhOwnerNotice)
 
-Recommended future icons (NOT yet present - features fall back to text/nearest icon)
-------------------------------------------------------------------------------------
-  guild_hall.png      guild hall set/moved announcements (falls back to guild.png)
-  guild_owner.png     ownership transfer announcements (falls back to guild.png)
-  diplomacy.png / alliance.png / hostile.png   guild diplomacy events (fall back to guild.png)
-  open_join.png / invite_only.png              join-mode changes (fall back to guild.png)
-  deposit.png / withdraw.png                   treasury movement (fall back to treasury.png)
-  auctions.png / want_board.png                trading embeds (fall back to marketplace.png)
-  world_events.png / global_quests.png         living-world events (fall back to quest.png)
-  sites.png           general sites embeds (falls back to site_created.png)
-  recovery.png        recovery-queue admin notices (falls back to warning.png)
-  enforcement.png     config enforcement notices (falls back to warning.png)
-  api_transport.png   transport status notices (falls back to kmh_logo.png)
-When adding any of these, source them from Noto Emoji only and keep this file updated.
+Shipped but not requested by the addon itself
+---------------------------------------------
+  treasury.png    leaderboard.png    error.png
 
-In-game world markers use vanilla RimWorld textures (World/WorldObjects/Sites/GenericSite) so the
-mod ships no extra world art; swap the <texture> in Defs/WorldObjectDefs/*.xml to restyle.
+Available for an extension to point a custom embed at. No built-in embed asks for them, so their
+presence is not a sign that a feature posts one.
+
+Embeds that post with NO thumbnail
+----------------------------------
+These use the no-icon PostEmbedToChannel overload. They do NOT fall back to a nearest icon -
+they simply have no thumbnail:
+
+  world events / global quests   (Features/World/WorldEngine.cs)
+  all Discord slash-command responses  (Features/Discord/Commands/DiscordSlashCommands.cs)
+
+If you want thumbnails there, pass an icon name at those call sites - adding PNG files alone
+changes nothing.
+
+Before adding a new icon
+------------------------
+Adding a file does nothing on its own. A new icon is only worth creating when a call site will
+actually request it. Add the constant in Features/Discord/Embeds/DiscordIcons.cs, pass it at the
+posting call site, then add the PNG here and update this file.
+
+Embed titles already carry a leading emoji character (🛒 🪙 🏗️ 🏚️ ✅ 🏰 🟢), so a dedicated
+thumbnail only earns its place where it adds recognition the title emoji does not.
+
+Recommended format: square, 128x128 or 256x256, PNG with transparent background. Discord cannot
+display RimWorld's .dds / .dds.zstd - those are only for the in-game client icons
+(KMH-Patch/Textures/KMHPatch/UI).
+
+In-game world markers
+---------------------
+KMH world objects (Defs/WorldObjectDefs/*.xml in the client mod) currently point at vanilla
+RimWorld textures, so the mod ships no extra world art. Note that the archetype-matched vanilla
+work-site textures (FarmingWorkSite / MiningWorkSite / LoggingWorkSite) are Ideology DLC and
+must NOT be referenced by a base-game mod.

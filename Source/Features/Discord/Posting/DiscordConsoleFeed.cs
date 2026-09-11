@@ -7,7 +7,6 @@ using KMHServerAddon.Diagnostics;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // Live console feed batches server lines to Discord, skipping bot chatter to avoid feedback loops.
     internal static class DiscordConsoleFeed
     {
         private static readonly ConcurrentQueue<string> _queue = new ConcurrentQueue<string>();
@@ -32,7 +31,7 @@ namespace KMHServerAddon.Features.Discord
 
         private static async Task RunLoop(CancellationToken ct)
         {
-            // Let RWT's Main bring up its Printer logger before we hook on top of it.
+            // Waits for RWT's Main to bring up its Printer, since there is nothing to hook before that.
             try { await Task.Delay(TimeSpan.FromSeconds(5), ct).ConfigureAwait(false); }
             catch (TaskCanceledException) { return; }
 
@@ -55,7 +54,7 @@ namespace KMHServerAddon.Features.Discord
             }
         }
 
-        // Install the console tee once over current Printer delegates; re-hooking would stack wrappers and fight ConsoleExecutor.
+        // Hooked once, because re-hooking stacks wrappers and fights ConsoleExecutor's own capture.
         private static void EnsureHooked()
         {
             if (_hooked) return;
@@ -78,12 +77,13 @@ namespace KMHServerAddon.Features.Discord
             if (!PassesVerbosity(v)) return;               // respect the server's verbosity, like the console does
             string line = o.ToString();
             if (string.IsNullOrEmpty(line)) return;
-            if (line.Contains("Discord:")) return; // loop guard + drops the bot's own gateway chatter
+            if (line.Contains("Discord:")) return;
             if (_queue.Count >= MaxQueued) { _queue.TryDequeue(out _); _dropped++; }
-            _queue.Enqueue(prefix + line);
+            // Console lines can carry player chat, so a ping would otherwise ride out to the admin channel.
+            _queue.Enqueue(prefix + DiscordText.NoMentions(line));
         }
 
-        // Match RWT's verbosity filter so Discord only receives what the server console would print.
+        // Mirrors RWT's own filter, so Discord never receives a line the server console would have suppressed.
         private static bool PassesVerbosity(Printer.Verbosity v)
         {
             int configured;

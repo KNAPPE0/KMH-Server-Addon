@@ -1,10 +1,8 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 
 namespace KMHServerAddon.Items
 {
-    // Shared payload-escrow helpers so every feature (auctions, wants, quests - marketplace has equivalent inline
-    // versions from P3a) moves complex items the same way: pop exact units, refund to a treasury, strip blobs for
-    // wire, count units. One system, no per-feature item formats.
+    // Split and copy live in KmhItemService, so escrow and a treasury withdraw divide stacks identically.
     internal static class KmhPayloadEscrow
     {
         public static int TotalUnits(List<KmhThingPayload> escrow)
@@ -14,17 +12,28 @@ namespace KMHServerAddon.Items
             return n;
         }
 
-        public static KmhThingPayload Clone(KmhThingPayload p, int stackCount) => new KmhThingPayload
-        {
-            SchemaVersion = p.SchemaVersion, DefName = p.DefName, StuffDefName = p.StuffDefName, StackCount = stackCount,
-            HitPoints = p.HitPoints, MaxHitPoints = p.MaxHitPoints, Quality = p.Quality, Tainted = p.Tainted,
-            ScribeXml = p.ScribeXml, Fidelity = p.Fidelity, DisplayLabel = p.DisplayLabel, MarketValue = p.MarketValue,
-            Fingerprint = p.Fingerprint, Legacy = p.Legacy, Warnings = new List<string>(p.Warnings ?? new List<string>()),
-            Mergeable = p.Mergeable, RotProgressTicks = p.RotProgressTicks,
-        };
+        public static KmhThingPayload Clone(KmhThingPayload p, int stackCount) => KmhItemService.ClonePayload(p, stackCount);
 
-        // Pop up to `qty` units off an escrow list (mutates it). Metadata stacks and fungible stacks split (same blob,
-        // reduced count); only a unique blob instance (weapon/quality) is atomic.
+        // Dividing one captured stack is a weaker claim than merging two, because RimWorld already held these units together.
+        public static bool IsSplittable(KmhThingPayload p)
+            => p != null && (string.IsNullOrEmpty(p.ScribeXml) || p.Splittable || p.Mergeable);
+
+        // A caller that charges for a fill must size the charge with this, or it bills for goods an atomic stack never hands over.
+        public static int DeliverableUnits(IEnumerable<KmhThingPayload> taken, int want)
+        {
+            if (taken == null || want <= 0) return 0;
+            int owed = want, delivered = 0;
+            foreach (KmhThingPayload p in taken)
+            {
+                if (p == null || owed <= 0) continue;
+                if (owed >= p.StackCount) { delivered += p.StackCount; owed -= p.StackCount; }
+                else if (IsSplittable(p))  { delivered += owed; owed = 0; }
+                // else: atomic stack larger than what's owed - it cannot contribute at all.
+            }
+            return delivered;
+        }
+
+        // Same take plan as a treasury withdraw, so both paths keep the identical stacks atomic.
         public static List<KmhThingPayload> PopUnits(List<KmhThingPayload> escrow, int qty)
         {
             List<KmhThingPayload> outp = new List<KmhThingPayload>();
@@ -33,22 +42,22 @@ namespace KMHServerAddon.Items
             foreach (KmhThingPayload e in new List<KmhThingPayload>(escrow))
             {
                 if (rem <= 0) break;
-                if (e.StackCount <= rem) { outp.Add(e); escrow.Remove(e); rem -= e.StackCount; }
-                else if (string.IsNullOrEmpty(e.ScribeXml) || e.Mergeable) { outp.Add(Clone(e, rem)); e.StackCount -= rem; rem = 0; }
+                switch (KmhItemService.PlanTake(e.StackCount, rem, IsSplittable(e)))
+                {
+                    case KmhItemService.TakeKind.Whole: outp.Add(e); escrow.Remove(e); rem -= e.StackCount; break;
+                    case KmhItemService.TakeKind.Split: outp.Add(Clone(e, rem)); e.StackCount -= rem; rem = 0; break;
+                }
             }
             return outp;
         }
 
-        // Deposit every escrow payload into a user's treasury (cancel/expire/void refund, or winner delivery). If a
-        // deposit can't land (invalid/deleted owner, disbanded guild, unusable payload) the item is PARKED in the
-        // recovery queue instead of vanishing - a headless server can't drop pods, so silent loss was the alternative.
         public static void RefundTo(string username, IEnumerable<KmhThingPayload> escrow, string note)
         {
             if (escrow == null) return;
             foreach (KmhThingPayload p in escrow) Deliver(username, p, note, note);
         }
 
-        // Deposit one payload to a user; on failure hold it in the recovery queue. Returns true only when it landed.
+        // A headless server cannot drop pods, so a deposit that will not land is parked in recovery rather than lost.
         public static bool Deliver(string username, KmhThingPayload payload, string source, string note)
         {
             if (payload == null) return false;
@@ -57,16 +66,41 @@ namespace KMHServerAddon.Items
             return false;
         }
 
-        // Wire copy with the deep blob removed (metadata only for display); never send scribe_xml in a snapshot.
+        // Every feature routes owed compact goods through here, so a buyer never pays and receives nothing.
+        public static bool DeliverCompact(string username, string itemKey, int qty, string source, string reason)
+        {
+            if (qty <= 0 || string.IsNullOrEmpty(itemKey)) return true;
+            if (Features.Treasury.TreasuryStore.DepositItem(username, itemKey, qty, source)) return true;
+            Util.ItemKey.Split(itemKey, out string def, out string stuff, out int q);
+            Features.Recovery.RecoveryStore.HoldItem(username,
+                KmhItemSafety.MarkLegacyPartial(def, stuff, q, qty, def), source ?? "", reason ?? "delivery failed");
+            return false;
+        }
+
+        // DepositSilver refuses an empty owner, so a payout read off a malformed row is held in recovery rather than vanishing.
+        public static bool DeliverSilver(string username, long amount, string source, string reason)
+        {
+            if (amount <= 0) return true;
+            long remaining = amount;
+            while (remaining > 0)
+            {
+                int chunk = (int)System.Math.Min(remaining, int.MaxValue);
+                if (!Features.Treasury.TreasuryStore.DepositSilver(username, chunk, source)) break;
+                remaining -= chunk;
+            }
+            if (remaining <= 0) return true;
+            Features.Recovery.RecoveryStore.HoldSilver(username, remaining, source ?? "", reason ?? "silver delivery failed");
+            return false;
+        }
+
         public static List<KmhThingPayload> StripBlobs(List<KmhThingPayload> src)
         {
             List<KmhThingPayload> outList = new List<KmhThingPayload>();
             if (src == null) return outList;
-            foreach (KmhThingPayload p in src) { KmhThingPayload c = Clone(p, p.StackCount); c.ScribeXml = ""; outList.Add(c); }
+            foreach (KmhThingPayload p in src) outList.Add(KmhItemService.CloneWithoutBlob(p));
             return outList;
         }
 
-        // Compact "(plasteel, q5, tainted, legacy)" note for a payload stack.
         public static string StateNote(KmhThingPayload p) => KmhItemSafety.DescribeStateForLedger(p);
     }
 }

@@ -5,11 +5,9 @@ using KMHServerAddon.SubProtocol;
 
 namespace KMHServerAddon.Features.Enforcement
 {
-    // Server side of enforcement: pushes the snapshot (with server-authoritative is_admin) on handshake/change,
-    // streams the chunked profile when enforcing, and sends a restore signal when it's turned off
     internal static class EnforcementHandler
     {
-        // 32KB raw/chunk: base64 (~43KB) + envelope overhead stays under the 64KB cap.
+        // 32KB raw, because base64 inflates it to roughly 43KB and the frame ceiling is 64KB.
         private const int ChunkRawBytes = 32 * 1024;
 
         public static void Register()
@@ -24,17 +22,21 @@ namespace KMHServerAddon.Features.Enforcement
             KmhRouter.RegisterHandler(KmhProtocol.Kind.EnforcementUploadEnd,      OnUploadEnd);
         }
 
-        // -- admin publishes their configs as the server profile (chunked upload) --
-
-        // Hard cap so a crafted packet can't OOM the server (4096 * 32KB = 128 MB, far more than any real config
-        // zip)
+        // Caps a crafted upload well above any real config zip, so it cannot exhaust server memory.
         private const int MaxUploadChunks = 4096;
+
+        // A separate ceiling, because the chunk cap alone does not bound the declared size.
+        private const int MaxUploadBytes = MaxUploadChunks * ChunkRawBytes;
+
+        // An upload begun and never finished would otherwise hold its chunks until the server restarts.
+        private static readonly TimeSpan UploadStaleAfter = TimeSpan.FromMinutes(10);
 
         private sealed class UploadState
         {
             public string Hash;
             public int ChunkCount;
             public int TotalBytes;
+            public long StartedUtcTicks;
             public readonly Dictionary<int, byte[]> Chunks = new Dictionary<int, byte[]>();
         }
 
@@ -45,19 +47,38 @@ namespace KMHServerAddon.Features.Enforcement
         {
             if (!IsAdmin(client)) { KmhRouter.Notify(client, "negative", "Publishing configs is admin-only."); return; }
             int chunkCount = env?.GetInt("chunk_count", 0) ?? 0;
-            if (chunkCount <= 0 || chunkCount > MaxUploadChunks)
+            int totalBytes = env?.GetInt("total_bytes", 0) ?? 0;
+            // total_bytes is client-declared and sizes the buffer, so the declaration alone could demand gigabytes.
+            if (chunkCount <= 0 || chunkCount > MaxUploadChunks || totalBytes <= 0 || totalBytes > MaxUploadBytes)
             {
                 KmhRouter.Notify(client, "negative", "Config upload rejected (bad size).");
                 return;
             }
             string user = client.GetData<UserFile>()?.Username ?? "?";
+            long now = DateTime.UtcNow.Ticks;
             lock (_uploadLock)
+            {
+                PurgeStaleUploadsLocked(now);
                 _uploads[user] = new UploadState
                 {
-                    Hash       = env?.GetString("hash") ?? "",
-                    ChunkCount = chunkCount,
-                    TotalBytes = env?.GetInt("total_bytes", 0) ?? 0,
+                    Hash            = env?.GetString("hash") ?? "",
+                    ChunkCount      = chunkCount,
+                    TotalBytes      = totalBytes,
+                    StartedUtcTicks = now,
                 };
+            }
+        }
+
+        // Caller holds _uploadLock.
+        private static void PurgeStaleUploadsLocked(long nowTicks)
+        {
+            List<string> stale = null;
+            foreach (KeyValuePair<string, UploadState> kv in _uploads)
+                if (kv.Value != null && nowTicks - kv.Value.StartedUtcTicks > UploadStaleAfter.Ticks)
+                    (stale ??= new List<string>()).Add(kv.Key);
+            if (stale == null) return;
+            foreach (string k in stale) _uploads.Remove(k);
+            ServerLog.Verbose($"Enforcement: dropped {stale.Count} abandoned config upload(s).");
         }
 
         private static void OnUploadChunk(ServerClient client, KmhEnvelope env)
@@ -70,7 +91,9 @@ namespace KMHServerAddon.Features.Enforcement
             lock (_uploadLock)
             {
                 if (!_uploads.TryGetValue(user, out UploadState st)) return;
-                try { st.Chunks[idx] = Convert.FromBase64String(data); } catch { /* skip bad chunk */ }
+                // Bounded by the declared count, or Chunks grows past the cap meant to bound it.
+                if (idx >= st.ChunkCount) return;
+                try { st.Chunks[idx] = Convert.FromBase64String(data); } catch { }
             }
         }
 
@@ -80,7 +103,7 @@ namespace KMHServerAddon.Features.Enforcement
             string user = client.GetData<UserFile>()?.Username ?? "?";
 
             UploadState st;
-            lock (_uploadLock) { _uploads.TryGetValue(user, out st); _uploads.Remove(user); }
+            lock (_uploadLock) { _uploads.TryGetValue(user, out st); _uploads.Remove(user); PurgeStaleUploadsLocked(DateTime.UtcNow.Ticks); }
             if (st == null) return;
             if (st.Chunks.Count != st.ChunkCount)
             {
@@ -99,7 +122,6 @@ namespace KMHServerAddon.Features.Enforcement
                     off += p.Length;
                 }
 
-                // Verify the assembled zip against the hash the client declared.
                 string computed = EnforcementProfile.Sha256Hex(all);
                 if (!string.IsNullOrEmpty(st.Hash) && !string.Equals(computed, st.Hash, StringComparison.OrdinalIgnoreCase))
                 {
@@ -108,7 +130,12 @@ namespace KMHServerAddon.Features.Enforcement
                     return;
                 }
 
-                EnforcementProfile.SetProfile(all, computed, DateTime.UtcNow.Ticks);
+                if (!EnforcementProfile.SetProfile(all, computed, DateTime.UtcNow.Ticks))
+                {
+                    KmhRouter.Notify(client, "negative", "Publish failed - the server couldn't save that profile. " +
+                                                         "The previous one is still active. Try again shortly.");
+                    return;
+                }
                 BroadcastSnapshot(); // new hash -> enforcing clients pull the profile
 
                 KmhRouter.Notify(client, "positive",
@@ -122,7 +149,7 @@ namespace KMHServerAddon.Features.Enforcement
             }
         }
 
-        // Client requests the profile only when its hash differs, so we don't re-stream it on every reconnect
+        // Client-initiated, so a reconnecting client with a matching hash never re-downloads the profile.
         private static void OnProfileRequest(ServerClient client, KmhEnvelope env)
         {
             if (!EnforcementConfig.Current.Enabled || !EnforcementProfile.HasProfile) return;
@@ -130,8 +157,6 @@ namespace KMHServerAddon.Features.Enforcement
             PushProfileTo(client);
         }
 
-        // In-game admin dialog toggles enforcement. Server-authoritative admin check - a non-admin packet is
-        // ignored with a notice
         private static void OnSetEnabled(ServerClient client, KmhEnvelope env)
         {
             if (!IsAdmin(client)) { KmhRouter.Notify(client, "negative", "Config enforcement is admin-only."); return; }
@@ -173,8 +198,6 @@ namespace KMHServerAddon.Features.Enforcement
 
         private static bool IsAdmin(ServerClient client) => client?.GetData<UserFile>()?.IsAdmin == true;
 
-        // -- snapshot --
-
         private static object BuildSnapshotPayload(ServerClient client)
         {
             EnforcementConfig cfg = EnforcementConfig.Current;
@@ -210,8 +233,6 @@ namespace KMHServerAddon.Features.Enforcement
             ServerLog.Info($"Enforcement: broadcast snapshot to {sent} client(s) (enabled={cfg.Enabled}, safe={cfg.SafeMods?.Length ?? 0})");
         }
 
-        // -- hard-enforcement profile push --
-
         public static void PushProfileTo(ServerClient client)
         {
             if (client == null || !EnforcementProfile.HasProfile) return;
@@ -246,7 +267,6 @@ namespace KMHServerAddon.Features.Enforcement
             catch (Exception ex) { ServerLog.Warn($"Enforcement: profile push failed: {ex.Message}"); }
         }
 
-        // Tell every client to lift enforcement and restore their personal configs.
         public static void SendRestoreToAll()
         {
             int sent = 0;

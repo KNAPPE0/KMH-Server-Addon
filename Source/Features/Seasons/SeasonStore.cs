@@ -6,7 +6,6 @@ using KMHServerAddon.Persistence;
 
 namespace KMHServerAddon.Features.Seasons
 {
-    // Season tracking: rolls live leaders into archives/all-time records without wiping lifetime stats.
     internal static class SeasonStore
     {
         private static readonly object _lock = new object();
@@ -36,7 +35,7 @@ namespace KMHServerAddon.Features.Seasons
                 }
                 Diagnostics.ServerLog.Info($"Seasons: loaded season {_currentSeason}, {_past.Count} archived");
             }
-            // Stamp a start time on first boot so "current season" has an age.
+            // Stamped outside the load branch so a first boot with no file still gives the season an age.
             lock (_lock) if (_seasonStartedTicks == 0) _seasonStartedTicks = DateTime.UtcNow.Ticks;
             SaveToDisk();
         }
@@ -56,7 +55,7 @@ namespace KMHServerAddon.Features.Seasons
 
         public static int CurrentSeason { get { lock (_lock) return _currentSeason; } }
 
-        // End the current season: archive the live leaders, update all-time records, advance the counter.
+        // A roll archives and advances only - PlayerStats stays cumulative until a destructive reset clears it.
         public static (int season, int recordCount) RollSeason()
         {
             List<SeasonRecordDto> leaders = BuildCurrentLeaders();
@@ -101,8 +100,6 @@ namespace KMHServerAddon.Features.Seasons
             return snap;
         }
 
-        // ---- live leader computation ----
-
         public static List<SeasonRecordDto> BuildCurrentLeaders()
         {
             List<SeasonRecordDto> list = new List<SeasonRecordDto>();
@@ -116,22 +113,22 @@ namespace KMHServerAddon.Features.Seasons
             Top(list, "Oldest Colony",   players, e => e.ColonyAgeDays,  ColonyOf,           v => $"{v} days");
             Top(list, "Largest Sale",    players, e => e.LargestSale,    e => e.Username,    v => Util.SilverFmt.Format(v));
             Top(list, "Top Site Owner",  players, e => e.SiteSilverProduced, e => e.Username, v => Util.SilverFmt.Format(v));
+            // A claim is history, so this counts captures rather than what the player still holds today.
+            Top(list, "Frontier Claims", players, e => e.FrontierCaptures, e => e.Username, v => $"{v} claimed");
 
-            // Most reliable (reputation).
             List<Reputation.Dto.ReputationEntryDto> reps = Reputation.ReputationStore.BuildSnapshot().Entries;
             Reputation.Dto.ReputationEntryDto bestRep = null;
             foreach (Reputation.Dto.ReputationEntryDto r in reps) if (bestRep == null || r.Score > bestRep.Score) bestRep = r;
             if (bestRep != null && bestRep.Score > 0)
                 list.Add(new SeasonRecordDto { Category = "Most Reliable", Holder = bestRep.Username, Detail = $"{bestRep.Score:N0} rep", Value = bestRep.Score });
 
-            // Deadliest colonist (from the flattened roster).
             List<ColonistEntry> roster = PlayerStats.PlayerStatsStore.BuildColonistRoster().Colonists;
             ColonistEntry bestCol = null;
             foreach (ColonistEntry c in roster) if (bestCol == null || c.Kills > bestCol.Kills) bestCol = c;
             if (bestCol != null && bestCol.Kills > 0)
                 list.Add(new SeasonRecordDto { Category = "Deadliest Colonist", Holder = $"{bestCol.Name} ({bestCol.Owner})", Detail = $"{bestCol.Kills} kills", Value = bestCol.Kills });
 
-            // Guilds (GuildSummary is a struct, so seed from the first row).
+            // GuildSummary is a struct, so the scan seeds from the first row rather than null.
             List<Guilds.GuildStore.GuildSummary> guilds = Guilds.GuildStore.ComputeLeaderboard();
             if (guilds != null && guilds.Count > 0)
             {
@@ -145,8 +142,7 @@ namespace KMHServerAddon.Features.Seasons
                 list.Add(new SeasonRecordDto { Category = "Highest Treasury", Holder = richGuild.Name, Detail = Util.SilverFmt.Format(richGuild.TreasurySilver), Value = richGuild.TreasurySilver });
             }
 
-            // Top banker: the biggest personal KMH treasury ("bank"). TopVaults is sorted desc, so the first
-            // non-guild vault is the richest player.
+            // TopVaults is sorted descending, so the first non-guild vault is the richest player.
             foreach ((string OwnerKey, long Silver, bool IsGuild) v in Treasury.TreasuryStore.TopVaults(10))
             {
                 if (v.IsGuild || v.Silver <= 0) continue;
@@ -160,7 +156,7 @@ namespace KMHServerAddon.Features.Seasons
         }
 
         private static long Overall(PlayerLeaderboardEntry e)
-            => e.Wealth / 1000 + e.Kills * 50 + (long)e.QuestsCompleted * 100 + e.TimePlayedHours;
+            => e.TotalWealth / 1000 + e.Kills * 50 + (long)e.QuestsCompleted * 100 + e.TimePlayedHours;
 
         private static string ColonyOf(PlayerLeaderboardEntry e)
             => string.IsNullOrEmpty(e.ColonyName) ? e.Username : e.ColonyName;

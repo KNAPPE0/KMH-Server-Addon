@@ -1,45 +1,31 @@
-using System;
+﻿using System;
 using KMHServerAddon.Persistence;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
 namespace KMHServerAddon.Features.Economy
 {
-    // Server economy tuning from KMH-Data/Config/Economy.json. Generated with defaults on first boot; values are
-    // clamped on load so a hand-edit can't push it unsafe (negative caps, >100% tax). Reload() re-reads at runtime.
     internal sealed class EconomyConfig
     {
-        // Schema version for forward-compatible migrations (absent in old files = 1, the baseline). All changes so
-        // far are additive, so nothing to migrate yet - this is the anchor a future field rename would key on.
         public int SchemaVersion { get; set; } = 1;
 
-        // Marketplace house tax (0..50). Skimmed from each sale into the house silver pool; reduced per seller by
-        // their guild's MarketplaceTaxReduction perk
         public int MarketplaceTaxPercent { get; set; } = 5;
 
-        // Anti-exploit: when a player starts a new save/scenario, clear their personal treasury so they can't farm
-        // starting resources by depositing, resetting, and repeating. Off by default; a backup is taken before any
-        // reset. A solo guild's vault is cleared too (it's a personal shelter otherwise). See 'kmh treasury-reset'.
+        // A solo guild's vault is cleared too, since it would otherwise shelter the same silver.
         public bool ResetEconomyOnNewSave { get; set; } = false;
 
-        // Anti-mint: reject a single silver/item deposit larger than this. Deposits are client-trusted (the server
-        // can't see the caravan), so this bounds a modified client. Keep generous - the client removes the goods
-        // before sending, so a legit deposit at or under the cap must never be rejected. 0 = no cap.
-        public long MaxSilverDepositPerTx   { get; set; } = 100_000_000;
-        public int  MaxItemDepositQtyPerTx  { get; set; } = 100_000;
+        // Enforced on every deposit whatever the mode says, because a deposit's amount is client-asserted.
+        public long MaxSilverDepositPerTx   { get; set; } = 1_000_000;
+        public int  MaxItemDepositQtyPerTx  { get; set; } = 5_000;
 
-        // Dupe guard: a deposit stays PENDING until the client confirms its goods-removal is durably saved, so the same
-        // silver can't be in the colony AND a spendable treasury. Old clients (no txn id) fall back to immediate credit.
+        // Holds a deposit pending until the client's save is durable, or the same silver exists in colony and treasury.
         public bool RequireDurableLocalSaveForDeposits { get; set; } = true;
-        public int  PendingDepositTimeoutMinutes       { get; set; } = 120;   // unconfirmed pending -> reverted; long enough that a slow-saving player's later save still confirms in time
-        public bool BlockSpendOfPendingDeposits        { get; set; } = true;  // pending never counts as spendable (structural)
-        public bool RequireSyncedLocalSaveForHighRiskEconomy { get; set; } = false; // reserved: gate high-risk flows when save-sync unknown
+        public int  PendingDepositTimeoutMinutes       { get; set; } = 120;
+        // Only the player's own durable save resolves a pending deposit, so one who never saves is otherwise unbounded.
+        public int  MaxUnconfirmedDepositsPerPlayer    { get; set; } = 32;
 
-        // --- economy / treasury access modes. Standard/Remote defaults preserve current behavior. ---
-        // EconomyMode is a preset: Standard (current behavior), Balanced (light cooldowns/fees), Localized (needs
-        // colony/caravan context), Hardcore (strict + block during danger), or Custom (uses the granular fields below
-        // verbatim). Presets resolve into an EconomyPolicy; only Custom reads the individual knobs directly.
-        public string EconomyMode                { get; set; } = "Standard";
+        // Only Custom reads the individual knobs below; every other mode resolves into a preset policy.
+        public string EconomyMode                { get; set; } = "Balanced";
         public string PersonalTreasuryAccessMode { get; set; } = "Remote";   // Remote|ColonyOnly|CaravanOnly|TreasurySiteRequired|Disabled
         public string GuildTreasuryAccessMode    { get; set; } = "Remote";   // Remote|GuildHallRequired|CaravanNearGuildHall|Disabled
 
@@ -54,10 +40,7 @@ namespace KMHServerAddon.Features.Economy
         public bool   BlockTreasuryDuringRaid         { get; set; } = false;
         public bool   BlockTreasuryDuringHostileMapEvent { get; set; } = false;
 
-        // --- optional physical Guild Hall rules. ALL disabled by default -> standard guild behavior unchanged.
-        // A guild's hall is a world-tile record stored on the guild; these gate guild actions on having/being near it.
-        // Compatibility: a guild with no hall is never blocked by proximity (client reports "near" vacuously); the
-        // Require* flags below are what force a hall to exist. Integrates with P7 GuildTreasuryAccessMode.
+        // A guild with no hall is never blocked by proximity, so these flags are what force one to exist.
         public bool RequireGuildHallToCreateGuild          { get; set; } = false;
         public bool RequireGuildHallForGuildTreasury       { get; set; } = false;
         public bool RequireGuildHallForGuildContributions  { get; set; } = false;
@@ -66,57 +49,51 @@ namespace KMHServerAddon.Features.Economy
         public bool RequireMemberNearGuildHallToJoin        { get; set; } = false;
         public bool AllowRemoteGuildInvites                 { get; set; } = true;   // false = inviter must be near the hall
 
-        // Computed on load: is any Guild Hall restriction active? Drives the startup banner + audit. Not persisted.
         [JsonIgnore] public bool AnyGuildHallRule { get; private set; }
 
-        // Dynamic supply/demand pricing (opt-in, off by default so existing servers are unchanged). When on, the
-        // house tax on a sale flexes with the item's live supply (open listings) vs demand (open want-board orders):
-        // in-demand goods get a tax rebate (seller keeps more), gluts get a surcharge (more flows to the house pool,
-        // which funds global-quest rewards). Closed loop - buyer cost never changes, only the seller/house split.
+        // A closed loop: the buyer's cost never moves, only the split between seller and house.
         public bool DynamicDemandPricingEnabled { get; set; } = false;
-        // Max percentage-points the demand swing can move the tax in either direction (clamped to a 0..90 final tax).
         public int  DemandTaxSwingPercent       { get; set; } = 50;
 
-        // Hours an unsold listing lives before the sweeper refunds remaining stock to the seller's treasury. Used
-        // when a post doesn't specify its own expiry
+        // Applies only where a post did not specify its own expiry.
         public int MarketplaceListingLifetimeHours { get; set; } = 168; // 7 days
 
-        // Hard cap on simultaneous open listings per seller - anti-spam.
         public int MarketplaceMaxOpenListingsPerUser { get; set; } = 25;
 
-        // Silver-per-unit floor and ceiling for any listing - anti-flooding + overflow guard
-        public int MarketplaceMinUnitPrice { get; set; } = 1;
+        // KMH-owned, and never read from RWT's own road config.
+        public int RoadworksSilverPerSegmentTrail   { get; set; } = 25;
+        public int RoadworksSilverPerSegmentRoad    { get; set; } = 75;
+        public int RoadworksSilverPerSegmentHighway { get; set; } = 200;
+        public int RoadworksMaxSegmentsPerProject { get; set; } = 64;   // rejects absurd route payloads
 
-        public int MarketplaceMaxUnitPrice { get; set; } = 100_000;
+        // Decimal silver, so a sub-1 price such as 0.55 is expressible.
+        public double MarketplaceMinUnitPrice { get; set; } = 0.01;
 
-        // Sub-silver pricing: the real listing floor/ceiling in MILLI-silver (1000 = 1 silver), so items can list below
-        // 1 full silver (e.g. 550 = 0.55). Min defaults to 10 milli (0.01) - fractional pricing works, but not absurd
-        // dust prices where a small buy would round to 0 silver. Max mirrors MarketplaceMaxUnitPrice * 1000.
-        public int MarketplaceMinUnitPriceMilli { get; set; } = 10;
+        public double MarketplaceMaxUnitPrice { get; set; } = 100_000;
 
-        public int MarketplaceMaxUnitPriceMilli { get; set; } = 100_000_000;
+        [JsonIgnore] public long MarketplaceMinUnitPriceMilli => (long)Math.Round(MarketplaceMinUnitPrice * 1000);
+        [JsonIgnore] public long MarketplaceMaxUnitPriceMilli => (long)Math.Round(MarketplaceMaxUnitPrice * 1000);
 
-        // --- underpricing anti-cheat: compare a listing's unit price to the item's trusted server-side market value ---
-        // Blocks EGREGIOUS underpricing (near-free transfers used to launder value / wash-trade to an alt) below
-        // MinPercentOfTrustedValue, and audit-warns anything under WarnBelow. Deep-but-legit discounts (fire sales)
-        // pass. Only enforced when the item's value is known from the catalog (unknown -> can't judge -> allowed).
-        public double MarketplaceMinPercentOfTrustedValue     { get; set; } = 0.02;  // block below 2% of trusted value (near-free = laundering)
-        public double MarketplaceWarnBelowTrustedValuePercent { get; set; } = 0.25;  // audit-warn below this fraction of value (0 = never)
-        public bool   MarketplaceBlockSuspiciousUnderpricedListings { get; set; } = true;  // enforce the min-percent floor as a hard block
-        public double MarketplaceListingFeePercent            { get; set; } = 0.0;   // reserved: post fee as % of total ask (0 = none)
+        // The obsolete-key prune must spare these until MigrateEconomyV3 has folded them into the decimal fields.
+        internal static readonly string[] LegacyAliasKeys = { "MarketplaceMinUnitPriceMilli", "MarketplaceMaxUnitPriceMilli" };
 
-        // --- auctions ---
+        // A near-free listing launders value to an alt; enforced only where the catalog knows the item's worth.
+        public double MarketplaceMinPercentOfTrustedValue     { get; set; } = 2;
+        public double MarketplaceWarnBelowTrustedValuePercent { get; set; } = 25;
+
+        // Derived from the percent, because the enforcement math compares a 0..1 fraction.
+        [JsonIgnore] public double MarketplaceMinFractionOfTrustedValue  => MarketplaceMinPercentOfTrustedValue / 100.0;
+        [JsonIgnore] public double MarketplaceWarnFractionOfTrustedValue => MarketplaceWarnBelowTrustedValuePercent / 100.0;
+        public bool   MarketplaceBlockSuspiciousUnderpricedListings { get; set; } = true;
+
         public int AuctionMaxOpenPerUser      { get; set; } = 5;
         public int AuctionDefaultDurationHours { get; set; } = 24;
         public int AuctionMaxDurationHours    { get; set; } = 72;
         public int AuctionAntiSnipeMinutes    { get; set; } = 5;   // a late bid extends the close by this much
 
-        // --- want-to-buy board (buyers escrow silver up front; sellers fulfill from treasury) ---
         public int WantMaxOpenPerUser       { get; set; } = 10;
         public int WantDefaultDurationHours { get; set; } = 72;
         public int WantMaxDurationHours     { get; set; } = 168; // 7 days
-
-        // --- cached accessor ---
 
         private static EconomyConfig _current;
         public static EconomyConfig Current => _current ?? (_current = LoadOrDefault());
@@ -131,16 +108,14 @@ namespace KMHServerAddon.Features.Economy
             return cfg;
         }
 
-        // Generate the file with defaults on first boot so admins have something to edit. No-op if it already exists.
-        // BRAND-NEW servers get the recommended Balanced profile (caps/cooldowns/fees but still remote-convenient).
+        // A brand-new server starts on Balanced rather than the permissive Standard default.
         public static void EnsureGenerated()
         {
             if (!System.IO.File.Exists(KmhDataPaths.EconomyConfigFile))
                 JsonFileStore.Save(KmhDataPaths.EconomyConfigFile, new EconomyConfig { EconomyMode = "Balanced" });
         }
 
-        // A v1.1.1 Economy.json has no EconomyMode key: the owner never chose a mode, so migrate the legacy server to the
-        // recommended Balanced BEFORE backfill locks in Standard. Owner-safe - only fires when the key is absent.
+        // Must run before backfill, which would otherwise lock a legacy file into the permissive Standard mode.
         public static bool MigrateLegacyModeToBalanced()
         {
             string path = KmhDataPaths.EconomyConfigFile;
@@ -160,16 +135,20 @@ namespace KMHServerAddon.Features.Economy
             _current = LoadOrDefault();
             Diagnostics.ServerLog.Info(
                 $"Economy config reloaded (tax {_current.MarketplaceTaxPercent}%, " +
-                $"price {_current.MarketplaceMinUnitPrice}-{_current.MarketplaceMaxUnitPrice}, " +
+                $"price {_current.MarketplaceMinUnitPrice:0.###}-{_current.MarketplaceMaxUnitPrice:0.###}, " +
                 $"max {_current.MarketplaceMaxOpenListingsPerUser} listings/user, " +
                 $"lifetime {_current.MarketplaceListingLifetimeHours}h)");
         }
+
+        // Seam for the migration harness, which has to prove a migrated file lands on values a listing can use.
+        internal static EconomyConfig ClampForTest(EconomyConfig cfg) { cfg?.ClampInPlace(); return cfg; }
 
         private void ClampInPlace()
         {
             if (MaxSilverDepositPerTx  < 0) MaxSilverDepositPerTx  = 0;   // 0 = no cap
             if (MaxItemDepositQtyPerTx < 0) MaxItemDepositQtyPerTx = 0;
             PendingDepositTimeoutMinutes = Clamp(PendingDepositTimeoutMinutes, 1, 24 * 60);
+            MaxUnconfirmedDepositsPerPlayer = Clamp(MaxUnconfirmedDepositsPerPlayer, 1, 1000);
             TreasuryDepositCooldownSeconds  = Clamp(TreasuryDepositCooldownSeconds, 0, 3600);
             TreasuryWithdrawCooldownSeconds = Clamp(TreasuryWithdrawCooldownSeconds, 0, 3600);
             TreasuryDepositFeePercent       = ClampD(TreasuryDepositFeePercent, 0.0, 50.0);
@@ -181,7 +160,6 @@ namespace KMHServerAddon.Features.Economy
             GuildTreasuryAccessMode    = NormalizeMode(GuildTreasuryAccessMode, "Remote", ValidGuildModes);
             GuildHallAccessRadiusTiles = Clamp(GuildHallAccessRadiusTiles, 0, 1000);
 
-            // Any Guild Hall rule enabled?
             AnyGuildHallRule = RequireGuildHallToCreateGuild || RequireGuildHallForGuildTreasury
                 || RequireGuildHallForGuildContributions || RequireCaravanNearGuildHallForContribution
                 || RequireMemberNearGuildHallToJoin || !AllowRemoteGuildInvites
@@ -191,13 +169,14 @@ namespace KMHServerAddon.Features.Economy
             DemandTaxSwingPercent             = Clamp(DemandTaxSwingPercent, 0, 90);
             MarketplaceListingLifetimeHours   = Clamp(MarketplaceListingLifetimeHours, 1, 24 * 365);
             MarketplaceMaxOpenListingsPerUser = Clamp(MarketplaceMaxOpenListingsPerUser, 1, 10_000);
-            MarketplaceMinUnitPrice           = Clamp(MarketplaceMinUnitPrice, 1, 1_000_000);
-            MarketplaceMaxUnitPrice           = Clamp(MarketplaceMaxUnitPrice, MarketplaceMinUnitPrice, 1_000_000_000);
-            MarketplaceMinUnitPriceMilli      = Clamp(MarketplaceMinUnitPriceMilli, 1, 1_000_000_000);
-            MarketplaceMaxUnitPriceMilli      = Clamp(MarketplaceMaxUnitPriceMilli, MarketplaceMinUnitPriceMilli, 2_000_000_000);
-            MarketplaceMinPercentOfTrustedValue     = ClampD(MarketplaceMinPercentOfTrustedValue, 0.0, 1.0);
-            MarketplaceWarnBelowTrustedValuePercent = ClampD(MarketplaceWarnBelowTrustedValuePercent, 0.0, 1.0);
-            MarketplaceListingFeePercent            = ClampD(MarketplaceListingFeePercent, 0.0, 0.5);
+            RoadworksSilverPerSegmentTrail   = Clamp(RoadworksSilverPerSegmentTrail,   0, 1_000_000);
+            RoadworksSilverPerSegmentRoad    = Clamp(RoadworksSilverPerSegmentRoad,    0, 1_000_000);
+            RoadworksSilverPerSegmentHighway = Clamp(RoadworksSilverPerSegmentHighway, 0, 1_000_000);
+            RoadworksMaxSegmentsPerProject = Clamp(RoadworksMaxSegmentsPerProject, 1, 512);
+            MarketplaceMinUnitPrice           = ClampD(MarketplaceMinUnitPrice, 0.001, 1_000_000);
+            MarketplaceMaxUnitPrice           = ClampD(MarketplaceMaxUnitPrice, MarketplaceMinUnitPrice, 2_000_000);
+            MarketplaceMinPercentOfTrustedValue     = ClampD(MarketplaceMinPercentOfTrustedValue, 0.0, 100.0);
+            MarketplaceWarnBelowTrustedValuePercent = ClampD(MarketplaceWarnBelowTrustedValuePercent, 0.0, 100.0);
             AuctionMaxOpenPerUser             = Clamp(AuctionMaxOpenPerUser, 1, 1_000);
             AuctionDefaultDurationHours       = Clamp(AuctionDefaultDurationHours, 1, 24 * 30);
             AuctionMaxDurationHours           = Clamp(AuctionMaxDurationHours, AuctionDefaultDurationHours, 24 * 30);
@@ -214,7 +193,6 @@ namespace KMHServerAddon.Features.Economy
         private static readonly string[] ValidPersonalModes = { "Remote", "ColonyOnly", "CaravanOnly", "TreasurySiteRequired", "Disabled" };
         private static readonly string[] ValidGuildModes    = { "Remote", "GuildHallRequired", "CaravanNearGuildHall", "Disabled" };
 
-        // Case-insensitively map a config string to its canonical value; unknown -> fallback (logged elsewhere).
         private static string NormalizeMode(string v, string fallback, string[] valid)
         {
             if (string.IsNullOrWhiteSpace(v)) return fallback;
@@ -223,9 +201,7 @@ namespace KMHServerAddon.Features.Economy
             return fallback;
         }
 
-        // Resolve the mode preset into the effective policy the access checks read. Standard = all permissive (current
-        // behavior). Custom = the granular fields verbatim. Presets define a themed policy; owners wanting exact
-        // control use Custom.
+        // Custom returns the granular fields verbatim; every other mode ignores them entirely.
         public EconomyPolicy ResolvePolicy()
         {
             string m = (EconomyMode ?? "Standard").Trim().ToLowerInvariant();
@@ -257,7 +233,6 @@ namespace KMHServerAddon.Features.Economy
         }
     }
 
-    // The effective, resolved treasury policy the access checks read (derived from EconomyMode/Custom fields).
     internal readonly struct EconomyPolicy
     {
         public readonly string Mode;

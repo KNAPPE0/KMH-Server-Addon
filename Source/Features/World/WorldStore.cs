@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using KMHServerAddon.Features.World.Dto;
 using KMHServerAddon.Persistence;
@@ -15,8 +15,6 @@ namespace KMHServerAddon.Features.World
 
         // Completed/expired quests linger on the board before pruning.
         private static readonly long EndedQuestGraceTicks = TimeSpan.FromMinutes(30).Ticks;
-
-        // Persistence.
 
         private sealed class PersistedState
         {
@@ -38,7 +36,6 @@ namespace KMHServerAddon.Features.World
             Diagnostics.ServerLog.Info($"World: loaded {s.Events?.Count ?? 0} event(s), {s.Quests?.Count ?? 0} server quest(s)");
         }
 
-        // Season reset: clear all events and global quests.
         public static void ClearForNewSeason()
         {
             lock (_lock) { _events.Clear(); _quests.Clear(); _nextId = 1; }
@@ -68,8 +65,6 @@ namespace KMHServerAddon.Features.World
             JsonFileStore.Save(KmhDataPaths.WorldFile, s);
         }
 
-        // Events.
-
         // One active event per type; new events replace old ones.
         public static WorldEventDto AddEvent(string type, string title, string description,
                                              double magnitude, string target, int durationMinutes)
@@ -88,9 +83,7 @@ namespace KMHServerAddon.Features.World
                     Magnitude = magnitude,
                     Target = target ?? "",
                     StartedUtcTicks = now,
-                    // No duration = instantaneous, so it ends immediately. Writing a real timestamp (not a 0
-                    // sentinel) is what lets the sweep below collect it; 0 used to mean "never expires" and left
-                    // instantaneous and force-ended events active forever.
+                    // A real timestamp rather than 0, because 0 reads as "never expires" and the sweep would skip it.
                     EndsUtcTicks = durationMinutes > 0 ? now + TimeSpan.FromMinutes(durationMinutes).Ticks : now,
                 };
                 _events.Add(e);
@@ -99,9 +92,28 @@ namespace KMHServerAddon.Features.World
             return e;
         }
 
-        // Removes every event whose end time has passed - including legacy rows saved with a 0 end, which older
-        // builds never collected. Only events that actually ran for a while are RETURNED (and so announced as
-        // ended); an instantaneous one has nothing to announce the end of.
+        // Removed outright rather than re-added with a 0 duration, which would read as "never expires".
+        public static int RemoveEvent(string type)
+        {
+            int n;
+            lock (_lock) { n = _events.RemoveAll(e => e != null && string.Equals(e.Type, type, StringComparison.OrdinalIgnoreCase)); }
+            if (n > 0) SaveToDisk();
+            return n;
+        }
+
+        // Drops stranded 0-end rows left in World.json by builds before AddEvent stopped writing that sentinel.
+        public static int PurgeEndlessEvents()
+        {
+            int n;
+            lock (_lock) { n = _events.RemoveAll(IsEndless); }
+            if (n > 0) SaveToDisk();
+            return n;
+        }
+
+        // An event with no positive end time can never be swept, so it is stranded rather than merely long-running.
+        public static bool IsEndless(WorldEventDto e) => e != null && e.EndsUtcTicks <= 0;
+
+        // Only events that actually ran are returned, because an instantaneous one has no ending to announce.
         public static List<WorldEventDto> CollectEndedEvents(long now)
         {
             List<WorldEventDto> ended = new List<WorldEventDto>();
@@ -137,12 +149,9 @@ namespace KMHServerAddon.Features.World
             return null;
         }
 
-        // Economy modifiers used while events are live.
-
         public static bool IsTaxHoliday()
             => FindActive(WorldEventDto.TaxHoliday, DateTime.UtcNow.Ticks) != null;
 
-        // Server-wide seller payout multiplier.
         public static double MarketPayoutMultiplier()
         {
             long now = DateTime.UtcNow.Ticks;
@@ -154,7 +163,6 @@ namespace KMHServerAddon.Features.World
             return m < 0 ? 0 : m;
         }
 
-        // Adds resource-shortage spikes on top of boom/crash modifiers.
         public static double MarketPayoutMultiplierFor(string itemDefName)
         {
             double m = MarketPayoutMultiplier();
@@ -172,8 +180,6 @@ namespace KMHServerAddon.Features.World
             return e != null && e.Magnitude > 0 ? e.Magnitude / 100.0 : 1.0;
         }
 
-        // Server quests.
-
         // Completion result for quest contribution updates.
         public sealed class QuestContribution
         {
@@ -183,11 +189,12 @@ namespace KMHServerAddon.Features.World
             public Dictionary<string, long> Payouts { get; set; }
         }
 
-        // Records a quest after the caller reserves the house-pool reward. reservedFromPool = the portion of
-        // rewardPool that came from real house silver (the rest, if any, was minted); only that is refundable.
+        // reservedFromPool is the part that came from real house silver, and only that is ever refundable.
         public static ServerQuestDto CreateQuest(string kind, string objective, string targetDef, string title,
                                                  string description, int goalQty, long rewardPool, int durationMinutes,
-                                                 long reservedFromPool = 0)
+                                                 long reservedFromPool = 0, string operationType = null,
+                                                 string operationSource = null, int targetSiteTile = -1,
+                                                 string consequence = null)
         {
             long now = DateTime.UtcNow.Ticks;
             ServerQuestDto q;
@@ -208,11 +215,41 @@ namespace KMHServerAddon.Features.World
                     State = ServerQuestDto.StateActive,
                     Winner = "",
                     EndsUtcTicks = durationMinutes > 0 ? now + TimeSpan.FromMinutes(durationMinutes).Ticks : 0,
+                    OperationType = operationType ?? ServerQuestDto.OpNone,
+                    OperationSource = operationSource ?? "",
+                    TargetSiteTile = targetSiteTile,
+                    Consequence = consequence ?? ServerQuestDto.ConsequenceNone,
                 };
                 _quests.Add(q);
             }
             SaveToDisk();
             return q;
+        }
+
+        // Contributions for one operation, copied out so the caller never holds this lock while taking its own.
+        public static bool TryGetContributions(long questId, out Dictionary<string, int> qty,
+                                               out Dictionary<string, long> firstUtc)
+        {
+            qty = null; firstUtc = null;
+            lock (_lock)
+                foreach (ServerQuestDto q in _quests)
+                    if (q.Id == questId)
+                    {
+                        qty = new Dictionary<string, int>(q.Contributors, StringComparer.OrdinalIgnoreCase);
+                        firstUtc = new Dictionary<string, long>(q.ContributorFirstUtc, StringComparer.OrdinalIgnoreCase);
+                        return true;
+                    }
+            return false;
+        }
+
+        // The live record: never enumerate its contributor dictionaries outside this lock, because a delivery mutates them.
+        public static ServerQuestDto FindQuest(long questId)
+        {
+            lock (_lock)
+            {
+                foreach (ServerQuestDto q in _quests) if (q.Id == questId) return q;
+                return null;
+            }
         }
 
         public static List<ServerQuestDto> ActiveQuests()
@@ -223,6 +260,39 @@ namespace KMHServerAddon.Features.World
                 foreach (ServerQuestDto q in _quests) if (IsActive(q)) list.Add(q);
                 return list;
             }
+        }
+
+        // Live quests carrying a Frontier consequence - what the director's reference list is reconciled against.
+        public static List<long> ActiveOperationIds()
+        {
+            var outp = new List<long>();
+            lock (_lock)
+                foreach (ServerQuestDto x in _quests)
+                    if (x != null && IsActive(x)
+                        && !string.IsNullOrEmpty(x.Consequence)
+                        && !string.Equals(x.Consequence, ServerQuestDto.ConsequenceNone, StringComparison.OrdinalIgnoreCase))
+                        outp.Add(x.Id);
+            return outp;
+        }
+
+        // A contested location with no live operation behind it is waiting for something that will never come.
+        public static HashSet<int> ActiveOperationTiles()
+        {
+            var outp = new HashSet<int>();
+            lock (_lock)
+                foreach (ServerQuestDto x in _quests)
+                    if (x != null && IsActive(x) && x.TargetSiteTile >= 0
+                        && !string.IsNullOrEmpty(x.Consequence)
+                        && !string.Equals(x.Consequence, ServerQuestDto.ConsequenceNone, StringComparison.OrdinalIgnoreCase))
+                        outp.Add(x.TargetSiteTile);
+            return outp;
+        }
+
+        public static bool IsActiveQuest(long questId)
+        {
+            lock (_lock)
+                foreach (ServerQuestDto x in _quests) if (x != null && x.Id == questId) return IsActive(x);
+            return false;
         }
 
         private static bool IsActive(ServerQuestDto q)
@@ -249,6 +319,7 @@ namespace KMHServerAddon.Features.World
                 q.Contributors.TryGetValue(user, out int prev);
                 int val = Math.Max(prev, capped);
                 if (val == prev) return r;
+                if (!q.ContributorFirstUtc.ContainsKey(user)) q.ContributorFirstUtc[user] = DateTime.UtcNow.Ticks;
                 q.Contributors[user] = val;
                 r.Changed = true; save = true;
 
@@ -259,15 +330,32 @@ namespace KMHServerAddon.Features.World
             return r;
         }
 
-        // Delivery credit result.
         public sealed class DeliveryResult
         {
             public enum Outcome { Applied, Dropped }
             public Outcome State { get; set; } = Outcome.Dropped;
             public bool Completed { get; set; }
             public int Amount { get; set; }
+            // Goods handed over that the objective had no room for. The caller owns giving them back.
+            public int Surplus { get; set; }
             public ServerQuestDto Quest { get; set; }
             public Dictionary<string, long> Payouts { get; set; }
+        }
+
+        // Read-only, so the caller withdraws exactly this much from the treasury BEFORE asking for credit - progress must be backed by owned goods.
+        public static int DeliverableRoom(long questId, string user, string itemDef)
+        {
+            if (string.IsNullOrEmpty(user) || string.IsNullOrEmpty(itemDef)) return 0;
+            lock (_lock)
+            {
+                ServerQuestDto q = null;
+                foreach (ServerQuestDto x in _quests) if (x.Id == questId) { q = x; break; }
+                if (q == null || !IsActive(q)) return 0;
+                if (!string.Equals(q.Objective, ServerQuestDto.ObjDeliver, StringComparison.OrdinalIgnoreCase)
+                    || !string.Equals(q.TargetDefName, itemDef, StringComparison.OrdinalIgnoreCase)) return 0;
+                q.Contributors.TryGetValue(user, out int prev);
+                return Math.Max(0, RoomLeftFor(q, prev));
+            }
         }
 
         // Additive delivery credit for active matching deliver quests only.
@@ -288,10 +376,14 @@ namespace KMHServerAddon.Features.World
                 r.Quest = q;
                 if (!IsActive(q)) return r;   // matched but ended - no credit, no refund
 
-                // Clamp forged qty to prevent over-credit or overflow.
-                int amount = Math.Min(qty, Math.Max(1, q.GoalQty));
-                r.Amount = amount;
                 q.Contributors.TryGetValue(user, out int prev);
+                // Room only: over-accepting inflates progress past the goal and buys a Frontier claim outright.
+                int amount = Math.Min(qty, Math.Max(0, RoomLeftFor(q, prev)));
+                if (amount <= 0) { r.Surplus = qty; return r; }   // nothing left to give: all of it goes back
+
+                r.Amount = amount;
+                r.Surplus = qty - amount;
+                if (!q.ContributorFirstUtc.ContainsKey(user)) q.ContributorFirstUtc[user] = DateTime.UtcNow.Ticks;
                 q.Contributors[user] = (int)Math.Min(int.MaxValue, (long)prev + amount);
                 r.State = DeliveryResult.Outcome.Applied;
                 save = true;
@@ -301,6 +393,16 @@ namespace KMHServerAddon.Features.World
             }
             if (save) SaveToDisk();
             return r;
+        }
+
+        // Cooperative shares one pool; competitive is a race each player runs to the goal on their own.
+        internal static int RoomLeftFor(ServerQuestDto q, int contributorSoFar)
+        {
+            if (q == null) return 0;
+            int goal = Math.Max(1, q.GoalQty);
+            bool comp = string.Equals(q.Kind, ServerQuestDto.KindCompetitive, StringComparison.OrdinalIgnoreCase);
+            long room = comp ? goal - (long)Math.Max(0, contributorSoFar) : goal - (long)Math.Max(0, q.ProgressQty);
+            return room <= 0 ? 0 : (int)Math.Min(int.MaxValue, room);
         }
 
         // Recomputes progress, completes the quest, and returns payouts when finished.
@@ -414,17 +516,30 @@ namespace KMHServerAddon.Features.World
             return p;
         }
 
-        // Snapshot.
-
+        // Copied because serialization runs after this lock releases, and a delivery would mutate a quest mid-send.
         public static WorldSnapshot BuildSnapshot()
         {
             WorldSnapshot snap = new WorldSnapshot();
             lock (_lock)
             {
-                snap.Events.AddRange(_events);
-                snap.ServerQuests.AddRange(_quests);   // active + recently-ended
+                snap.Revision = Util.KmhSnapshotRevision.Next();
+                foreach (WorldEventDto e in _events) snap.Events.Add(e.ShallowClone());
+                foreach (ServerQuestDto q in _quests) snap.ServerQuests.Add(CopyQuest(q));   // active + recently-ended
             }
             return snap;
+        }
+
+        internal static ServerQuestDto CopyQuest(ServerQuestDto q)
+        {
+            if (q == null) return null;
+            ServerQuestDto c = q.ShallowClone();
+            c.Contributors = q.Contributors == null
+                ? new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+                : new Dictionary<string, int>(q.Contributors, StringComparer.OrdinalIgnoreCase);
+            c.ContributorFirstUtc = q.ContributorFirstUtc == null
+                ? new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase)
+                : new Dictionary<string, long>(q.ContributorFirstUtc, StringComparer.OrdinalIgnoreCase);
+            return c;
         }
     }
 }

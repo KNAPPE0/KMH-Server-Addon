@@ -1,10 +1,8 @@
 namespace KMH.Sdk.Server.Apis
 {
     /// <summary>
-    /// SDK-safe wrapper around a KMH protocol envelope. Hides
-    /// Newtonsoft.Json's <c>JObject</c> from extension surface so
-    /// extensions don't have to pull in a specific Newtonsoft version
-    /// to read payload fields.
+    /// A protocol envelope, hiding Newtonsoft's <c>JObject</c> so an extension need not pin a Newtonsoft version to
+    /// read payload fields.
     /// </summary>
     public interface IKmhEnvelope
     {
@@ -24,10 +22,8 @@ namespace KMH.Sdk.Server.Apis
         bool GetBool(string key, bool defaultValue = false);
 
         /// <summary>
-        /// Deserialise the entire payload as a typed DTO. Newtonsoft
-        /// is used under the hood; your DTO can use
-        /// <c>[JsonProperty]</c> attributes if its property names
-        /// don't match the wire shape.
+        /// Deserialise the whole payload as a DTO, which may use <c>[JsonProperty]</c> where its names differ from
+        /// the wire shape.
         /// </summary>
         /// <typeparam name="T">Reference type with a parameterless ctor.</typeparam>
         T DataAs<T>() where T : class;

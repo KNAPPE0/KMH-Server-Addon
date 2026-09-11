@@ -3,10 +3,10 @@ using KMH.Sdk.Server.Records;
 
 namespace KMH.Sdk.Server.Apis
 {
-    /// <summary>Read + bump the KMH player roster + lifetime stats.</summary>
+    /// <summary>Read and bump the KMH player roster and its cumulative per-server totals.</summary>
     public interface IPlayerStatsApi
     {
-        /// <summary>Every player ever seen on this server, with their lifetime totals.</summary>
+        /// <summary>Every player seen on this server, with totals that accumulate until a destructive season reset.</summary>
         IReadOnlyList<PlayerStatRecord> GetAll();
 
         /// <summary>Ensure a player record exists (idempotent - safe to call on every login).</summary>

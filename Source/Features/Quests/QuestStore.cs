@@ -1,13 +1,11 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using KMHServerAddon.Features.Quests.Dto;
 using KMHServerAddon.Persistence;
 
 namespace KMHServerAddon.Features.Quests
 {
-    // Quest board, persisted to KMH-Data/Quests/Quests.json. Bounty (silver + items) is escrowed from the poster's
-    // treasury at Post and flows to the claimer on completion, back to the poster on cancel/expire. Lock-guarded
-    // like the other stores
+    // A bounty is escrowed out of the poster's treasury at Post, so it exists outside a vault until it settles.
     internal static class QuestStore
     {
         private static readonly object _lock = new object();
@@ -19,9 +17,6 @@ namespace KMHServerAddon.Features.Quests
         private static long _lifetimeQuestsCompleted  = 0;
         private static long _lifetimeBountySilverPaid = 0;
 
-        // Forged-packet caps live in config/quests.json (QuestsConfig) so owners can tune them without code
-
-        // Admin-cleanup residual detector: how many active quests the user posted / claimed (read-only).
         public static (int posted, int claimed) CountForUser(string user)
         {
             if (string.IsNullOrEmpty(user)) return (0, 0);
@@ -36,18 +31,27 @@ namespace KMHServerAddon.Features.Quests
             return (p, c);
         }
 
-        // Per-caller snapshot. Filters out guild-only quests the caller isn't entitled to see (own guild + allied
-        // guilds get visibility). Caller's own posts always pass through - managing what you posted shouldn't
-        // depend on still being in the same guild
+        // Deliberately coarse, because being wrong here shows one player another's hidden quest.
+        public static HashSet<string> PostersOfNonPublic()
+        {
+            HashSet<string> posters = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
+            lock (_lock)
+                foreach (QuestEntry q in _byId.Values)
+                    if (q != null && !string.IsNullOrEmpty(q.PosterUsername)
+                        && !string.Equals(q.Visibility, Guilds.GuildVisibility.Public, System.StringComparison.OrdinalIgnoreCase))
+                        posters.Add(q.PosterUsername);
+            return posters;
+        }
+
         public static QuestSnapshot BuildSnapshot(string callerUsername)
         {
             QuestSnapshot s = new QuestSnapshot();
-            // Resolve once outside the per-quest loop - see Marketplace Store.BuildSnapshot for the rationale
             string callerGuild = string.IsNullOrEmpty(callerUsername)
                 ? null
                 : Guilds.GuildStore.CurrentGuildOf(callerUsername);
             lock (_lock)
             {
+                s.Revision = Util.KmhSnapshotRevision.Next();
                 s.LifetimeQuestsPosted     = _lifetimeQuestsPosted;
                 s.LifetimeQuestsCompleted  = _lifetimeQuestsCompleted;
                 s.LifetimeBountySilverPaid = _lifetimeBountySilverPaid;
@@ -67,8 +71,7 @@ namespace KMHServerAddon.Features.Quests
             return s;
         }
 
-        // Thin wrapper for the SDK + simple callers (DeliverItem / Bounty). Builds a draft and routes through
-        // PostDraft so all kinds share one validation + escrow path
+        // Routes through PostDraft so every kind shares one validation and escrow path.
         public static long Post(
             string posterUsername,
             string kind,
@@ -93,9 +96,7 @@ namespace KMHServerAddon.Features.Quests
             return PostDraft(posterUsername, draft, expiresInHours, out _);
         }
 
-        // Full post path: per-kind validation + forged-packet caps + bounty silver AND item escrow + per-user
-        // open-quest cap. Returns the new quest id or 0 with a human-readable reason. expiresInHours <= 0 uses the
-        // default lifetime
+        // 0 with a reason on refusal; expiresInHours of 0 or less takes the configured lifetime.
         public static long PostDraft(string posterUsername, QuestEntry draft, int expiresInHours, out string reason)
         {
             reason = null;
@@ -114,26 +115,22 @@ namespace KMHServerAddon.Features.Quests
 
             if (!ValidateKind(kind, draft, out reason)) return 0;
 
-            // Per-user open-quest cap (a single client's packets are serial, so counting under the lock is
-            // sufficient)
             lock (_lock)
             {
-                int open = 0;
-                foreach (QuestEntry q in _byId.Values)
-                    if (string.Equals(q.PosterUsername, posterUsername, StringComparison.OrdinalIgnoreCase)
-                        && (q.State == QuestEntry.StateOpen || q.State == QuestEntry.StateClaimed
-                            || q.State == QuestEntry.StateSubmitted || q.State == QuestEntry.StatePendingReview))
-                        open++;
+                int open = OpenCountLocked(posterUsername);
                 if (open >= QuestsConfig.Current.MaxOpenPerUser)
                 { reason = $"You already have the max {QuestsConfig.Current.MaxOpenPerUser} active quests."; return 0; }
             }
 
-            // Escrow bounty silver.
+            // Runs before escrow, so a denial leaves no side effects.
+            KMH.Sdk.Server.Hooks.KmhHookVerdict hookVerdict = Extensibility.KmhHooks.Instance.CheckQuestPost(
+                new KMH.Sdk.Server.Hooks.KmhQuestPostContext(posterUsername, kind, title, draft.BountySilver));
+            if (hookVerdict.Denied) { reason = hookVerdict.Reason; return 0; }
+
             if (draft.BountySilver > 0 &&
                 !Treasury.TreasuryStore.WithdrawSilver(posterUsername, draft.BountySilver, note: "quest bounty escrow"))
             { reason = "Your treasury is short on bounty silver."; return 0; }
 
-            // Escrow bounty items (with rollback on shortfall).
             Dictionary<string, int> escrowed = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             if (draft.BountyItems != null && draft.BountyItems.Count > 0)
             {
@@ -148,11 +145,10 @@ namespace KMHServerAddon.Features.Quests
 
                     if (!Treasury.TreasuryStore.WithdrawItem(posterUsername, itemKey, want, note: "quest bounty escrow"))
                     {
-                        // Roll back: return already-escrowed items + the silver.
                         foreach (KeyValuePair<string, int> prev in escrowed)
-                            Treasury.TreasuryStore.DepositItem(posterUsername, prev.Key, prev.Value, note: "quest-post-failed refund");
+                            Items.KmhPayloadEscrow.DeliverCompact(posterUsername, prev.Key, prev.Value, "quest-post-failed refund", "quest bounty item refund could not be returned");
                         if (draft.BountySilver > 0)
-                            Treasury.TreasuryStore.DepositSilver(posterUsername, draft.BountySilver, note: "quest-post-failed refund");
+                            Items.KmhPayloadEscrow.DeliverSilver(posterUsername, draft.BountySilver, "quest-post-failed refund", "quest bounty refund could not be credited");
                         reason = $"Your treasury is short on bounty item '{itemKey}'.";
                         return 0;
                     }
@@ -160,7 +156,7 @@ namespace KMHServerAddon.Features.Quests
                 }
             }
 
-            // Solo posters can't scope GuildOnly - downgrade to Public.
+            // A solo poster has no guild to scope to, so GuildOnly would hide the quest from everyone.
             string posterKey = Treasury.TreasuryStore.ResolveOwnerKeyFor(posterUsername);
             string visibility = string.IsNullOrEmpty(draft.Visibility) ? QuestEntry.VisibilityPublic : draft.Visibility;
             bool posterIsGuild = !posterKey.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase);
@@ -168,9 +164,14 @@ namespace KMHServerAddon.Features.Quests
                 visibility = QuestEntry.VisibilityPublic;
 
             long now = DateTime.UtcNow.Ticks;
-            long assignedId;
+            long assignedId = 0;
+            bool overCap;
             lock (_lock)
             {
+                // Re-counted because the escrow above released the lock: two posts racing for one slot both passed the first check.
+                overCap = OpenCountLocked(posterUsername) >= QuestsConfig.Current.MaxOpenPerUser;
+                if (!overCap)
+                {
                 assignedId = _nextId++;
                 _byId[assignedId] = new QuestEntry
                 {
@@ -189,7 +190,6 @@ namespace KMHServerAddon.Features.Quests
                     TargetQualityIndex = Util.ItemKey.Clamp(draft.TargetQualityIndex),
                     PostedUtcTicks    = now,
                     ExpiresUtcTicks   = now + TimeSpan.FromHours(expiresInHours > 0 ? expiresInHours : 168).Ticks,
-                    // Per-kind params.
                     EscortPickupTile        = draft.EscortPickupTile,
                     EscortDropoffTile       = draft.EscortDropoffTile,
                     EscortTargetDescription = (draft.EscortTargetDescription ?? "").Length > 200
@@ -206,15 +206,29 @@ namespace KMHServerAddon.Features.Quests
                     ReviewState             = QuestEntry.ReviewNotApplicable,
                 };
                 _lifetimeQuestsPosted += 1;
+                }
             }
-            SaveToDisk();
+            // Lost the race for the last slot, so the escrow goes straight back rather than being kept for nothing.
+            if (overCap)
+            {
+                RefundBounty(posterUsername, escrowed, draft.BountySilver, "quest post refund (open-quest limit reached)");
+                reason = $"You already have the max {QuestsConfig.Current.MaxOpenPerUser} active quests - your bounty was returned.";
+                return 0;
+            }
+            // The bounty already left the poster's treasury, so an unwritten post hands the whole escrow straight back.
+            if (!SaveToDisk())
+            {
+                lock (_lock) { _byId.Remove(assignedId); _lifetimeQuestsPosted -= 1; }
+                RefundBounty(posterUsername, escrowed, draft.BountySilver, "quest post could not be saved");
+                reason = "The server couldn't save that quest - your bounty was returned. Try again shortly.";
+                return 0;
+            }
             Reputation.ReputationStore.EnsurePlayer(posterUsername);
             Extensibility.KmhEventBus.Instance.RaiseQuestPosted(new KMH.Sdk.Server.Events.QuestPostedEvent { QuestId = assignedId, Kind = kind, PosterUsername = posterUsername, BountySilver = draft.BountySilver });
             reason = $"Posted quest #{assignedId}: {title}.";
             return assignedId;
         }
 
-        // Per-kind validation + clamping.
         private static bool ValidateKind(string kind, QuestEntry d, out string reason)
         {
             reason = null;
@@ -300,17 +314,13 @@ namespace KMHServerAddon.Features.Quests
             return ok;
         }
 
-        // DeliverItem auto-completes (poster's treasury gains items); Bounty just moves to Submitted (manual Approve).
-        // Returns the other affected party via out param so the handler can push them a fresh treasury snapshot.
+        // Returns the other affected party, so the handler can push them a fresh treasury snapshot.
         public static bool Submit(string claimerUsername, long questId, out string posterAffected)
         {
             posterAffected = null;
             if (string.IsNullOrEmpty(claimerUsername)) return false;
 
-            // Eligibility check + state transition happen TOGETHER under the lock. For DeliverItem we flip straight
-            // to Completed here (before the treasury moves below) so a second concurrent Submit can't also pass the
-            // Claimed check on the same quest; on a treasury failure we revert to Claimed. Fields the treasury
-            // moves need are captured while we hold the lock
+            // The state flips under the same lock as the eligibility check, or a second Submit could also pass it.
             string kind;
             string targetDef = null, poster = null;
             int    targetQty = 0, bounty = 0, targetQual = 0;
@@ -330,8 +340,6 @@ namespace KMHServerAddon.Features.Quests
                 }
                 else
                 {
-                    // DeliverItem: only a Claimed quest can submit. Reserve the completion atomically with the
-                    // check
                     if (q.State != QuestEntry.StateClaimed) return false;
                     targetDef   = q.TargetItemDefName;
                     targetQty   = q.TargetItemQty;
@@ -351,53 +359,82 @@ namespace KMHServerAddon.Features.Quests
                 return true;
             }
 
-            // DeliverItem: server-verifiable. Move items claimer -> poster, pay bounty to claimer. The quest is
-            // already marked Completed
-            if (!Treasury.TreasuryStore.TryWithdrawMatching(claimerUsername, targetDef, targetQual, targetQty,
+            // The quest is already marked Completed above, so a failure here has to revert it.
+            List<KeyValuePair<string, int>> compactPaid = null;
+            List<Items.KmhThingPayload>     payloadPaid = null;
+            if (Treasury.TreasuryStore.TryWithdrawMatching(claimerUsername, targetDef, targetQual, targetQty,
                     $"quest #{questId} delivery", out var deliveredKeys))
             {
-                // Claimer doesn't have the goods - revert the optimistic completion so the quest stays Claimed and
-                // can be retried
-                lock (_lock)
-                {
-                    if (_byId.TryGetValue(questId, out QuestEntry q2))
-                    {
-                        q2.State             = QuestEntry.StateClaimed;
-                        q2.CompletedUtcTicks = 0;
-                    }
-                }
-                return false;
+                compactPaid = deliveredKeys;
             }
-            foreach (var kv in deliveredKeys)
-                Treasury.TreasuryStore.DepositItem(poster, kv.Key, kv.Value,
-                    note: $"quest #{questId} delivery from {claimerUsername}");
-
-            if (bounty > 0)
+            else
             {
-                Treasury.TreasuryStore.DepositSilver(claimerUsername, bounty,
-                    note: $"quest #{questId} bounty");
+                // The def may be held as full-state payloads instead, which the compact withdraw cannot see.
+                List<Items.KmhThingPayload> paid = Treasury.TreasuryStore.TryWithdrawMatchingPayloads(
+                    claimerUsername, targetDef, "", targetQual, allowTainted: true, allowDamaged: true, targetQty,
+                    $"quest #{questId} delivery");
+                int got = 0; foreach (Items.KmhThingPayload p in paid) got += p.StackCount;
+                if (got < targetQty)
+                {
+                    // Reverts the optimistic completion so the quest stays Claimed and can be retried.
+                    if (paid.Count > 0) Items.KmhPayloadEscrow.RefundTo(claimerUsername, paid, $"quest #{questId} delivery returned");
+                    lock (_lock)
+                    {
+                        if (_byId.TryGetValue(questId, out QuestEntry q2)) { q2.State = QuestEntry.StateClaimed; q2.CompletedUtcTicks = 0; }
+                    }
+                    return false;
+                }
+                payloadPaid = paid;
             }
-            DepositBountyItems(bountyItems, claimerUsername, $"quest #{questId} bounty");
 
+            // Completion is durable before the bounty is released, or a restart finds the quest still Claimed with a payable escrow.
+            bool unwind;
             lock (_lock)
             {
                 _lifetimeQuestsCompleted  += 1;
                 _lifetimeBountySilverPaid += bounty;
+                unwind = !SaveToDisk();
+                if (unwind)
+                {
+                    _lifetimeQuestsCompleted  -= 1;
+                    _lifetimeBountySilverPaid -= bounty;
+                    if (_byId.TryGetValue(questId, out QuestEntry q3)) { q3.State = QuestEntry.StateClaimed; q3.CompletedUtcTicks = 0; }
+                }
+            }
+            // Returned outside the lock: the treasury has one of its own, and nesting them is how a deadlock starts.
+            if (unwind)
+            {
+                if (compactPaid != null)
+                    foreach (var kv in compactPaid)
+                        Items.KmhPayloadEscrow.DeliverCompact(claimerUsername, kv.Key, kv.Value, $"quest #{questId} delivery returned", "quest delivery return failed");
+                if (payloadPaid != null) Items.KmhPayloadEscrow.RefundTo(claimerUsername, payloadPaid, $"quest #{questId} delivery returned");
+                return false;
             }
 
-            // Cross-feature: leaderboard + reputation credit on the claimer.
+            // The claimer has already paid, so a failed hand-off is held rather than dropped.
+            if (compactPaid != null)
+                foreach (var kv in compactPaid)
+                    Items.KmhPayloadEscrow.DeliverCompact(poster, kv.Key, kv.Value,
+                        $"quest #{questId} delivery from {claimerUsername}", "quest delivery to poster failed");
+            if (payloadPaid != null)
+                foreach (Items.KmhThingPayload p in payloadPaid)
+                    Items.KmhPayloadEscrow.Deliver(poster, p, $"quest #{questId} delivery from {claimerUsername}", "quest delivery to poster failed");
+
+            if (bounty > 0)
+            {
+                Items.KmhPayloadEscrow.DeliverSilver(claimerUsername, bounty,
+                    $"quest #{questId} bounty", "quest bounty could not be credited");
+            }
+            DepositBountyItems(bountyItems, claimerUsername, $"quest #{questId} bounty");
+
             PlayerStats.PlayerStatsStore.RecordContractCompleted(claimerUsername, kind);
             Reputation.ReputationStore.RecordCompleted(claimerUsername);
-            // Poster's treasury just received the delivered items.
             posterAffected = poster;
-            SaveToDisk();
             Extensibility.KmhEventBus.Instance.RaiseQuestSubmitted(new KMH.Sdk.Server.Events.QuestSubmittedEvent { QuestId = questId, ClaimerUsername = claimerUsername, AutoCompleted = true });
             return true;
         }
 
-        // Server-initiated expiry. Only acts on Open quests - Claimed / Submitted / Completed quests keep their
-        // state (claimer might be mid-delivery; we don't want to nuke their progress). Returns the poster's
-        // username so the sweeper can push them a treasury update for the bounty refund
+        // Open quests only, since a claimer may be mid-delivery on any later state.
         public static bool ExpireQuest(long questId, out string posterAffected)
         {
             posterAffected = null;
@@ -412,24 +449,19 @@ namespace KMHServerAddon.Features.Quests
                 refundItems  = new Dictionary<string, int>(q.BountyItems, StringComparer.OrdinalIgnoreCase);
                 poster       = q.PosterUsername;
                 q.State      = QuestEntry.StateExpired;
-                // Expired quests drop off the active board same as Cancelled
-                // - display-only history is a follow-up if anyone wants it.
                 _byId.Remove(questId);
+                // Durable before the bounty comes back, or the sweeper expires and refunds the same quest again.
+                if (!SaveToDisk()) { q.State = QuestEntry.StateOpen; _byId[questId] = q; return false; }
             }
-            if (refundSilver > 0 && !string.IsNullOrEmpty(poster))
-            {
-                Treasury.TreasuryStore.DepositSilver(poster, refundSilver,
-                    note: $"quest #{questId} expired - bounty refund");
-            }
+            Items.KmhPayloadEscrow.DeliverSilver(poster, refundSilver,
+                $"quest #{questId} expired - bounty refund", "expired quest bounty could not be refunded");
             DepositBountyItems(refundItems, poster, $"quest #{questId} expired - bounty refund");
             posterAffected = poster;
             SaveToDisk();
             return true;
         }
 
-        // Drop Completed quests older than a day so the board + on-disk file
-        // don't grow without bound (Cancelled/Expired are removed immediately;
-        // only Completed lingers for a brief "recently done" window). Returns true if anything was pruned
+        // Only Completed lingers, as a brief "recently done" window; everything else is removed immediately.
         public static bool PruneFinalized(long nowTicks)
         {
             long cutoff = nowTicks - TimeSpan.FromDays(1).Ticks;
@@ -448,8 +480,24 @@ namespace KMHServerAddon.Features.Quests
             return changed;
         }
 
-        // Open quests with ExpiresUtcTicks > 0 and <= now. Used by the periodic sweeper; release-the-lock +
-        // iterate-outside pattern so the actual ExpireQuest calls don't hold the store lock
+        // Only a pre-settlement quest still holds its poster's bounty.
+        public static long EscrowValueFor(string username)
+        {
+            if (string.IsNullOrEmpty(username)) return 0;
+            long v = 0;
+            lock (_lock)
+                foreach (Dto.QuestEntry q in _byId.Values)
+                {
+                    if (q == null || !HoldsEscrow(q)) continue;
+                    if (!string.Equals(q.PosterUsername, username, StringComparison.OrdinalIgnoreCase)) continue;
+                    v += q.BountySilver;
+                    if (q.BountyItems != null)
+                        foreach (System.Collections.Generic.KeyValuePair<string, int> kv in q.BountyItems)
+                            v += Items.KmhItemSafety.GetTrustedMarketValue((kv.Key ?? "").Split('|')[0]) * kv.Value;
+                }
+            return v;
+        }
+
         public static List<long> CollectExpiredOpenIds(long nowTicks)
         {
             List<long> expired = new List<long>();
@@ -485,21 +533,21 @@ namespace KMHServerAddon.Features.Quests
                 refundItems  = new Dictionary<string, int>(q.BountyItems, StringComparer.OrdinalIgnoreCase);
                 q.State = QuestEntry.StateCancelled;
                 _byId.Remove(questId); // cancelled quests drop off the board immediately
+                // Durable before the bounty comes back, or a restart puts the quest back on the board with an escrow the poster already holds.
+                if (!SaveToDisk()) { q.State = QuestEntry.StateOpen; _byId[questId] = q; return false; }
             }
 
             if (refundSilver > 0)
             {
-                Treasury.TreasuryStore.DepositSilver(callerUsername, refundSilver,
-                    note: $"quest #{questId} cancel refund");
+                Items.KmhPayloadEscrow.DeliverSilver(callerUsername, refundSilver,
+                    $"quest #{questId} cancel refund", "quest cancel refund could not be credited");
             }
             DepositBountyItems(refundItems, callerUsername, $"quest #{questId} cancel refund");
-            SaveToDisk();
             Extensibility.KmhEventBus.Instance.RaiseQuestCancelled(new KMH.Sdk.Server.Events.QuestCancelledEvent { QuestId = questId, PosterUsername = callerUsername, ExpiredAutomatically = false });
             return true;
         }
 
-        // Bounty sign-off: poster pays out + marks Completed. Returns the claimer via out param so the handler can
-        // push them a fresh treasury snapshot (they just got bounty silver).
+        // Returns the claimer, so the handler can push them a fresh treasury snapshot.
         public static bool Approve(string callerUsername, long questId, out string claimerAffected)
         {
             claimerAffected = null;
@@ -512,8 +560,6 @@ namespace KMHServerAddon.Features.Quests
             lock (_lock)
             {
                 if (!_byId.TryGetValue(questId, out QuestEntry q)) return false;
-                // Poster sign-off applies to Bounty (Submitted) and any kind whose claimer submitted proof /
-                // auto-verified (PendingReview)
                 if (q.Kind != QuestEntry.KindBounty && q.State != QuestEntry.StatePendingReview) return false;
                 if (q.State != QuestEntry.StateSubmitted && q.State != QuestEntry.StatePendingReview) return false;
                 if (!string.Equals(q.PosterUsername, callerUsername, StringComparison.OrdinalIgnoreCase))
@@ -523,21 +569,25 @@ namespace KMHServerAddon.Features.Quests
                 kind         = q.Kind;
                 bountyItems  = new Dictionary<string, int>(q.BountyItems, StringComparer.OrdinalIgnoreCase);
 
-                // Flip to Completed + record the payout atomically with the eligibility check so a concurrent
-                // Approve can't double-pay the bounty. The actual silver credit happens after the lock
-                // (DepositSilver takes its own lock); it can't fail for valid input, so there's nothing to revert
+                // Recorded atomically with the eligibility check, or a concurrent Approve could double-pay.
                 q.State              = QuestEntry.StateCompleted;
                 q.CompletedUtcTicks  = DateTime.UtcNow.Ticks;
                 q.ReviewState        = QuestEntry.ReviewApproved;
                 _lifetimeQuestsCompleted  += 1;
                 _lifetimeBountySilverPaid += bountySilver;
+                // Approval is durable before the bounty is paid, or a restart returns the quest to Submitted and the same bounty pays twice.
+                if (!SaveToDisk())
+                {
+                    q.State = QuestEntry.StateSubmitted; q.CompletedUtcTicks = 0; q.ReviewState = QuestEntry.ReviewPending;
+                    _lifetimeQuestsCompleted  -= 1;
+                    _lifetimeBountySilverPaid -= bountySilver;
+                    return false;
+                }
             }
 
-            if (bountySilver > 0 && !string.IsNullOrEmpty(claimer))
-            {
-                Treasury.TreasuryStore.DepositSilver(claimer, bountySilver,
-                    note: $"quest #{questId} bounty (approved by {callerUsername})");
-            }
+            // The poster's escrow is already spent, so a bounty that cannot reach the claimer is held, not dropped.
+            Items.KmhPayloadEscrow.DeliverSilver(claimer, bountySilver,
+                $"quest #{questId} bounty (approved by {callerUsername})", "quest bounty could not be paid");
             DepositBountyItems(bountyItems, claimer, $"quest #{questId} bounty (approved by {callerUsername})");
 
             if (!string.IsNullOrEmpty(claimer))
@@ -551,17 +601,15 @@ namespace KMHServerAddon.Features.Quests
             return true;
         }
 
-        // Deposit a bounty's item bundle to a user. No-op on null/empty.
+        // Refunds run from the sweeper long after posting, so the recipient may be gone by then.
         private static void DepositBountyItems(Dictionary<string, int> items, string toUser, string note)
         {
             if (items == null || string.IsNullOrEmpty(toUser)) return;
             foreach (KeyValuePair<string, int> kv in items)
                 if (kv.Value > 0 && !string.IsNullOrEmpty(kv.Key))
-                    Treasury.TreasuryStore.DepositItem(toUser, kv.Key, kv.Value, note: note);
+                    Items.KmhPayloadEscrow.DeliverCompact(toUser, kv.Key, kv.Value, note, "bounty item delivery failed");
         }
 
-        // Claimer drops a quest they claimed (before completion). Returns it to the board (Open) and applies the
-        // abandonment reputation penalty
         public static bool Abandon(string claimerUsername, long questId, out string posterAffected)
         {
             posterAffected = null;
@@ -595,10 +643,7 @@ namespace KMHServerAddon.Features.Quests
             return ok;
         }
 
-        // Client-reported auto-verify for the verifiable kinds (escort / defend / hunt / build). The patched client
-        // detected the in-game event and reports it; we trust the report and pay the escrowed bounty out
-        // immediately. Client-trusted, but the bounty was offered by the poster and is server-escrowed, so a forged
-        // report only collects a bounty the poster put up - they can dispute out of band (admin claw-back)
+        // Client-trusted, but the bounty is server-escrowed, so a forged report only collects what the poster put up.
         public static bool VerifyComplete(string claimerUsername, long questId, out string posterAffected)
         {
             posterAffected = null;
@@ -616,15 +661,13 @@ namespace KMHServerAddon.Features.Quests
                 if (q.State != QuestEntry.StateClaimed) return false;
                 if (!string.Equals(q.ClaimedByUsername, claimerUsername, StringComparison.OrdinalIgnoreCase))
                     return false;
-                // Anti-forge floor: the report is client-tracked, so a claim can't complete faster than any human
-                // could actually do the work (stops claim->instant-verify macros farming escrowed bounties).
+                // A floor on elapsed time, since the report is client-tracked and a macro could otherwise farm it.
                 if (cfg.AutoVerifyMinClaimSeconds > 0 && q.ClaimedUtcTicks > 0
                     && DateTime.UtcNow.Ticks - q.ClaimedUtcTicks < TimeSpan.FromSeconds(cfg.AutoVerifyMinClaimSeconds).Ticks)
                     return false;
                 poster = q.PosterUsername;
                 if (cfg.AutoVerifyRequiresPosterReview)
                 {
-                    // Optional human sign-off: park in the poster's review queue instead of paying instantly.
                     q.State                  = QuestEntry.StatePendingReview;
                     q.ReviewState            = QuestEntry.ReviewPending;
                     q.ProofText              = $"Auto-verified by the game client ({q.Kind}) - awaiting poster sign-off.";
@@ -640,28 +683,32 @@ namespace KMHServerAddon.Features.Quests
                     _lifetimeQuestsCompleted  += 1;
                     _lifetimeBountySilverPaid += bounty;
                 }
+                // Durable before the bounty moves, both for the review route and the immediate payout.
+                if (!SaveToDisk())
+                {
+                    q.State = QuestEntry.StateClaimed; q.CompletedUtcTicks = 0;
+                    q.ReviewState = QuestEntry.ReviewNotApplicable; q.ProofSubmittedUtcTicks = 0;
+                    if (!routedToReview) { _lifetimeQuestsCompleted -= 1; _lifetimeBountySilverPaid -= bounty; }
+                    return false;
+                }
             }
             if (routedToReview)
             {
-                SaveToDisk();
                 posterAffected = poster;
                 return true;
             }
 
             if (bounty > 0)
-                Treasury.TreasuryStore.DepositSilver(claimerUsername, bounty, note: $"quest #{questId} auto-verified bounty");
+                Items.KmhPayloadEscrow.DeliverSilver(claimerUsername, bounty, $"quest #{questId} auto-verified bounty", "quest bounty could not be credited");
             DepositBountyItems(items, claimerUsername, $"quest #{questId} auto-verified bounty");
 
             PlayerStats.PlayerStatsStore.BumpQuestsCompleted(claimerUsername);
             Reputation.ReputationStore.RecordCompleted(claimerUsername);
             posterAffected = poster;
-            SaveToDisk();
             Extensibility.KmhEventBus.Instance.RaiseQuestSubmitted(new KMH.Sdk.Server.Events.QuestSubmittedEvent { QuestId = questId, ClaimerUsername = claimerUsername, AutoCompleted = true });
             return true;
         }
 
-        // Claimer submits proof (text + optional https image url) for a Custom
-        // quest. Moves it to PendingReview; the poster decides via ReviewProof.
         public static bool SubmitProof(string claimerUsername, long questId, string proofText, string proofImageUrl, out string posterAffected)
         {
             posterAffected = null;
@@ -670,7 +717,6 @@ namespace KMHServerAddon.Features.Quests
             string text = (proofText ?? "").Trim();
             if (text.Length > QuestsConfig.Current.MaxDescriptionLength) text = text.Substring(0, QuestsConfig.Current.MaxDescriptionLength);
             string url = (proofImageUrl ?? "").Trim();
-            // Only accept https image links.
             if (url.Length > 0 && !url.StartsWith("https://", StringComparison.OrdinalIgnoreCase)) url = "";
             if (url.Length > 512) url = url.Substring(0, 512);
 
@@ -694,8 +740,7 @@ namespace KMHServerAddon.Features.Quests
             return ok;
         }
 
-        // Poster reviews a PendingReview submission. approve -> payout + Complete (+claimer reputation). reject ->
-        // back to Open with a note (+claimer -2, poster -1 to deter frivolous rejection)
+        // A rejection costs the poster reputation too, to deter frivolous rejections.
         public static bool ReviewProof(string posterUsername, long questId, bool approve, string note, out string claimerAffected)
         {
             claimerAffected = null;
@@ -728,7 +773,6 @@ namespace KMHServerAddon.Features.Quests
                 }
                 else
                 {
-                    // Reject -> the quest returns to the board for a fresh claim.
                     q.State                  = QuestEntry.StateOpen;
                     q.ClaimedByUsername      = "";
                     q.ClaimedUtcTicks        = 0;
@@ -738,12 +782,26 @@ namespace KMHServerAddon.Features.Quests
                     q.ProofText              = "";
                     q.ProofImageUrl          = "";
                 }
+                // Durable before the bounty is paid, or a restart returns the quest to review and the poster pays it a second time.
+                if (!SaveToDisk())
+                {
+                    q.State = QuestEntry.StatePendingReview;
+                    q.ReviewState = QuestEntry.ReviewPending; q.ReviewNote = ""; q.ReviewSubmittedUtcTicks = 0;
+                    if (approve)
+                    {
+                        q.CompletedUtcTicks = 0;
+                        _lifetimeQuestsCompleted  -= 1;
+                        _lifetimeBountySilverPaid -= bounty;
+                    }
+                    else { q.ClaimedByUsername = claimer; }
+                    return false;
+                }
             }
 
             if (approve)
             {
-                if (bounty > 0 && !string.IsNullOrEmpty(claimer))
-                    Treasury.TreasuryStore.DepositSilver(claimer, bounty, note: $"quest #{questId} bounty (reviewed by {posterUsername})");
+                Items.KmhPayloadEscrow.DeliverSilver(claimer, bounty,
+                    $"quest #{questId} bounty (reviewed by {posterUsername})", "quest bounty could not be paid");
                 DepositBountyItems(items, claimer, $"quest #{questId} bounty (reviewed by {posterUsername})");
                 if (!string.IsNullOrEmpty(claimer))
                 {
@@ -759,15 +817,12 @@ namespace KMHServerAddon.Features.Quests
                     Reputation.ReputationStore.RecordProofRejected(claimer);
                     PlayerStats.PlayerStatsStore.RecordContractFailed(claimer);
                 }
-                // Poster eats a small penalty to discourage frivolous rejection.
                 Reputation.ReputationStore.RecordRejectedAsPoster(posterUsername);
             }
             claimerAffected = claimer;
-            SaveToDisk();
             return true;
         }
 
-        // --- persistence ---
 
         public static void LoadFromDisk()
         {
@@ -793,7 +848,57 @@ namespace KMHServerAddon.Features.Quests
             }
         }
 
-        // Season reset: clear all quests and lifetime tallies.
+        // An open quest holds its bounty outside the treasury, so a save reset must drop it or the bounty shelters.
+        public static bool HasPosterEscrow(string user)
+        {
+            if (string.IsNullOrEmpty(user)) return false;
+            lock (_lock)
+                foreach (QuestEntry q in _byId.Values)
+                    if (HoldsEscrow(q) && string.Equals(q.PosterUsername, user, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+
+        public static int PurgePoster(string user)
+        {
+            if (string.IsNullOrEmpty(user)) return 0;
+            List<long> ids = new List<long>();
+            lock (_lock)
+            {
+                foreach (QuestEntry q in _byId.Values)
+                    if (HoldsEscrow(q) && string.Equals(q.PosterUsername, user, StringComparison.OrdinalIgnoreCase)) ids.Add(q.Id);
+                foreach (long id in ids) _byId.Remove(id);
+            }
+            if (ids.Count > 0) SaveToDisk();
+            return ids.Count;
+        }
+
+        internal static int OpenCountForTest(string posterUsername) { lock (_lock) return OpenCountLocked(posterUsername); }
+
+        // One definition of "open", used by both cap checks - the pre-escrow one and the re-check that commits.
+        private static int OpenCountLocked(string posterUsername)
+        {
+            int open = 0;
+            foreach (QuestEntry q in _byId.Values)
+                if (string.Equals(q.PosterUsername, posterUsername, StringComparison.OrdinalIgnoreCase) && HoldsEscrow(q))
+                    open++;
+            return open;
+        }
+
+        // Hands a whole post's escrow back: items under their own keys, then the silver.
+        private static void RefundBounty(string posterUsername, Dictionary<string, int> escrowed, int bountySilver, string note)
+        {
+            if (escrowed != null)
+                foreach (KeyValuePair<string, int> kv in escrowed)
+                    Items.KmhPayloadEscrow.DeliverCompact(posterUsername, kv.Key, kv.Value, note, "quest bounty item refund could not be returned");
+            if (bountySilver > 0)
+                Items.KmhPayloadEscrow.DeliverSilver(posterUsername, bountySilver, note, "quest bounty refund could not be credited");
+        }
+
+        // States before the bounty settles: it is still escrowed and would be refunded on cancel/expire.
+        private static bool HoldsEscrow(QuestEntry q)
+            => q != null && (q.State == QuestEntry.StateOpen || q.State == QuestEntry.StateClaimed
+                          || q.State == QuestEntry.StateSubmitted || q.State == QuestEntry.StatePendingReview);
+
         public static void ClearForNewSeason()
         {
             lock (_lock)
@@ -807,7 +912,8 @@ namespace KMHServerAddon.Features.Quests
             SaveToDisk();
         }
 
-        public static void SaveToDisk()
+        // False means in-memory only; bounties are escrowed here, so a state change the disk never took leaves one payable twice.
+        public static bool SaveToDisk()
         {
             PersistedState state = new PersistedState();
             long seq;
@@ -820,7 +926,7 @@ namespace KMHServerAddon.Features.Quests
                 state.LifetimeBountySilverPaid  = _lifetimeBountySilverPaid;
                 seq = JsonFileStore.NextSequence(); // ticket under the lock = snapshot order, so an older save can't clobber a newer
             }
-            JsonFileStore.Save(KmhDataPaths.QuestsFile, state, seq);
+            return JsonFileStore.Save(KmhDataPaths.QuestsFile, state, seq);
         }
 
         private class PersistedState
@@ -855,7 +961,6 @@ namespace KMHServerAddon.Features.Quests
                 ClaimedByUsername   = q.ClaimedByUsername,
                 ClaimedUtcTicks     = q.ClaimedUtcTicks,
                 CompletedUtcTicks   = q.CompletedUtcTicks,
-                // Per-kind params + proof/review.
                 EscortPickupTile        = q.EscortPickupTile,
                 EscortDropoffTile       = q.EscortDropoffTile,
                 EscortTargetDescription = q.EscortTargetDescription,

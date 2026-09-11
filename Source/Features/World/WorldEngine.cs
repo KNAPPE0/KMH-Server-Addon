@@ -1,52 +1,35 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Discord;
 using KMHServerAddon.Diagnostics;
 using KMHServerAddon.Features.World.Dto;
+using KMHServerAddon.Maintenance;
 using KMHServerAddon.SubProtocol;
 using static KMHServerAddon.Util.KmhSafe;
 
 namespace KMHServerAddon.Features.World
 {
-    // Economy storyteller: 1-min scheduler that expires/auto-rolls events + auto-generates quests; single fire path.
+    // The loop lives in KmhScheduler; this only describes the work one pass does.
     internal static class WorldEngine
     {
         private static readonly TimeSpan TickInterval = TimeSpan.FromMinutes(1);
-        private static CancellationTokenSource _cts;
         private static long _lastRollUtcTicks;
         private static long _lastQuestGenUtcTicks;
         private static readonly Random _rng = new Random();
 
         public static void Start()
         {
-            if (_cts != null) return;
             // Back-date so the first event/quest considers ~15/~30 min after boot, not a full interval later.
             WorldConfig cfg = WorldConfig.Current;
             long now = DateTime.UtcNow.Ticks;
             _lastRollUtcTicks     = now - TimeSpan.FromMinutes(Math.Max(0, cfg.EventRollEveryMinutes - 15)).Ticks;
             _lastQuestGenUtcTicks = now - TimeSpan.FromMinutes(Math.Max(0, cfg.QuestGenEveryMinutes  - 30)).Ticks;
-            _cts = new CancellationTokenSource();
-            Task.Run(() => RunLoop(_cts.Token));
-            ServerLog.Verbose("World: engine started");
+            KmhScheduler.Register("world-engine", TickInterval, Tick, TickInterval);
         }
 
-        public static void Stop() { _cts?.Cancel(); _cts = null; }
-
-        private static async Task RunLoop(CancellationToken ct)
-        {
-            try { await Task.Delay(TickInterval, ct).ConfigureAwait(false); }
-            catch (TaskCanceledException) { return; }
-
-            while (!ct.IsCancellationRequested)
-            {
-                try { Tick(); }
-                catch (Exception ex) { ServerLog.Error("World engine tick threw", ex); }
-                try { await Task.Delay(TickInterval, ct).ConfigureAwait(false); }
-                catch (TaskCanceledException) { return; }
-            }
-        }
+        public static void Stop() => KmhScheduler.Stop();
 
         private static void Tick()
         {
@@ -72,12 +55,15 @@ namespace KMHServerAddon.Features.World
             foreach (ServerQuestDto q in endedQuests)
             {
                 // Refund only the pool-backed part; any minted portion simply ceases to exist (never was real silver).
-                if (q.ReservedFromPool > 0) Marketplace.MarketplaceStore.CreditHousePool(q.ReservedFromPool);
+                if (q.ReservedFromPool > 0)
+                    Marketplace.MarketplaceStore.ReturnToHousePool(q.ReservedFromPool, $"quest #{q.Id} expired - reserve returned");
                 ServerLog.Info($"World: quest #{q.Id} '{q.Title}' expired unfinished, refunded {q.ReservedFromPool} to house pool");
                 Announce($"⌛ {q.Title} expired", "The global quest ran out of time. Its reward returned to the house pool.",
                          new Color(0x7A, 0x7A, 0x7A));
                 Extensibility.KmhEventBus.Instance.RaiseGlobalQuestExpired(new KMH.Sdk.Server.Events.GlobalQuestExpiredEvent
                 { QuestId = q.Id, Title = q.Title });
+                // Only the dispatcher knows how to hand back the director slot and location an expiry releases.
+                Frontier.KmhOperationConsequence.Abandon(q);
                 dirty = true;
             }
 
@@ -226,28 +212,23 @@ namespace KMHServerAddon.Features.World
         public static (bool ok, string reason) EndEvent(string type)
         {
             type = (type ?? "").Trim().ToLowerInvariant();
-            bool removed = false;
+
+            List<WorldEventDto> matches = new List<WorldEventDto>();
             foreach (WorldEventDto e in WorldStore.ActiveEvents())
-            {
                 if (string.Equals(e.Type, type, StringComparison.OrdinalIgnoreCase))
-                {
-                    // force-expire: re-add with a 0 duration, then sweep
-                    WorldStore.AddEvent(e.Type, e.Title, e.Description, e.Magnitude, e.Target, 0);
-                    WorldStore.CollectEndedEvents(DateTime.UtcNow.Ticks + 1);
-                    removed = true;
-                    Extensibility.KmhEventBus.Instance.RaiseWorldEventEnded(new KMH.Sdk.Server.Events.WorldEventEndedEvent
-                    { Type = e.Type, Title = e.Title });
-                }
-            }
-            if (!removed) return (false, $"No active '{type}' event.");
+                    matches.Add(e);
+            if (matches.Count == 0) return (false, $"No active '{type}' event.");
+
+            if (WorldStore.RemoveEvent(type) == 0) return (false, $"No active '{type}' event.");
+            foreach (WorldEventDto e in matches)
+                Extensibility.KmhEventBus.Instance.RaiseWorldEventEnded(new KMH.Sdk.Server.Events.WorldEventEndedEvent
+                { Type = e.Type, Title = e.Title });
+
             WorldHandler.BroadcastSnapshot();
             return (true, $"Ended '{type}'.");
         }
 
-        // ---- server quests ----
-
-        // Reward is reserved from the house pool up front (capped to what it holds; 0 = glory-only), so rewards are
-        // always backed by real tax revenue. objective hunt/build/deliver; kind cooperative/competitive.
+        // The reward is reserved up front, so a quest is never posted that the pool cannot back.
         public static (bool ok, string reason) CreateWorldQuest(string kind, string objective, string targetDef,
             int goalQty, long requestedReward, int durationMinutes, string title, string description, string actor)
         {
@@ -266,19 +247,18 @@ namespace KMHServerAddon.Features.World
 
             int minutes = durationMinutes > 0 ? durationMinutes : WorldConfig.Current.QuestDefaultMinutes;
 
-            // Fund the reward: reserve as much as the house pool can back, then mint the shortfall if the central
-            // bank is enabled. Only the reserved part is refundable on expiry, so minting never inflates the pool.
+            // Only the reserved part is refundable on expiry, so minting the shortfall cannot inflate the pool.
             long want     = Math.Max(0, requestedReward);
             long reserved = 0;
             if (want > 0)
             {
                 long pool = Math.Max(0, Marketplace.MarketplaceStore.HousePoolBalance());
                 reserved  = Math.Min(want, pool);
-                if (reserved > 0 && !Marketplace.MarketplaceStore.TryDebitHousePool(reserved))
+                if (reserved > 0 && !Marketplace.MarketplaceStore.TryDebitHousePool(reserved, "global quest reward reserve"))
                 {
                     // a concurrent sale moved the pool - re-read and take what's actually there
                     reserved = Math.Max(0, Marketplace.MarketplaceStore.HousePoolBalance());
-                    if (reserved > 0 && !Marketplace.MarketplaceStore.TryDebitHousePool(reserved)) reserved = 0;
+                    if (reserved > 0 && !Marketplace.MarketplaceStore.TryDebitHousePool(reserved, "global quest reward reserve")) reserved = 0;
                 }
             }
             long minted = WorldConfig.Current.AllowMintedRewards ? Math.Max(0, want - reserved) : 0;
@@ -303,7 +283,7 @@ namespace KMHServerAddon.Features.World
         {
             long refund = WorldStore.CancelQuest(id);
             if (refund < 0) return (false, $"No active quest #{id}.");
-            if (refund > 0) Marketplace.MarketplaceStore.CreditHousePool(refund);
+            if (refund > 0) Marketplace.MarketplaceStore.ReturnToHousePool(refund, $"quest #{id} cancelled - reserve returned");
             WorldHandler.BroadcastSnapshot();
             ServerLog.Info($"World: quest #{id} cancelled by {actor}, refunded {refund} to house pool");
             return (true, refund > 0
@@ -320,46 +300,117 @@ namespace KMHServerAddon.Features.World
             WorldHandler.BroadcastSnapshot();
         }
 
-        // Credit a delivery to an active quest; if it just ended, the goods deposit to the player's treasury instead.
-        public static void ApplyDelivery(string user, long questId, string itemDef, int qty)
+        // Credits only goods already taken from the treasury - a client-asserted item and amount let a crafted packet mint items outright.
+        public static bool ApplyDelivery(string user, long questId, string itemDef, int qty)
         {
-            if (string.IsNullOrEmpty(user) || qty <= 0) return;
-            WorldStore.DeliveryResult r = WorldStore.AddDelivery(questId, user, itemDef, qty);
-            if (r.State == WorldStore.DeliveryResult.Outcome.Applied)
+            if (string.IsNullOrEmpty(user) || qty <= 0) return false;
+
+            int room = WorldStore.DeliverableRoom(questId, user, itemDef);
+            if (room <= 0)
             {
-                if (r.Completed && r.Quest != null) FinishCompletion(r.Quest, r.Payouts);
-                WorldHandler.BroadcastSnapshot();
-                NotifyUser(user, r.Quest != null ? $"Delivered {r.Amount}x {itemDef} to '{r.Quest.Title}'." : $"Delivered {r.Amount}x {itemDef}.");
+                NotifyUser(user, "That global quest isn't taking that item right now - nothing was withdrawn.");
+                return false;
             }
-            else if (r.Quest != null)
+
+            // Never more than the objective has room for, so an over-large request cannot park goods in transit.
+            int want = Math.Min(qty, room);
+            List<KeyValuePair<string, int>> taken = null;
+            List<Items.KmhThingPayload>     tookPayloads = null;
+            string note = $"global quest #{questId} delivery";
+
+            if (!Treasury.TreasuryStore.TryWithdrawMatching(user, itemDef, 0, want, note, out taken))
             {
-                int cap = Economy.EconomyConfig.Current.MaxItemDepositQtyPerTx;
-                if ((cap <= 0 || qty <= cap) && Treasury.TreasuryStore.DepositItem(user, itemDef, qty, "quest-ended delivery refund"))
+                // The same def can sit in the vault as full-state payloads, which the compact withdraw cannot see.
+                tookPayloads = Treasury.TreasuryStore.TryWithdrawMatchingPayloads(
+                    user, itemDef, "", 0, allowTainted: true, allowDamaged: true, want, note);
+                int got = 0; foreach (Items.KmhThingPayload p in tookPayloads) got += p.StackCount;
+                if (got < want)
                 {
-                    ServerLog.Info($"World: quest #{questId} ended mid-delivery - {qty}x {itemDef} from {user} refunded to their treasury");
-                    NotifyUser(user, $"That global quest just ended - your {qty}x {itemDef} was deposited to your treasury instead.");
+                    if (tookPayloads.Count > 0) Items.KmhPayloadEscrow.RefundTo(user, tookPayloads, note + " returned");
+                    NotifyUser(user, $"Deposit the {itemDef} into your treasury first - global quest deliveries are paid out of it.");
+                    return false;
                 }
-                else NotifyUser(user, "That global quest just ended - your delivery wasn't applied.");
+                taken = null;
+            }
+
+            WorldStore.DeliveryResult r = WorldStore.AddDelivery(questId, user, itemDef, want);
+            if (r.State != WorldStore.DeliveryResult.Outcome.Applied)
+            {
+                // Room can close between the read above and the credit, so what was withdrawn goes straight back.
+                ReturnTaken(user, taken, tookPayloads, want, $"global quest #{questId} delivery returned");
+                NotifyUser(user, r.Quest != null
+                    ? $"'{r.Quest.Title}' already has everything it needs - your {itemDef} stayed in your treasury."
+                    : "That global quest is no longer taking deliveries - nothing was withdrawn.");
+                return false;
+            }
+
+            if (r.Surplus > 0) ReturnTaken(user, taken, tookPayloads, r.Surplus, $"global quest #{questId} over-delivery returned");
+            if (r.Completed && r.Quest != null) FinishCompletion(r.Quest, r.Payouts);
+            WorldHandler.BroadcastSnapshot();
+            PushTreasury(user);
+            NotifyUser(user, r.Quest != null ? $"Delivered {r.Amount}x {itemDef} to '{r.Quest.Title}'." : $"Delivered {r.Amount}x {itemDef}.");
+            return true;
+        }
+
+        // Same composed keys so a material or quality variant is not returned as a plain stack; from the tail, since withdraw drains lowest first.
+        private static void ReturnTaken(string user, List<KeyValuePair<string, int>> compact,
+                                        List<Items.KmhThingPayload> payloads, int amount, string note)
+        {
+            if (amount <= 0) return;
+            if (payloads != null && payloads.Count > 0)
+            {
+                Items.KmhPayloadEscrow.RefundTo(user, Items.KmhPayloadEscrow.PopUnits(payloads, amount), note);
+                return;
+            }
+            if (compact == null) return;
+            for (int i = compact.Count - 1; i >= 0 && amount > 0; i--)
+            {
+                int give = Math.Min(compact[i].Value, amount);
+                if (give <= 0) continue;
+                Items.KmhPayloadEscrow.DeliverCompact(user, compact[i].Key, give, note, "global quest delivery could not be returned");
+                amount -= give;
             }
         }
+
+        // Hunt and build are the client's own word; deliver is not, since it moves treasury goods the server owns.
+        internal static bool IsSelfReportedObjective(string objective)
+            => string.Equals(objective, ServerQuestDto.ObjHunt,  StringComparison.OrdinalIgnoreCase)
+            || string.Equals(objective, ServerQuestDto.ObjBuild, StringComparison.OrdinalIgnoreCase);
 
         // Pay the reward + announce a just-completed quest (shared by contribute + deliver).
         private static void FinishCompletion(ServerQuestDto q, System.Collections.Generic.Dictionary<string, long> payouts)
         {
-            PayOut(payouts);
+            // A modified client can report "total = goal", so paying for that is opt-in; the quest still completes and announces either way.
+            bool paid = !IsSelfReportedObjective(q.Objective) || WorldConfig.Current.PayRewardsForSelfReportedObjectives;
+            if (paid) PayOut(payouts);
+            else
+            {
+                q.RewardPool = 0;
+                ServerLog.Info($"World: quest #{q.Id} '{q.Title}' completed on self-reported {q.Objective} progress - "
+                             + "no reward paid (PayRewardsForSelfReportedObjectives=false in Config/World.json).");
+            }
+            // One hook for both contribute and deliver. An ordinary quest carries no consequence and returns at once.
+            Frontier.KmhOperationConsequence.Apply(q);
+            string unpaid = paid ? "" : " Progress was self-reported, so no reward was paid.";
             if (string.Equals(q.Kind, ServerQuestDto.KindCompetitive, StringComparison.OrdinalIgnoreCase))
             {
-                NotifyAll($"Global quest won: {q.Title} - {q.Winner} took {Util.SilverFmt.Format(q.RewardPool)}!");
+                NotifyAll(paid
+                    ? $"Global quest won: {q.Title} - {q.Winner} took {Util.SilverFmt.Format(q.RewardPool)}!"
+                    : $"Global quest won: {q.Title} - {q.Winner} got there first.{unpaid}");
                 Announce($"🏆 {q.Title} - won by {q.Winner}",
-                         $"First to {q.GoalQty} took the pot of {Util.SilverFmt.Format(q.RewardPool)}.",
+                         paid ? $"First to {q.GoalQty} took the pot of {Util.SilverFmt.Format(q.RewardPool)}."
+                              : $"First to {q.GoalQty}.{unpaid}",
                          new Color(0xF5, 0xC2, 0x42));
             }
             else
             {
                 int n = q.Contributors.Count;
-                NotifyAll($"Global quest complete: {q.Title} - {n} colonist(s) shared {Util.SilverFmt.Format(q.RewardPool)}!");
+                NotifyAll(paid
+                    ? $"Global quest complete: {q.Title} - {n} colonist(s) shared {Util.SilverFmt.Format(q.RewardPool)}!"
+                    : $"Global quest complete: {q.Title} - {n} colonist(s) took part.{unpaid}");
                 Announce($"✅ {q.Title} - complete",
-                         $"{n} contributor(s) shared the reward pool of {Util.SilverFmt.Format(q.RewardPool)}.",
+                         paid ? $"{n} contributor(s) shared the reward pool of {Util.SilverFmt.Format(q.RewardPool)}."
+                              : $"{n} contributor(s) took part.{unpaid}",
                          new Color(0x7C, 0xD3, 0x7C));
             }
             ServerLog.Info($"World: quest #{q.Id} '{q.Title}' completed");
@@ -413,8 +464,7 @@ namespace KMHServerAddon.Features.World
             long reward;
             if (cfg.AllowMintedRewards)
             {
-                // Central bank tops the reward up to at least the floor, so global quests are always worth doing.
-                // Re-clamp to the max AFTER the floor so QuestMinReward can never bypass QuestRewardMaxReward.
+                // Re-clamped after the floor, so QuestMinReward can never push a reward past QuestRewardMaxReward.
                 reward = Math.Max(target, cfg.QuestMinReward);
                 if (cfg.QuestRewardMaxReward > 0) reward = Math.Min(reward, cfg.QuestRewardMaxReward);
             }
@@ -438,11 +488,32 @@ namespace KMHServerAddon.Features.World
                              durationMin, title, desc, "auto");
         }
 
-        // Active players = verified online clients (the reliable signal; "recently active" maps to online for now).
+        // Counting recent activity rather than only who is online keeps a quest posted at a quiet hour sized sensibly.
         private static int ActivePlayerCount()
         {
+            int online = 0;
+            try { foreach (ServerClient c in Network.ServerClients.Keys) if (c?.IsVerified == true) online++; }
+            catch { }
+
+            WorldConfig cfg = WorldConfig.Current;
+            if (cfg.GlobalQuestUseOnlinePlayersOnly) return online;
+
+            int recent = RecentlyActivePlayerCount(cfg.GlobalQuestActivityWindowHours);
+            // Never size below who is actually here - a stale window must not shrink a busy server.
+            return recent > online ? recent : online;
+        }
+
+        // Reads the report time KMH already keeps, rather than adding a second activity tracker to drift from it.
+        private static int RecentlyActivePlayerCount(int windowHours)
+        {
+            if (windowHours <= 0) return 0;
+            long cutoff = DateTime.UtcNow.Ticks - TimeSpan.FromHours(windowHours).Ticks;
             int n = 0;
-            try { foreach (ServerClient c in Network.ServerClients.Keys) if (c?.IsVerified == true) n++; }
+            try
+            {
+                foreach (PlayerStats.Dto.PlayerLeaderboardEntry e in PlayerStats.PlayerStatsStore.BuildSnapshot().Entries)
+                    if (e != null && e.LastReportUtcTicks >= cutoff) n++;
+            }
             catch { }
             return n;
         }
@@ -550,21 +621,29 @@ namespace KMHServerAddon.Features.World
             foreach (string t in tpl)
             {
                 int bar = t?.IndexOf('|') ?? -1;
-                if (bar > 0 && cfg.ObjectiveAllowed(t.Substring(0, bar).Trim())) ok.Add(t);
+                if (bar <= 0) continue;
+                string obj = t.Substring(0, bar).Trim();
+                if (!cfg.ObjectiveAllowed(obj)) continue;
+                // A quest that completes on the client's word and pays nothing reads as broken, so it is not generated at all.
+                if (IsSelfReportedObjective(obj) && !cfg.PayRewardsForSelfReportedObjectives) continue;
+                ok.Add(t);
             }
             return ok.Count == 0 ? null : ok[_rng.Next(ok.Count)];
         }
 
-        // Desired reward = max(house-pool %, wealth per-mille, goal x reported item value), clamped to the cap.
+        // max(house-pool %, banked-silver %, goal x trusted value), capped - every input server-owned, since client-reported wealth pinned every reward at the cap.
+        internal static long ComputeAutoRewardForTest(WorldConfig cfg, string targetDef, int goal)
+            => ComputeAutoReward(cfg, targetDef, goal);
+
         private static long ComputeAutoReward(WorldConfig cfg, string targetDef, int goal)
         {
             long pool   = Marketplace.MarketplaceStore.HousePoolBalance();
-            long wealth = PlayerStats.PlayerStatsStore.TotalReportedWealth();
+            long wealth = Treasury.TreasuryStore.TotalSilverHeld();
             long unit   = ItemLabels.ItemLabelCache.BaseValue(targetDef);
             long byValue = unit > 0 ? unit * Math.Max(1, goal) * cfg.QuestRewardValuePercent / 100 : 0;
             long perTarget = (long)Math.Max(0, cfg.GlobalQuestRewardPerTarget) * Math.Max(1, goal);   // bigger quest -> bigger pool
             long target = Math.Max(pool * cfg.QuestRewardHousePoolPercent / 100,
-                          Math.Max(wealth * cfg.QuestRewardWealthPermille / 1000, Math.Max(byValue, perTarget)));
+                          Math.Max((long)(wealth * cfg.QuestRewardWealthPercent / 100), Math.Max(byValue, perTarget)));
             if (target > cfg.QuestRewardMaxReward) target = cfg.QuestRewardMaxReward;
             return target;
         }
@@ -575,13 +654,9 @@ namespace KMHServerAddon.Features.World
             if (payouts == null) return;
             foreach (System.Collections.Generic.KeyValuePair<string, long> kv in payouts)
             {
-                long remaining = kv.Value;
-                while (remaining > 0)
-                {
-                    int chunk = (int)Math.Min(remaining, int.MaxValue);
-                    Treasury.TreasuryStore.DepositSilver(kv.Key, chunk, note: "world quest reward");
-                    remaining -= chunk;
-                }
+                // DeliverSilver holds what it cannot credit, so a payout row with no username surfaces instead of vanishing.
+                Items.KmhPayloadEscrow.DeliverSilver(kv.Key, kv.Value, "world quest reward",
+                                                     "global quest reward could not be credited");
                 PushTreasury(kv.Key);
                 if (kv.Value > 0)
                     NotifyUser(kv.Key, $"+{Util.SilverFmt.Format(kv.Value)} silver deposited to your treasury (global quest reward).");
@@ -635,16 +710,12 @@ namespace KMHServerAddon.Features.World
                 if (c?.IsVerified != true) continue;
                 string u = c.GetData<UserFile>()?.Username;
                 if (string.IsNullOrEmpty(u)) continue;
-                Treasury.TreasuryStore.DepositSilver(u, amount, note: "world event stipend");
+                Items.KmhPayloadEscrow.DeliverSilver(u, amount, "world event stipend", "world event stipend could not be credited");
                 KmhRouter.SendTo(c, KmhProtocol.Kind.TreasurySnapshot, Treasury.TreasuryStore.GetSnapshotFor(u));
             }
         }
 
-        private static void NotifyAll(string text)
-        {
-            foreach (ServerClient c in Network.ServerClients.Keys)
-                if (c?.IsVerified == true) KmhRouter.Notify(c, "neutral", text);
-        }
+        private static void NotifyAll(string text) => Notifications.KmhNotify.ToEveryoneOnline("neutral", text);
 
         private static void NotifyUser(string user, string text)
         {

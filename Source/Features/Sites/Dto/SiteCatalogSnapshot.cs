@@ -1,12 +1,9 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using Newtonsoft.Json;
 
 namespace KMHServerAddon.Features.Sites.Dto
 {
-    // Server-authoritative site output catalog. The server classifies its known item catalog (ItemLabelCache) through
-    // SiteOutputRules and sends only what a site may actually produce (plus, in debug mode, blocked entries with a
-    // reason). The client picker renders this - it never re-implements the tier rules, so it can't drift or become a
-    // dev-mode all-def palette. Mirror of the patch-side DTO.
+    // The client renders this and never re-implements the tier rules, or the two drift apart.
     public class SiteCatalogSnapshot
     {
         [JsonProperty("entries")]           public List<SiteCatalogEntry> Entries { get; set; } = new List<SiteCatalogEntry>();
@@ -14,8 +11,14 @@ namespace KMHServerAddon.Features.Sites.Dto
         [JsonProperty("max_allowed_tier")]  public int  MaxAllowedTier     { get; set; } = 3;
         [JsonProperty("tier4_enabled")]     public bool Tier4Enabled       { get; set; } = false;
         [JsonProperty("includes_blocked")]  public bool IncludesBlocked    { get; set; } = false;
-        // True when the server's item catalog is still sparse (fresh server) - client shows a "still loading" hint.
+        // A fresh server's catalog is still sparse, and the client says "still loading" rather than "nothing here".
         [JsonProperty("catalog_sparse")]    public bool CatalogSparse      { get; set; } = false;
+        // In display order, so adding an archetype stays a server-side change.
+        [JsonProperty("archetypes")]        public List<SiteArchetypeInfo> Archetypes { get; set; } = new List<SiteArchetypeInfo>();
+        // False means nobody has pushed metadata yet, so the picker must not pretend items are ineligible.
+        [JsonProperty("archetypes_ready")]  public bool ArchetypesReady    { get; set; } = false;
+        // The catalog the server ADOPTED, so a client can tell "my push was applied" from "my push was sent"; empty when it holds none.
+        [JsonProperty("catalog_fingerprint")] public string CatalogFingerprint { get; set; } = "";
     }
 
     public class SiteCatalogEntry
@@ -30,5 +33,22 @@ namespace KMHServerAddon.Features.Sites.Dto
         [JsonProperty("est_cycle_min")] public int    EstCycleMinutes{ get; set; } = 0;   // base cycle at max amount
         [JsonProperty("allowed")]       public bool   Allowed        { get; set; } = true;
         [JsonProperty("block_reason")]  public string BlockReason    { get; set; } = "";
+        // plant / forestry / mineral / animal / crafted / construction / unknown
+        [JsonProperty("family")]        public string Family         { get; set; } = "unknown";
+        // Comma-separated archetype ids, computed server-side because Roadworks eligibility is a predicate, not a family.
+        [JsonProperty("arch")]          public string AllowedArchetypes { get; set; } = "";
     }
+
+    public class SiteArchetypeInfo
+    {
+        [JsonProperty("id")]           public string Id          { get; set; } = "";
+        [JsonProperty("name")]         public string DisplayName { get; set; } = "";
+        [JsonProperty("desc")]         public string Description { get; set; } = "";
+        [JsonProperty("skill")]        public string WorkerSkill { get; set; } = "";
+        [JsonProperty("cost_mult")]    public double CostMultiplier { get; set; } = 1.0;
+        [JsonProperty("perk")]         public string PerkText    { get; set; } = "";
+        [JsonProperty("custom")]       public bool   IsCustom    { get; set; } = false;
+        [JsonProperty("roadworks")]    public bool   UnlocksRoadworks { get; set; } = false;
+    }
+
 }

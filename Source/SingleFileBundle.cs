@@ -6,9 +6,7 @@ using System.Text;
 
 namespace KMHServerAddon
 {
-    // Reads .NET single-file bundles (Microsoft.NET.HostModel): a 16-byte signature near the end, preceded by an
-    // int64 manifest offset. Manifest = major/minor/fileCount/bundleId, then (major>=2) 40 bytes, then per file:
-    // offset, size, (major>=6) compressedSize, type byte, 7-bit-len path. Type 1 = managed, compressedSize>0 = deflate.
+    // Parses the Microsoft.NET.HostModel bundle layout; the field order below follows that format, not our choosing.
     internal static class SingleFileBundle
     {
         private static readonly byte[] Signature =
@@ -49,8 +47,7 @@ namespace KMHServerAddon
                 return Count(targetDir);
             }
 
-            // Different RWT build. Purge first: after a rename a merged cache would still hold the old server
-            // assembly, and generation detection would key off a file the installed server no longer ships.
+            // Purged, not merged: a stale server assembly would make generation detection key off a file RWT no longer ships.
             PurgeStaleCache(targetDir, marker);
 
             byte[] data = File.ReadAllBytes(exePath);
@@ -133,8 +130,7 @@ namespace KMHServerAddon
             try { return Directory.GetFiles(dir, "*.dll").Length; } catch { return 0; }
         }
 
-        // The signature can occur by chance inside a bundled assembly, so take the last one whose preceding
-        // int64 points at a header that actually parses. Returns the manifest offset, or -1.
+        // The signature can occur by chance inside a bundled assembly, so a candidate counts only if its header parses.
         private static long FindValidHeader(byte[] data)
         {
             for (long i = data.Length - Signature.Length; i >= 8; i--)

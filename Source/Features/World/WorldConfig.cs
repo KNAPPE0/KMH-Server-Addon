@@ -4,13 +4,12 @@ using Newtonsoft.Json.Linq;
 
 namespace KMHServerAddon.Features.World
 {
-    // World Engine tunables (Config/World.json, clamped on load); auto-roll/auto-gen on by default since v1.2.0.
+    // World Engine tunables (Config/World.json, clamped on load).
     internal sealed class WorldConfig
     {
         // File schema version; v2 = durations in minutes (the v1 *Hours keys migrate below).
         public int SchemaVersion { get; set; } = 2;
 
-        // events
         public bool   EventsEnabled         { get; set; } = true;  // master switch for all events (manual + auto)
         // Event types owners allow to fire at all (manual + auto). Remove one to block it entirely.
         public string[] AllowedEventTypes   { get; set; } = new[]
@@ -18,12 +17,12 @@ namespace KMHServerAddon.Features.World
             "tax_holiday", "market_boom", "market_crash", "resource_shortage",
             "double_worker_xp", "house_stipend", "bounty_target", "world_weather",
         };
-        public bool   AutoRollEvents        { get; set; } = true;  // on by default since v1.2.0 (living world)
+        public bool   AutoRollEvents        { get; set; } = true;  // on by default (living world)
         public int    EventRollEveryMinutes { get; set; } = 240;   // how often auto-roll considers an event (4h)
         public int    EventDefaultMinutes   { get; set; } = 180;   // event length when the command gives none (3h)
         public double EventRollChance       { get; set; } = 0.4;   // ~1 event per 10h on average, organically spaced
 
-        // auto-roll weights (0 = never auto-rolls; still manually triggerable)
+        // 0 = never auto-rolls; still manually triggerable.
         public int WeightTaxHoliday      { get; set; } = 3;
         public int WeightMarketBoom      { get; set; } = 2;
         public int WeightMarketCrash     { get; set; } = 1;
@@ -42,9 +41,7 @@ namespace KMHServerAddon.Features.World
 
         // Also roll client-reported GameConditionDefs (incl. mods). Off by default - modded conditions can be brutal.
         public bool     AutoDiscoverWeather  { get; set; } = false;
-        // Never rolled even when discovered (colony-wreckers + catastrophic/map-ending conditions); substring,
-        // case-insensitive. From real modded-catalog coverage: catastrophic/apocalypse-style conditions blocked by
-        // default so an owner can't accidentally auto-roll a map-ender.
+        // Blocked by default so an owner cannot accidentally auto-roll a map-ending condition.
         public string[] ExcludedWeatherDefs  { get; set; } = new[]
         {
             "ToxicFallout", "VolcanicWinter", "Flashstorm", "ToxicSpewer", "NoxiousHaze",
@@ -54,8 +51,7 @@ namespace KMHServerAddon.Features.World
             "ElementalAssault", "Manastorm", "ManaDrain", "TimeQuake", "Earthquake", "LavaFlow", "Resurrect",
         };
 
-        // --- generated quests (live catalog instead of premade templates) ---
-        // % of auto-gen cycles that synthesize a deliver quest from the live item catalog (templates as fallback).
+        // Percent of auto-gen cycles that build a quest from the live catalog rather than the premade templates.
         public int  GeneratedQuestChance    { get; set; } = 60;
         // Per-unit value band for eligible items (bulk goods, not persona cores).
         public long GeneratedItemMinValue   { get; set; } = 1;
@@ -63,16 +59,18 @@ namespace KMHServerAddon.Features.World
         // Target total goods value per generated quest; goal qty = this / item value.
         public long GeneratedQuestGoalValue { get; set; } = 1500;
 
-        // default magnitudes when a roll/trigger omits one
+        // Defaults when a roll or trigger omits a magnitude.
         public int MarketSwingPercent    { get; set; } = 25;
         public int WorkerXpMultPercent   { get; set; } = 200;
         public int StipendSilver         { get; set; } = 100;
 
-        // server quests
         public bool QuestsEnabled          { get; set; } = true;   // master switch; off blocks all global quests (manual + auto)
         // Objective types owners allow. Removing one blocks it for manual creation and auto-gen. Values: hunt/build/deliver.
         public string[] AllowedObjectives  { get; set; } = new[] { "hunt", "build", "deliver" };
-        public bool AutoGenerateQuests     { get; set; } = true;   // on by default since v1.2.0 (living world)
+
+        // Hunt/build progress is the client's own word, so off means those quests still run and announce but pay no silver.
+        public bool PayRewardsForSelfReportedObjectives { get; set; } = false;
+        public bool AutoGenerateQuests     { get; set; } = true;   // on by default (living world)
         public int  MaxActiveAutoQuests    { get; set; } = 2;      // how many auto-gen quests may run at once
         public int  QuestGenEveryMinutes   { get; set; } = 720;    // how often auto-gen considers a quest (12h)
         public int  QuestDefaultMinutes    { get; set; } = 1440;   // quest length when the command gives none (24h)
@@ -80,16 +78,16 @@ namespace KMHServerAddon.Features.World
         public int  QuestAutoGoalMin     { get; set; } = 20;   // legacy fallback when player-scaling is off
         public int  QuestAutoGoalMax     { get; set; } = 60;
 
-        // --- global-quest balance (v1.2.0): scale hunt/build goal + duration by ACTIVE players so a quiet server
-        // isn't asked for 58 kills in 24h. Goal = clamp(Base + activePlayers * PerPlayer * difficulty, Min, Max). ---
+        // Goal = clamp(Base + activePlayers * PerPlayer * difficulty, Min, Max), so a quiet server is asked for less.
         public bool   GlobalQuestScaleByActivePlayers   { get; set; } = true;
         public int    GlobalQuestBaseTargetCount        { get; set; } = 10;
         public int    GlobalQuestTargetsPerActivePlayer { get; set; } = 6;
         public int    GlobalQuestMinTargetCount         { get; set; } = 10;
         public int    GlobalQuestMaxTargetCount         { get; set; } = 80;
         public double GlobalQuestDifficultyMultiplier   { get; set; } = 1.0;
-        public bool   GlobalQuestUseOnlinePlayersOnly   { get; set; } = false; // false = recently-active (maps to online today)
-        public int    GlobalQuestRecentlyActiveMinutes  { get; set; } = 120;
+        public bool   GlobalQuestUseOnlinePlayersOnly   { get; set; } = false; // false = recently active within the window below
+        // How far back "recently active" reaches, using each player's last colony report.
+        public int    GlobalQuestActivityWindowHours    { get; set; } = 48;
         public int    GlobalQuestMinActivePlayers       { get; set; } = 1;    // don't auto-gen below this many active players
         public int    GlobalQuestDefaultDurationHours   { get; set; } = 48;
         public int    GlobalQuestMinDurationHours       { get; set; } = 24;
@@ -99,29 +97,20 @@ namespace KMHServerAddon.Features.World
         // Reward: on top of the economy-driven target below, add this per target unit so bigger quests pay more.
         public int    GlobalQuestRewardPerTarget        { get; set; } = 50;
 
-        // --- reward funding (economy-driven, always backed by real silver) ---
-        // Auto-gen won't spawn a quest it can't fund to at least this. Stops $0 grind quests; a quest only appears
-        // when the house pool can actually pay it.
+        // A quest only appears when the house pool can actually pay it, so there are no zero-reward grinds.
         public int  QuestMinReward            { get; set; } = 250;
-        // Reward target also scales with the live server economy: this many silver per 1000 of total reported
-        // colony wealth (RimWorld's own economy, summed across colonies). 0 = ignore wealth, use the pool % only.
-        public int  QuestRewardWealthPermille { get; set; } = 2;     // 0.2% of total colony wealth
+        // % of silver banked in KMH treasuries, deliberately not client-reported colony wealth; 0 ignores the economy entirely.
+        public double QuestRewardWealthPercent { get; set; } = 0.2;
         // Cap on an auto-gen reward so a rich server can't sink the whole pool into one quest.
         public int  QuestRewardMaxReward      { get; set; } = 5000;
-        // Reward target can also track the real RimWorld value of the requested goods: this % of (goal x the item's
-        // BaseMarketValue, reported by clients). 100 = pay roughly what the goods are worth; 0 = ignore item value.
+        // Percent of goal x the item's reported BaseMarketValue; 100 pays roughly what the goods are worth, 0 ignores it.
         public int  QuestRewardValuePercent   { get; set; } = 100;
-        // One-time prime of the house pool on a brand-new server, so the first quests can pay before any tax
-        // revenue accrues. Injected exactly once (tracked in the marketplace store); everything after is the closed
-        // tax loop. 0 = no seed.
+        // Injected exactly once on a new server; everything after it is the closed tax loop. 0 = no seed.
         public int  HousePoolSeed             { get; set; } = 5000;
-        // Central bank: when the house pool can't fully back a quest's reward, mint the shortfall (up to the same
-        // caps above) so rewards never dry up on a busy server. Only the pool-backed part is refunded on expiry, so
-        // minting never inflates the pool. Set false to stay strictly closed-loop (rewards then capped to the pool).
+        // Mints only the shortfall, and only the pool-backed part is ever refunded, so minting cannot inflate the pool.
         public bool AllowMintedRewards        { get; set; } = true;
 
-        // "objective|defName|title|description"; objective = hunt/build. defName must exist on players' games (server
-        // has no def db), so defaults are vanilla-only.
+        // "objective|defName|title|description" - defaults stay vanilla-only because the server has no def database.
         public string[] QuestTemplates   { get; set; } = new[]
         {
             "hunt|Muffalo|Thin the Herds|Hunters are needed across the colonies to cull the muffalo.",
@@ -138,10 +127,10 @@ namespace KMHServerAddon.Features.World
             "deliver|Cloth|The Weavers' Call|Cloth for uniforms, tents and bandages.",
         };
 
-        // Catches any field in World.json we don't have a property for - used to upgrade the pre-1.1.0 hour fields
-        // (EventDefaultHours etc.) to the new minute fields so a re-save keeps the owner's tuning instead of losing it.
+        // Catches unknown fields so a legacy one can be migrated rather than silently dropped on the next save.
         [JsonExtensionData] private System.Collections.Generic.IDictionary<string, JToken> LegacyData { get; set; }
-        [JsonIgnore] private bool _migratedFromHours;
+        [JsonIgnore] private bool _migratedLegacy;
+        [JsonIgnore] internal bool DidMigrateLegacy => _migratedLegacy; // self-test read seam
 
         private static WorldConfig _current;
         public static WorldConfig Current => _current ?? (_current = LoadOrDefault());
@@ -155,9 +144,7 @@ namespace KMHServerAddon.Features.World
             return cfg;
         }
 
-        // First run: write defaults. Otherwise upgrade an older hour-based file to the minute fields IN PLACE, so
-        // owners never have to delete World.json. (Newly ADDED fields need no migration - Json just fills a missing
-        // field with its default, which is why every other config keeps working across updates too.)
+        // Upgraded in place, so an owner never has to delete World.json to pick up a newer build.
         public static void EnsureGenerated()
         {
             if (!System.IO.File.Exists(KmhDataPaths.WorldConfigFile))
@@ -166,37 +153,44 @@ namespace KMHServerAddon.Features.World
                 return;
             }
             WorldConfig cfg = LoadOrDefault();
-            if (cfg._migratedFromHours)
+            if (cfg._migratedLegacy)
             {
                 JsonFileStore.Save(KmhDataPaths.WorldConfigFile, cfg);
-                Diagnostics.ServerLog.Info("World: upgraded World.json hour settings to the new minute fields (no data lost).");
+                Diagnostics.ServerLog.Info("World: upgraded legacy World.json fields (hour timers, wealth-reward permille) to their current form (no data lost).");
             }
         }
 
-        // Convert any pre-1.1.0 *Hours field that's present to the matching *Minutes field, then drop the obsolete
-        // keys so they're never written back.
-        private void MigrateLegacy()
+        // Must mirror MigrateLegacy, so a rollback that reintroduces one of these converts rather than being stripped.
+        internal static readonly string[] LegacyAliasKeys =
+            { "EventRollEveryHours", "EventDefaultHours", "QuestGenEveryHours", "QuestDefaultHours", "QuestRewardWealthPermille" };
+
+        // Converted in place then dropped, so a migrated key is never written back to the file.
+        internal void MigrateLegacy()
         {
-            _migratedFromHours = false;
+            _migratedLegacy = false;
             if (LegacyData == null || LegacyData.Count == 0) return;
-            if (TryLegacyHours("EventRollEveryHours", out int v1)) EventRollEveryMinutes = v1 * 60;
-            if (TryLegacyHours("EventDefaultHours",   out int v2)) EventDefaultMinutes   = v2 * 60;
-            if (TryLegacyHours("QuestGenEveryHours",  out int v3)) QuestGenEveryMinutes  = v3 * 60;
-            if (TryLegacyHours("QuestDefaultHours",   out int v4)) QuestDefaultMinutes   = v4 * 60;
+            if (TryLegacyInt("EventRollEveryHours", out int v1)) EventRollEveryMinutes = v1 * 60;
+            if (TryLegacyInt("EventDefaultHours",   out int v2)) EventDefaultMinutes   = v2 * 60;
+            if (TryLegacyInt("QuestGenEveryHours",  out int v3)) QuestGenEveryMinutes  = v3 * 60;
+            if (TryLegacyInt("QuestDefaultHours",   out int v4)) QuestDefaultMinutes   = v4 * 60;
+            if (TryLegacyInt("QuestRewardWealthPermille", out int p)) QuestRewardWealthPercent = p / 10.0;   // 2 permille = 0.2%
             LegacyData = null;
         }
 
-        private bool TryLegacyHours(string key, out int hours)
+        private bool TryLegacyInt(string key, out int value)
         {
-            hours = 0;
+            value = 0;
             if (LegacyData != null && LegacyData.TryGetValue(key, out JToken t))
             {
-                try { hours = t.Value<int>(); _migratedFromHours = true; return true; } catch { }
+                try { value = t.Value<int>(); _migratedLegacy = true; return true; } catch { }
             }
             return false;
         }
 
         public static void Reload() => _current = LoadOrDefault();
+
+        // Owner policy decides whether a self-reported objective pays, so proving the rule needs it flipped in memory.
+        internal static WorldConfig ApplyForTest(WorldConfig cfg) { WorldConfig prev = _current; _current = cfg; return prev; }
 
         private void Clamp()
         {
@@ -206,6 +200,7 @@ namespace KMHServerAddon.Features.World
             if (EventRollChance > 1) EventRollChance = 1;
             MarketSwingPercent  = Clamp(MarketSwingPercent, 1, 90);
             WorkerXpMultPercent = Clamp(WorkerXpMultPercent, 100, 1000);
+            GlobalQuestActivityWindowHours = Clamp(GlobalQuestActivityWindowHours, 1, 720);
             StipendSilver       = Clamp(StipendSilver, 0, 1_000_000);
             MaxActiveAutoQuests  = Clamp(MaxActiveAutoQuests, 1, 50);
             AllowedObjectives    = NormalizeObjectives(AllowedObjectives);
@@ -216,7 +211,8 @@ namespace KMHServerAddon.Features.World
             QuestAutoGoalMin    = Clamp(QuestAutoGoalMin, 1, 100000);
             QuestAutoGoalMax    = Clamp(QuestAutoGoalMax, QuestAutoGoalMin, 100000);
             QuestMinReward            = Clamp(QuestMinReward, 0, 10_000_000);
-            QuestRewardWealthPermille = Clamp(QuestRewardWealthPermille, 0, 1000);
+            if (QuestRewardWealthPercent < 0)   QuestRewardWealthPercent = 0;
+            if (QuestRewardWealthPercent > 100) QuestRewardWealthPercent = 100;
             QuestRewardMaxReward      = Clamp(QuestRewardMaxReward, QuestMinReward, 100_000_000);
             QuestRewardValuePercent   = Clamp(QuestRewardValuePercent, 0, 1000);
             HousePoolSeed             = Clamp(HousePoolSeed, 0, 100_000_000);
@@ -236,9 +232,7 @@ namespace KMHServerAddon.Features.World
 
         }
 
-        // True if this defName may roll as discovered weather (not excluded by the owner).
-        // Substring (case-insensitive) so an exclusion like "ToxicFallout" or "Bloodmoon" also catches modded/themed
-        // variants ("ToxicFalloutSmall", "VFEA_Bloodmoon"). Labels aren't authority - the defName marker is.
+        // Substring matched, so an exclusion also catches modded variants like "ToxicFalloutSmall".
         public bool WeatherDefAllowed(string defName)
         {
             if (string.IsNullOrWhiteSpace(defName) || ExcludedWeatherDefs == null) return true;

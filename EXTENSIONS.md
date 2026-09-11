@@ -37,9 +37,13 @@ public sealed class MyExtension : IKmhServerExtension
 
     public void Register(IKmhServerHost host)
     {
-        // Subscribe to events
+        // Subscribe to events (observe what happened)
         host.Events.MarketplaceBuy += e =>
             host.Log.Info($"{e.BuyerUsername} bought x{e.QtyBought} {e.ItemDefName}");
+
+        // Enforce rules with veto hooks (decide what's allowed)
+        host.Hooks.OnMarketplaceListing(ctx =>
+            ctx.ItemDefName.Contains("Gun_") ? KmhHookVerdict.Deny("No weapons here.") : KmhHookVerdict.Allow);
 
         // Read live state
         long bal = host.Treasury.GetSilver("alice");
@@ -253,6 +257,8 @@ event Action<BackupCreatedEvent>        BackupCreated;   // KMH-Data folder back
 event Action<RestoreAppliedEvent>       RestoreApplied;  // KMH-Data rolled back to a backup on boot
 event Action<SnapshotCreatedEvent>      SnapshotCreated; // versioned player/server snapshot written (kind, player, season, timestamp, dir)
 event Action<SeasonRolledEvent>         SeasonRolled;    // season archived + advanced (and whether the economy was wiped)
+event Action<MailSentEvent>             MailSent;        // player mail delivered, with what actually escrowed (silver/items/gear)
+event Action<ChatMessagePostedEvent>    ChatMessagePosted; // chat line accepted on a channel (server / guild:<name> / dm:<lo>|<hi>)
 ```
 
 Each payload is an immutable `sealed class` with `init`-only
@@ -271,6 +277,72 @@ event fires (KMH prunes its own copies on a retention schedule). To
 (`player <user> <YYYY-MM-DD_HH-MM>` / `server <ts>` / `all <ts>`;
 consumed within ~60s) or run `kmh snapshot-player/server/all`. Full
 format and pairing rules: `SNAPSHOTS.txt`.
+
+### Veto hooks (`IKmhHooks`)
+
+Events tell you what *already happened*. **Hooks let you decide what's *allowed to happen*** — so an extension can enforce custom server rules (item bans, price policy, per-player limits, event-gated markets, bounty caps, withdrawal limits, custom anti-cheat) without forking KMH.
+
+Register with `host.Hooks.OnXyz(ctx => ...)`:
+
+```csharp
+void OnMarketplaceListing  (Func<KmhMarketplaceListingContext,   KmhHookVerdict> hook);
+void OnMarketplaceVisibility(Func<KmhMarketplaceVisibilityContext, KmhHookVerdict> hook);
+void OnAuctionListing      (Func<KmhAuctionListingContext,       KmhHookVerdict> hook);
+void OnWant                (Func<KmhWantContext,                 KmhHookVerdict> hook);
+void OnQuestPost           (Func<KmhQuestPostContext,            KmhHookVerdict> hook);
+void OnTreasuryWithdraw    (Func<KmhTreasuryWithdrawContext,     KmhHookVerdict> hook);
+```
+
+Return `KmhHookVerdict.Allow` to permit, or `KmhHookVerdict.Deny("reason")` to block it with a player-facing message.
+
+```csharp
+// Ban weapon sales across the marketplace:
+host.Hooks.OnMarketplaceListing(ctx =>
+    ctx.ItemDefName.Contains("Gun_")
+        ? KmhHookVerdict.Deny("No weapons on this server.")
+        : KmhHookVerdict.Allow);
+
+// Cap quest bounties:
+host.Hooks.OnQuestPost(ctx =>
+    ctx.BountySilver > 100000
+        ? KmhHookVerdict.Deny("Bounties are capped at 100000 silver.")
+        : KmhHookVerdict.Allow);
+```
+
+**Contract:**
+- **Safe-by-default:** with no hook registered, KMH behaves exactly as stock KMH (the hook path is a zero-cost no-op).
+- **First `Deny` wins.** Multiple hooks run in registration order.
+- **A hook that throws is treated as `Allow`** (and logged) — a broken extension can never freeze the economy.
+- Hooks run **before any escrow/debit**, so a denial is side-effect-free.
+- Hooks run synchronously on the action's thread — keep them fast; do bookkeeping from the matching `IKmhEvents` event instead.
+- Only **player-initiated** actions reach a hook; KMH's internal escrow moves never do.
+
+`kmh extensions` shows how many hooks each extension has registered per board. See `Templates/ServerExtension-Rules/` for a complete rules extension using hooks + events + storage together.
+
+#### Controlling who *sees* a listing
+
+The creation hooks decide who may **post**. `OnMarketplaceVisibility` decides who may **see** — it runs once per listing per viewer, and denying hides the listing from that player's board *and* blocks them buying it (hiding alone is not enforcement; a crafted client can name a listing id directly).
+
+```csharp
+host.Hooks.OnMarketplaceVisibility(ctx =>
+    IsUnlockedFor(ctx.Viewer, ctx.ListingId)
+        ? KmhHookVerdict.Allow
+        : KmhHookVerdict.Deny("Locked."));   // reason is not shown - the listing simply isn't there
+```
+
+The hook composes **with** guild visibility rather than replacing it — both must pass, so a hook cannot reveal a `guild_only` listing to someone outside the guild. It can only ever narrow. The seller always sees their own listing.
+
+**Registering any visibility hook turns off snapshot sharing.** Normally KMH builds one marketplace payload per viewing guild and reuses it (roughly 22 ms → 0.7 ms for 30 recipients on a busy board). A hook is opaque — KMH cannot know it answers the same way for two viewers — so it fails closed and gives every recipient their own build. Servers with no visibility hook are unaffected and keep the shared path.
+
+#### Doing async work during a trade
+
+**There is no async transaction hook.** What KMH actually guarantees today:
+
+- Every hook is `Func<Ctx, KmhHookVerdict>` — **synchronous**, no `Task` overload.
+- Creation hooks run **outside every store lock** and **before any escrow**, so blocking inside one cannot deadlock the economy or leave a half-finished trade.
+- But they run **on the network thread handling that player's request**, so a slow hook stalls *that player's* connection. Blocking I/O in a hook is therefore safe but rude; a visibility hook, which runs per listing per viewer, must never block at all.
+
+Because a hook cannot await, **do not block a hook on a long remote operation.** Decide from state your extension already holds, and do remote work from the matching `IKmhEvents` event after the action has committed. How your extension reconciles a remote system with KMH is its own design decision.
 
 ### Custom wire kinds
 
@@ -376,6 +448,17 @@ public void Register(IKmhServerHost host)
 }
 ```
 
+**SDK contract version (recommended).** Better than string-checking `SdkVersion`, declare the SDK contract you built against so the host can refuse an incompatible pairing *for* you — with a clear "built for a newer/older KMH" message — instead of failing later with a reflection error. Implement the optional `IKmhSdkTargeted` alongside `IKmhServerExtension`:
+
+```csharp
+public sealed class MyExtension : IKmhServerExtension, IKmhSdkTargeted
+{
+    public int TargetSdkContract => KmhSdkContract.Version;   // what you compiled against
+    // ... Name / Version / Register / Shutdown ...
+}
+```
+
+Extensions that don't implement it are assumed to target the baseline (1), so nothing existing breaks. `KmhSdkContract.Version` bumps only on a breaking SDK change (never on additive ones). Run `kmh extensions` to see each loaded extension's contract and the server's current contract.
 
 ## License - extensions are not modifications
 
@@ -435,9 +518,14 @@ extensions go.
 
 A matching SDK for KMH-Patch extensions (RimWorld mods that depend on the
 client) ships as **KMH.Sdk.Client**, with its own ExtensionLoader and a
-starter under `Templates/ClientExtension/`. It follows the same
-contract-stability rules as this server SDK - see the KMH-Patch repo's
-EXTENSIONS.md.
+complete example under `Templates/ClientExtension-Earnings/`. Client
+extensions can subscribe to client-side events — cache-refresh signals for
+every feature, plus *actionable* events with payloads: `GrantReceived`
+(a payout landed), `NotificationReceived` (an offline notification, not Player Mail), and
+`WorldEventFired`/`WorldEventEnded` (a tax holiday/boom started or ended) —
+and read the live caches, log, and show toasts through the host, with no
+Verse references required. It follows the same contract-stability rules as
+this server SDK — see the KMH-Patch repo's EXTENSIONS.md.
 
 Suggestions, missing surfaces, awkward APIs - open an issue or ping
 KNAPPE0.

@@ -1,12 +1,8 @@
-using System;
+﻿using System;
 
 namespace KMHServerAddon.Util
 {
-    // Composed item keys carry material + quality through every item flow (treasury, marketplace, quests):
-    //   "Steel"                             plain item, no stuff/quality
-    //   "MeleeWeapon_LongSword|Plasteel|5"  def | stuff defName (may be empty) | quality index
-    // Quality index: 0 = none/any, 1..7 = Awful..Legendary. Mirrors the patch mod's UI/ItemKeys.cs - same format
-    // on both sides or vault keys stop matching
+    // "def|stuff|quality", mirroring the patch mod's UI/ItemKeys.cs - if the two formats drift, vault keys stop matching.
     internal static class ItemKey
     {
         public const char Sep = '|';
@@ -30,14 +26,24 @@ namespace KMHServerAddon.Util
             if (parts.Length > 2 && int.TryParse(parts[2], out int q) && q >= 0 && q <= 7) qualityIndex = q;
         }
 
-        // true when an actual quality satisfies a requirement (0 = no requirement; otherwise required-or-better)
+        // Quality 0 means no requirement, not "Awful".
         public static bool Meets(int actualIndex, int requiredIndex)
             => requiredIndex <= 0 || actualIndex >= requiredIndex;
+
+        // Withdrawals and their self-test both route through this, so the rule cannot drift between them.
+        public static bool Matches(string key, string targetDefName, string requiredStuff, int requiredQualityIndex)
+        {
+            Split(key, out string def, out string stuff, out int q);
+            if (!string.Equals(def, targetDefName, StringComparison.OrdinalIgnoreCase)) return false;
+            if (!Meets(q, requiredQualityIndex)) return false;
+            return string.IsNullOrEmpty(requiredStuff)
+                || string.Equals(stuff ?? "", requiredStuff, StringComparison.OrdinalIgnoreCase);
+        }
 
         public static string QualityName(int idx)
             => idx >= 1 && idx <= 7 ? QualityNames[idx] : "";
 
-        // 1..7 from a quality word ("excellent" -> 5), 0 when the word isn't a quality
+        // 0 when the word is not a quality at all, which callers must not read as "Awful".
         public static int QualityIndexOf(string word)
         {
             if (string.IsNullOrEmpty(word)) return 0;

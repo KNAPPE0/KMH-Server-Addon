@@ -4,8 +4,7 @@ using Newtonsoft.Json;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // Leaderboard live-message ids + rollover timer, persisted so a restart doesn't orphan the message or reset the
-    // rollover.
+    // Persisted, or a restart orphans the live message and starts the rollover over.
     internal class DiscordLeaderboardState
     {
         [JsonProperty("live_message_id")]

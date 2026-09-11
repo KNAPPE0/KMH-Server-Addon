@@ -1,22 +1,42 @@
-KMH Server Addon - setup
+﻿KMH Server Addon - setup
 ========================
 
-Two files, dropped together. That's the whole install:
+Extract this zip into your server folder, next to the RWT server:
 
     your-server-folder\
         GameServer.exe        <- the official RimWorld Together server
                                  (named RTServer.exe on newer RWT builds)
-        KMHServerAddon.exe     <- this
+        KMHServerAddon.exe     <- this (run it)
+        KMH-Data\              <- created on first boot; the zip seeds its Icons
+        Tools\                 <- get-media-tools, if you want in-game video
 
 Then run KMHServerAddon.exe (NOT the RWT server).
 
-KMHServerAddon.exe is a single file. It works with the RWT server you put next
-to it, adds the KMH features, and starts the server. It detects which server
-version it sits next to (RWT 26.5.24.1, 26.6.9.1, or the newer builds that
-renamed the server to RTServer) and uses the matching build automatically. It
-identifies the server by what the file actually contains, not by its name, so a
-renamed or panel-mangled server file is still found. Recommended RWT version:
-26.6.9.1. On RWT 26.6.23.1 and newer, RWT chat is not a reliable KMH carrier -
+There are two downloads per platform, and which one you took decides what is in
+the zip:
+
+  KMHServerAddon-v1.3.0-<platform>.zip
+    One KMHServerAddon.exe with everything inside it. Needs .NET 8 on the host.
+
+  KMHServerAddon-v1.3.0-<platform>-selfcontained.zip
+    Carries .NET 8 with it, so nothing to install - but it is a folder of files,
+    and KMHServerAddon.exe is only a small launcher that will not start without
+    them. Extract the whole thing and keep it together.
+
+Either way it works with the RWT server you put next to it, adds the KMH
+features, and starts the server. It detects which server version it sits next to
+and uses the matching build automatically, identifying that server by what the
+file actually contains rather than by its name - so a renamed or panel-mangled
+server file is still found.
+
+Supported RWT releases (all verified for this version):
+  26.8.31.1, 26.8.16.1 (1), 26.8.16.1, 26.8.9.1, 26.7.25.1,
+  26.6.23.1, 26.6.9.1, 26.6.8.1, 26.5.24.1
+26.5.24.1 is the OLDEST supported release. RWT moved a core network type below
+that point, so 26.4.18.1 and older are a different generation and are not
+supported - on those KMH refuses to start and says so, leaving RWT running.
+
+On RWT 26.6.23.1 and newer, RWT chat is not a reliable KMH carrier -
 keep the KMH API transport enabled (the default since v1.2.0); it's the
 recommended/required path there.
 On first run it creates KMH-Data/ (configs + state), kmh-extensions/, and a
@@ -38,22 +58,38 @@ After an RWT update KMH re-reads the server automatically; its .rwt-runtime/
 cache is keyed to the exact server file, so a stale cache can't survive an
 upgrade. Deleting .rwt-runtime/ is always safe - it is rebuilt on next start.
 
-Updating from 1.1.1
--------------------
-Update EVERY player's KMH-Patch mod to 1.2.2 alongside the server. The wire
-protocol advanced to v2 in 1.2.0 (deposit rules changed), so a still-on-1.1.1
-client can't safely use the new economy. Rather than let it half-work and lose
-items, the version gate simply disables KMH for that client - they see a clear
-"KMH disabled: server protocol vX vs your vY, update the KMH-Patch mod" notice
-and fall back to plain RWT until they update. Update the server first, then
-players; back up KMH-Data before the first 1.2.0 boot (the server also auto-
-backs-up on boot by default) and run 'kmh validate all' afterward.
+Updating to 1.3.0
+-----------------
+Update EVERY player's KMH-Patch mod to 1.3.0 alongside the server. The wire
+protocol is v2, the same as 1.2.x, so the two generations talk and a 1.2.x
+client is NOT locked out - it connects, KMH turns on, and it simply does not
+show the 1.3.0 features, because each side advertises what it can do rather
+than checking a version number. That is deliberate, but it means an old client
+looks healthy while quietly missing the new screens, so nobody will report it.
+Update the server first, then players; back up KMH-Data before the first 1.3.0
+boot (the server also auto-backs-up on boot by default) and run
+'kmh validate all' afterward.
 
-No .NET 8 on your host (managed panels often pin an older one)? Grab the
-"-selfcontained" zip instead - it bundles .NET 8, so there's nothing to install.
-Extract the WHOLE folder and run the exe from inside it - the self-contained
-build ships loose files (the runtime plus Newtonsoft.Json.dll) that must sit
-next to the exe. Copying only the executable will fail to start.
+The "KMH disabled: server protocol vX vs your vY" notice only appears if the
+protocol number itself ever changes, which it has not since 1.2.0.
+
+No .NET 8 on your host, or no internet on it to go and get one? Managed panels
+often pin an older runtime. Grab the "-selfcontained" zip for your platform
+instead - it carries .NET 8 inside it, so there is nothing to install and
+nothing to download on the server itself. Every architecture has one:
+win-x64, win-x86, win-arm64, linux-x64, linux-arm and linux-arm64.
+
+Either way, extract the WHOLE folder and run the exe from inside it. The normal
+build is a single executable with its dependencies inside it, but it still ships
+KMH-Data alongside (icons and notes), and the "-selfcontained" build also lays
+the whole .NET runtime beside the exe. Copy only the executable out of the
+folder and you lose those files.
+
+On Linux the file is named KMHServerAddon with no extension, and a zip cannot
+carry the execute bit, so make it runnable once after extracting:
+    chmod +x KMHServerAddon
+    ./KMHServerAddon
+Without that first line the host reports "Permission denied" and nothing starts.
 
 Managed / panel hosts (Bisect, Pterodactyl, etc.)
 -------------------------------------------------
@@ -105,9 +141,18 @@ Multiple servers on one host: give each KMH instance its OWN KmhApiPort in its
 KMH-Data/Config/Transport.json (like each RWT server has its own port). The server
 tells the client its port in the handshake, so the client always dials the right
 one - just as a player joins RWT 25554-25557, KMH connects to that server's KMH
-API port. Two instances sharing a port = the second fails to bind and quietly
-stays on chat (logged at boot). For remote players, forward each KmhApiPort
-(keep external = internal port number).
+API port. Two instances sharing a port = the second fails to bind, and it then
+tells clients the transport is off rather than sending them at a port it never
+opened; `kmh status` reads "ENABLED but not bound". For remote players, forward
+each KmhApiPort (keep external = internal port number).
+
+Players never type a port. The number you set in KmhApiPort is the number the
+server hands out, so the one thing that has to be true is that you forwarded THAT
+port. If you forwarded a different one, change KmhApiPort to match it and restart
+- do not ask players to change anything. `kmh status` prints the exact host and
+port clients are being told to dial, which is the fastest way to confirm the two
+agree. The client's own "fallback port" setting is used only for a server that
+advertises none at all.
 
 Client debug uplink (diagnosing player-side issues)
 ---------------------------------------------------
@@ -197,6 +242,135 @@ must-read notice ~5s after startup (also posted to your Discord Admin channel
 if one is configured). If you re-disable something afterwards it stays off -
 the migration never re-runs.
 
+Frontier, sites & roadworks - new in v1.3.0
+--------------------------------------------
+Sites gained an archetype, a condition, buildings, and a server-side director
+that opens objectives on the world map without you scheduling anything.
+
+  - Archetypes (Config/Sites.json): Farmland, Quarry, Woodland, Ranch,
+    Roadworks or Custom. The archetype names the site and decides which colonist
+    skill its work uses; matching it to what the site produces earns a small
+    specialization bonus. Custom takes none. Sites that existed before the
+    upgrade read as Custom and keep producing exactly what they produced.
+  - Buildings & storage: 2/3/4 slots by tier. Production raises output, housing
+    raises the worker cap, storage lets a site hold output for collection instead
+    of delivering every cycle. Held goods are the owner's OFF-MAP WEALTH - they
+    count toward raid scaling and do not survive an economy reset. Only the owner
+    can store at their own site; overflow always falls through to the treasury.
+    Demolishing refunds nothing, so a building can never be used to park value.
+  - Condition: a damaged site produces less but never nothing (output flattens
+    to a floor). There is NO decay and NO upkeep chore - nothing lowers condition
+    on its own. Damage comes from `kmh site-condition damage <tile>` or an
+    extension; owners repair from the site's building window, priced on the damage
+    actually undone.
+  - Roadworks: a Construction archetype that lays persistent roads - Trail, Road,
+    Highway, each unlocked by site tier. Priced per NEW segment, so crossing an
+    existing road costs nothing. Silver is held while a project runs and returned
+    for whatever is unbuilt if cancelled; finished road stays. Reserved silver
+    counts toward raid scaling and is destroyed by an economy reset, so a project
+    cannot hide wealth. Turn the system off with AllowRoadworks=false in
+    Config/Sites.json. Inspect and rescue with `kmh roadworks`.
+  - Frontier Operations (Config/Frontier.json): a director opens objectives -
+    the first is Reclaim, restoring a derelict ruin - and hands the restored
+    location to whoever contributed most, earliest. The winner chooses at claim
+    time whether it becomes theirs or their guild's. Funded ENTIRELY from the
+    house pool: the advertised reward is capped to what the pool can back and the
+    operation does not open if that falls below the configured minimum. Nothing
+    is ever minted to cover a shortfall.
+    Locations are placed by asking connected clients for candidate tiles;
+    matching answers from independent clients are stronger corroboration. Set
+    AllowSingleProposer=false if you want that corroboration required - by
+    default a small server may act on one valid proposal. Either way the server
+    decides, and proposing costs and pays nothing.
+    Frontier is ON by default and bounded by its spawn budget, cooldowns and
+    active-location limits rather than by an off switch. Owner tooling is
+    `kmh frontier` - inspect the director, list outposts, place one, step it, or
+    claim on a player's behalf (refused unless that player actually earned it, so
+    it settles disputes without handing anything out).
+  - A captured location arrives as infrastructure, not a finished site: its new
+    owner picks what it produces once, through the normal output rules and with
+    no build cost. A location nobody claims goes dormant and is reused by a later
+    operation instead of holding its tile forever.
+  - Guild-owned sites: any current member can assign workers, build, repair,
+    collect storage and set up a captured location. Leaving the guild removes
+    that access at once. Production is guild income - it goes to site storage or
+    the guild vault, never through whichever member opened the menu, and it does
+    not inflate anyone's contribution standing. A road project stays personal to
+    whoever started it: they pay, they can cancel, their escrow returns to them.
+
+Communications - chat, mail & presence - new in v1.3.0
+-------------------------------------------------------
+  - KMH chat (Config/Chat.json): server-wide, per-guild and direct-message
+    channels, with history on reconnect, per-user rate limits and a server-side
+    log of every message.
+  - Player mail (Config/Mail.json): letters carrying silver, items or
+    full-condition gear. Attachments are escrowed server-side, can be recalled
+    while unread, and are returned automatically if never claimed - a letter to
+    someone who never logs in again cannot eat what it carried. An optional
+    per-letter fee is off by default.
+  - Moderation: per-player block lists filter live messages AND history, and
+    staff can remove messages. A block also applies to mail.
+  - Presence & playtime: the server measures time connected and, separately,
+    time actually played - a paused game nobody has touched for two minutes stops
+    counting, watching a raid does not. Both feed the Activity Records standings
+    board and Discord's `/kmh leaderboard active`. The roster keeps whoever was
+    here most recently, so a busy server stops hiding half its players.
+  - Staff badges & colours (Config/Staff.json): owners, admins, moderators and
+    developers are marked from YOUR role list, never from anything a client
+    claims. Name, message and relay colours are per-server, and the text always
+    carries the same meaning as the colour.
+  - Discord chat bridge: mirrors KMH chat to a channel in either direction, each
+    side independently configurable. Linked accounts post under their verified
+    in-game name; a relayed message can never masquerade as native chat.
+
+In-game video - optional, off until you add two tools
+-----------------------------------------------------
+Players can watch a video link without leaving the game. Your server resolves
+the link, pulls it down once as a finished mp4, keeps it in KMH-Data/MediaCache
+and serves that file itself. Clients only ever talk to you, never to the video
+host, and the Workshop mod carries no downloader at all - which is what keeps it
+Workshop-safe.
+
+Two programs do the work and KMH does not ship them:
+
+    yt-dlp    resolves the link
+    ffmpeg    turns it into something the game can play
+
+Miss either and the video server stays off; the boot log names the missing one.
+Everything else runs as normal. They belong to other people under other
+licences, so KMH fetches them for you instead of redistributing them.
+
+The fetch script comes with the server, in the Tools folder beside
+KMHServerAddon. Run it there:
+
+    Windows   .\Tools\get-media-tools.ps1
+    Linux     ./Tools/get-media-tools.sh
+
+Both binaries land in that same Tools folder, which is where KMH looks. Setting
+this up on a machine that has no server on it? The same two scripts are also
+published on their own as KMH-MediaTools-v<version>.zip.
+
+Restart afterwards and look for "Video server: using yt-dlp.exe" and "using
+ffmpeg.exe". No config edit either way. KMH checks these, beside the executable
+and then again inside KMH-Data: the folder itself; Tools, plus any folder inside
+Tools and that folder's bin; bin; and any <folder>/bin. Unzip an ffmpeg archive
+straight into Tools and it will be found - no need to dig the binary out. Point
+at copies you already have with VideoHelperPath and FfmpegPath in
+Config/Media.json.
+
+NO INTERNET ON THE SERVER? Common on a locked-down host, and not a problem. Run
+the script on a machine that has internet, tell it which platform you are
+fetching for ('.\get-media-tools.ps1 -Rid linux-arm64'), and move the Tools
+folder across however you normally move files. Nothing reaches out again once
+the binaries are there.
+
+Watch out for one thing: nobody builds a current 32-bit Windows ffmpeg any more,
+so win-x86 gets yt-dlp and the video server stays off.
+
+Ports: video is served over the KMH transport port and nothing else. KMH opens
+exactly one port, ever - the one in KmhApiPort. There is nothing extra to open,
+and no setting that would ask you to.
+
 Config (KMH-Data/Config/)
 -------------------------
   Economy.json          marketplace/auction/want tax, caps, price floors. Deposits are
@@ -205,10 +379,12 @@ Config (KMH-Data/Config/)
                         the client removes the goods before sending, so a legit deposit at
                         or under the cap must never be rejected. 0 disables a cap.
 
-                        ECONOMY / TREASURY ACCESS MODES (P7; default Standard = current
-                        behavior, nothing changes). EconomyMode is a preset:
-                          Standard  - remote treasury, no cooldowns/fees/caps (default).
-                          Balanced  - remote, light 5s cooldowns + 1% deposit/withdraw fee.
+                        ECONOMY / TREASURY ACCESS MODES. A new server generates
+                        EconomyMode=Balanced; an existing config keeps whatever it has.
+                        EconomyMode is a preset:
+                          Standard  - remote treasury, no cooldowns/fees/caps.
+                          Balanced  - remote, light 5s cooldowns + 1% deposit/withdraw fee
+                                      (the generated default).
                           Localized - PersonalTreasuryAccessMode=ColonyOnly, item moves need
                                       a caravan, treasury blocked during raids.
                           Hardcore  - CaravanOnly, block during raids AND hostile map events,
@@ -216,7 +392,10 @@ Config (KMH-Data/Config/)
                           Custom    - uses the granular fields below verbatim.
                         Granular fields (used when EconomyMode=Custom):
                           PersonalTreasuryAccessMode = Remote | ColonyOnly | CaravanOnly |
-                                                       TreasurySiteRequired | Disabled
+                                                       Disabled
+                            (TreasurySiteRequired is reserved - Treasury Sites do not
+                             exist yet, so it is accepted but not enforced and behaves
+                             as Remote. The server warns once at boot if you set it.)
                           GuildTreasuryAccessMode    = Remote | GuildHallRequired |
                                                        CaravanNearGuildHall | Disabled
                           TreasuryDeposit/WithdrawCooldownSeconds (0 = none)
@@ -292,10 +471,13 @@ Config (KMH-Data/Config/)
                         makes the owner count as a worker so a solo/private site produces (0
                         workers = Paused). To allow a specific extra item, add its defName to a
                         tier's AllowedDefNames; to allow Tier 4, set OutputTiers[3].Enabled=true.
-                        RewardIntervalSeconds is only the poll cadence, NOT the payout timer -
-                        each site's own cycle time (base / worker speed) decides when it pays.
-                        Legacy RestrictOutputsToSimpleResources still applies when
-                        UseSiteOutputTiers=false. Old Sites.json loads and gets a tier computed.
+                        There is no payout timer to set: each site's own cycle time
+                        (CycleMinutesPerRewardUnit, divided by worker speed) decides when it pays.
+                        With UseSiteOutputTiers=false a site falls back to plain stackables only -
+                        widen that with ExtraSimpleResourceDefs, or set
+                        AllowUnsafeLegacySiteOutputs=true for the old unrestricted all-def
+                        behaviour (admin/dev only; the server warns at boot when it is on). Old
+                        Sites.json loads and gets a tier computed.
   (Treasury items)      Complex items (weapons/apparel/minified/comp/modded) are stored
                         with full state (Treasury.json item_payloads) so a deposit->withdraw
                         round-trip never cleans taint, repairs damage, rerolls quality, or
@@ -312,10 +494,43 @@ Config (KMH-Data/Config/)
                         quests, auctions, want board, world, standings). All on by
                         default; off blocks that system server-side and clients show
                         it as disabled. Stored data is kept - re-enable to restore it.
+  Chat.json             KMH chat: retention, rate limits, blocking, the image/video
+                        allow-list and size cap, and the presentation colours + Discord
+                        marker that ride the handshake. Presentation only - these never
+                        affect permissions, identity, moderation or message contents.
+  Media.json            server media resolver: the server converts formats a client
+                        cannot decode (animated WebP -> GIF) and serves the result over
+                        KMH's own connection. On by default, and only for those formats -
+                        png/jpg/gif still load directly. Privacy: a direct load exposes the
+                        PLAYER's IP to the host, a resolved one exposes the SERVER's, and
+                        neither happens without the player's click-to-load choice. Bounds
+                        for source/output size, pixels, frames, decoded memory and timeouts
+                        all live here; the outbound fetch is https-only, allow-list checked
+                        on every redirect, and refused for any private address.
+  Staff.json            who is shown as staff and how the badges look. Admin is not a list
+                        to maintain - RWT already knows its admins; list someone under
+                        Admins only to badge a person RWT does not consider one.
+  Mail.json             player-to-player mail: attachment limits, optional send fee,
+                        unclaimed timeout.
+  Frontier.json         Frontier Operations director: outpost and operation caps, action
+                        pacing, and what a Reclaim asks for and pays. A Reclaim scales with
+                        your population: ReclaimScalePerActivePlayer (0.15) adds 15% per
+                        player online beyond the first, ReclaimScalePerKnownPlayer (0.05)
+                        adds 5% per player who has ever joined, and ReclaimScaleMax (5.0)
+                        caps the result. The SAME multiplier is applied to the material
+                        cost and the silver reward, so a busy server is a bigger contest
+                        rather than a better or worse deal. Set both weights to 0 for the
+                        old flat behaviour.
   Enforcement.json      config-enforcement state + safe-mods list
   Maintenance.json      ServerName (this instance's friendly name - set a distinct one
-                        per server on a shared host), automatic-backup + boot scan settings
-  Discord/DiscordConfig.json   paste a bot token to enable the Discord bridge. Running
+                        per server on a shared host), automatic-backup + boot scan settings,
+                        and ConsoleLogLevel - all (default), warn, error or quiet. It only
+                        decides what the terminal is shown; KMH-Data/Debug always receives
+                        every line, so turning the console down loses nothing.
+  Discord/DiscordConfig.json   paste a bot token to enable the Discord bridge, or set the
+                        KMH_DISCORD_BOT_TOKEN environment variable instead and leave the
+                        field blank - the variable wins, and the config is never rewritten
+                        with the secret. Running
                         several bots in one Discord? Set Bot.RequireMention=true so each
                         only answers !kmh-* text commands that @mention it (e.g.
                         "@KMH-25554 !kmh-link CODE") - otherwise all of them reply. Slash
@@ -324,8 +539,13 @@ Config (KMH-Data/Config/)
                         named "<Guild> (<Rank>)" that tracks their KMH guild + rank (needs
                         the bot to have Manage Roles + its role above the ones it creates).
   (Transport and Discord have their own on/off switch in their files above.)
-All are generated with defaults on first boot. Reload economy/site config live
-(in-game chat or server console):  kmh reload-economy
+All are generated with defaults on first boot, and an upgrade tops each file up with
+any field a new version added, keeping every value already set. Reload config live
+(in-game chat or server console):  kmh reload <area|all>
+`kmh config` lists what you have changed from the shipped defaults, per area; for
+economy it also prints the policy actually IN FORCE, because the granular fee,
+cooldown, cap and raid fields apply only under EconomyMode=Custom.
+(The older reload-economy / reload-world / ... commands still work.)
 
 Backups & recovery
 ------------------
@@ -337,7 +557,13 @@ and scans it for problems at startup. Owner commands (console or /kmh server):
   kmh inspect <system>    dump auctions/wants/quests/... with ids
   kmh cancel <auction|want|quest> <id>   refund + remove a stuck entry
   kmh ledger [user]       recent economy audit-trail entries
-  kmh smoketest           non-mutating self-check of every subsystem
+  kmh smoketest           non-mutating live health check of every subsystem
+  kmh support-bundle      writes KMH-Data/Support/kmh-support-<stamp>.zip: configs, the
+                          status file, the latest migration report and the tail of the
+                          system log, all passed through KMH's redaction (bot tokens, API
+                          tokens, webhooks, passwords and signed-url signatures are masked).
+                          No binaries, backups, saves, media cache or chat history. Review
+                          it before sharing if you like - it is plain text inside.
 
 Rolling back with RWT
 ---------------------
@@ -393,7 +619,7 @@ safe-mods list. Turn it on with 'kmh enforce on'. This needs the patch on the
 client - stock RWT clients can't be enforced.
 
 Scenario / custom-scenario enforcement is NOT implemented yet. KMH can't force a
-required scenario or block custom scenarios in v1.2.0; treat that as planned.
+required scenario or block custom scenarios in v1.3.0; treat that as planned.
 Until then, agree a scenario out-of-band and watch for odd starting wealth.
 
 Save-reset economy: KMH-Data outlives a player's RimWorld save, so someone can
@@ -425,4 +651,9 @@ Build from source
 -----------------
 Build the target RWT server once, point Source/Local.props or
 $env:RwtServerBuildPath at its build output (for the compile-time references),
-then run:  .\deploy.ps1   -> single-file exe + zip in Releases\.
+then run:  .\deploy.ps1   -> Deploy\ folder + zip in Releases\.
+
+deploy.ps1 without -SelfContained produces the framework-dependent layout: one
+KMHServerAddon.exe with the payloads, Newtonsoft, Harmony and the SDK inside it.
+With -SelfContained it produces a folder instead - .NET 8 alongside a launcher
+stub and KMHServerAddon.dll, which is why that zip has to be kept together.

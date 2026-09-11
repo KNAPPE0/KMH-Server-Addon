@@ -1,19 +1,13 @@
-using HarmonyLib;
+﻿using HarmonyLib;
 using KMHServerAddon.Diagnostics;
 
 namespace KMHServerAddon.SubProtocol.Patches
 {
-    // Harmony Prefix on RWT's PM_Chat.Receive - when the inbound packet's Username matches
-    // KmhProtocol.ClientUsername (zero-width-space prefix + [KMH-CLI]), we hand it to KmhRouter and return false to
-    // skip RWT's normal chat processing entirely (no broadcast, no rate-limit check, no chat-log render - the JSON
-    // never reaches any visible surface)
-    //
-    // For all other chat we return true and RWT proceeds as normal.
+    // Returning false skips RWT's chat processing entirely, so KMH JSON never reaches a visible surface.
     [HarmonyPatch(typeof(PM_Chat), nameof(PM_Chat.Receive))]
     internal static class Patch_PM_Chat_KmhIntercept
     {
-        // ASCII tail of ClientUsername, embedded verbatim in a KMH packet's serialized username. Scan for it first so
-        // normal chat skips the deserialize (RWT deserializes the same bytes again right after us).
+        // Scanned before deserializing, so ordinary chat never pays for a parse RWT is about to repeat anyway.
         private static readonly byte[] Marker = System.Text.Encoding.UTF8.GetBytes("[KMH-CLI]");
 
         [HarmonyPrefix]

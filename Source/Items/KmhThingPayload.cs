@@ -1,12 +1,8 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using Newtonsoft.Json;
 
 namespace KMHServerAddon.Items
 {
-    // State-preserving item payload shared by every KMH item flow. Security boundary: ScribeXml is an opaque
-    // client-produced blob the server never parses - it stores the payload verbatim and returns it on withdraw for the
-    // client to rebuild the exact item, using only the metadata itself for identity/display/ledger/review.
-    // Fidelity: full = exact (ScribeXml); metadata = big-4 state only (hp/taint/quality/stuff), partial; legacy = def+count, flagged.
     public class KmhThingPayload
     {
         public const int CurrentSchema = 1;
@@ -25,22 +21,21 @@ namespace KMHServerAddon.Items
         [JsonProperty("quality")]        public int    Quality       { get; set; } = 0;    // 0 = none, 1..7
         [JsonProperty("tainted")]        public bool   Tainted       { get; set; } = false;
 
-        // Opaque deep-serialized Thing (client-produced). Present only at "full" fidelity. Stripped from wire snapshots.
+        // Opaque client-produced blob: stored verbatim, never parsed, and stripped from wire snapshots.
         [JsonProperty("scribe_xml")]     public string ScribeXml     { get; set; } = "";
         [JsonProperty("fidelity")]       public string Fidelity      { get; set; } = FidelityLegacy;
 
-        [JsonProperty("display_label")]  public string DisplayLabel  { get; set; } = "";   // UI only
+        [JsonProperty("display_label")]  public string DisplayLabel  { get; set; } = "";
         [JsonProperty("market_value")]   public long   MarketValue   { get; set; } = 0;    // display/audit only
-        [JsonProperty("fingerprint")]    public string Fingerprint   { get; set; } = "";   // storage identity + merge check
+        [JsonProperty("fingerprint")]    public string Fingerprint   { get; set; } = "";
         [JsonProperty("legacy")]         public bool   Legacy        { get; set; } = false;
         [JsonProperty("warnings")]       public List<string> Warnings { get; set; } = new List<string>();
 
-        // Fungible-stacking support (additive/back-compatible; old payloads default to non-mergeable).
-        // Mergeable = the client vouched this is a fungible item (stackable food/resource, NOT a weapon/quality/comp
-        // item), so the server may stack equal-identity ones into one entry - weight-averaging the wear below - instead
-        // of splintering the vault. RotProgressTicks (-1 = not rottable/unknown) is the rot the client re-applies on
-        // withdraw, weight-averaged here on merge so nothing is refreshed to fresh.
+        // The client's claim that this is a fungible resource; old payloads default to false.
         [JsonProperty("mergeable")]          public bool Mergeable        { get; set; } = false;
-        [JsonProperty("rot_progress_ticks")] public long RotProgressTicks { get; set; } = -1;
+
+        // Whether units can be taken off THIS stack - a weaker claim than Mergeable, which combines two separately captured stacks.
+        [JsonProperty("splittable")]         public bool Splittable       { get; set; } = false;
+        [JsonProperty("rot_progress_ticks")] public long RotProgressTicks { get; set; } = -1;   // -1 = unknown
     }
 }

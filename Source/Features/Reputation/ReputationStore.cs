@@ -4,13 +4,9 @@ using KMHServerAddon.Persistence;
 
 namespace KMHServerAddon.Features.Reputation
 {
-    // Server-authoritative quest reputation. Score is re-derived from raw event counters (so weighting can change and
-    // Recompute reprices everyone); never client-set - only server-side quest-lifecycle events move it.
+    // Score is re-derived from the raw counters, so changing a weight reprices everyone on the next load.
     internal static class ReputationStore
     {
-        // Scoring weights + tier cutoffs live in config/reputation.json (ReputationConfig) so owners can tune them
-        // without code
-
         public const string TierTrusted    = "Trusted";
         public const string TierNeutral    = "Neutral";
         public const string TierUnreliable = "Unreliable";
@@ -49,7 +45,7 @@ namespace KMHServerAddon.Features.Reputation
 
         private static void RecomputeLocked(Entry e)
         {
-            // Weighted sum; weights are signed (penalties negative) and come from config/reputation.json
+            // Weights are signed, so penalties are added rather than subtracted.
             ReputationConfig c = ReputationConfig.Current;
             e.Score = e.QuestsCompleted        * c.CompletedWeight
                     + e.QuestsRejected         * c.ProofRejectedWeight
@@ -90,7 +86,6 @@ namespace KMHServerAddon.Features.Reputation
                 new KMH.Sdk.Server.Events.ReputationChangedEvent { Username = username, Score = score, Tier = tier });
         }
 
-        // (score, tier) for a username. Unknown players read as 0 / Neutral.
         public static (int score, string tier) Get(string username)
         {
             if (string.IsNullOrWhiteSpace(username)) return (0, TierNeutral);
@@ -101,7 +96,6 @@ namespace KMHServerAddon.Features.Reputation
             }
         }
 
-        // Wire snapshot for the client (username + score + tier).
         public static Dto.ReputationSnapshot BuildSnapshot()
         {
             Dto.ReputationSnapshot snap = new Dto.ReputationSnapshot();
@@ -113,7 +107,7 @@ namespace KMHServerAddon.Features.Reputation
             return snap;
         }
 
-        // Snapshot copy for read APIs / leaderboards.
+        // Copies, so a caller cannot mutate the stored entries.
         public static List<Entry> SnapshotAll()
         {
             lock (_lock)
@@ -130,8 +124,6 @@ namespace KMHServerAddon.Features.Reputation
             }
         }
 
-        // --- persistence ---
-
         public static void LoadFromDisk()
         {
             if (JsonFileStore.TryLoad(KmhDataPaths.ReputationFile, out PersistedState state) && state?.Entries != null)
@@ -142,7 +134,7 @@ namespace KMHServerAddon.Features.Reputation
                     foreach (Entry e in state.Entries)
                     {
                         if (string.IsNullOrEmpty(e?.Username)) continue;
-                        RecomputeLocked(e); // re-derive score from counters on load
+                        RecomputeLocked(e);
                         _entries[e.Username] = e;
                     }
                 }
@@ -150,7 +142,6 @@ namespace KMHServerAddon.Features.Reputation
             }
         }
 
-        // Season reset: clear all reputation.
         public static void ClearForNewSeason()
         {
             lock (_lock) { _entries.Clear(); }

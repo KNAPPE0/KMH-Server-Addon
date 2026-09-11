@@ -1,28 +1,23 @@
-using KMHServerAddon.Persistence;
+﻿using KMHServerAddon.Persistence;
 using Newtonsoft.Json;
 
 namespace KMHServerAddon.Features.Reputation
 {
-    // Owner-tunable reputation scoring from KMH-Data/Config/Reputation.json (score deltas + tier cutoffs). Generated
-    // with defaults on first boot and clamped on load; applied at startup, so restart after editing
     internal sealed class ReputationConfig
     {
-        // Schema version for forward-compatible migrations (absent = 1). Changes so far are additive.
         public int SchemaVersion { get; set; } = 1;
 
-        // Score deltas per event: reward completing, punish abandoning hardest, then rejected proof, then
-        // poster-side rejection.
         public int CompletedWeight        { get; set; } =  1;
         public int ProofRejectedWeight    { get; set; } = -2;
         public int AbandonedWeight        { get; set; } = -5;
         public int RejectedAsPosterWeight { get; set; } = -1;
 
-        // Tier cutoffs: score >= TrustedScore -> Trusted; score < UnreliableBelow -> Unreliable; otherwise Neutral
         public int TrustedScore     { get; set; } = 20;
         public int UnreliableBelow  { get; set; } = 0;
 
         private static ReputationConfig _current;
         public static ReputationConfig Current => _current ?? (_current = LoadOrDefault());
+        public static void Reload() { _current = null; }
 
         public static ReputationConfig LoadOrDefault()
         {

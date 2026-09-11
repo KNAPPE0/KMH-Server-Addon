@@ -9,9 +9,6 @@ using KMHServerAddon.Features.Marketplace.Dto;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // Periodic refresh of every active !kmh-showcase post so embeds stay current with treasury moves. Cadence via
-    // showcase_sweep_interval_ minutes (default 30m, 0 disables). Edit failure clears the cached message id so the
-    // next user action re-posts fresh
     internal static class DiscordShowcaseSweep
     {
         private static CancellationTokenSource _cts;
@@ -45,8 +42,7 @@ namespace KMHServerAddon.Features.Discord
 
         private static async Task Loop(CancellationToken ct)
         {
-            // First sweep waits the full interval - gives the rest of bootstrap (Discord login, store loads, first
-            // client connects to push item labels) time to settle
+            // A full interval first, so item labels have arrived from a client before anything is rendered.
             while (!ct.IsCancellationRequested)
             {
                 DiscordConfig cfg = DiscordBridge.Config;
@@ -95,8 +91,7 @@ namespace KMHServerAddon.Features.Discord
                     .ConfigureAwait(false);
                 if (newId == 0)
                 {
-                    // Edit failed AND fresh post failed - clear the stale ref so the user's next !kmh-showcase
-                    // posts cleanly rather than trying to edit something we can't see
+                    // Cleared so the next user action posts fresh rather than editing a message we cannot reach.
                     DiscordUserState.ClearShowcase(username);
                     cleared++;
                     continue;
@@ -104,7 +99,6 @@ namespace KMHServerAddon.Features.Discord
 
                 if (newId != messageId)
                 {
-                    // Fell through to fresh post (e.g., original message was deleted manually). Persist the new id
                     DiscordUserState.SetShowcase(username, channelId, newId, tagline);
                 }
                 refreshed++;

@@ -1,15 +1,10 @@
-using System;
+﻿using System;
 using HarmonyLib;
 using KMHServerAddon.Diagnostics;
 
 namespace KMHServerAddon.Features.Discord.Patches
 {
-    // Harmony Postfix on InformationDisplayer.DisplayLogin - RWT's stock "this client just authenticated" log call.
-    // Stock RWT calls it from PM_Logins right after the auth handshake succeeds, which is exactly when we want to
-    // announce a join: the username is final, the client is verified, and we haven't fired earlier (the pre-auth
-    // DisplayConnect sees only an IP).
-    //
-    // We Postfix DisplayLogin so the announce lands at the right moment without touching any RWT source.
+    // DisplayLogin rather than the pre-auth DisplayConnect, which only ever sees an IP.
     [HarmonyPatch(typeof(InformationDisplayer), nameof(InformationDisplayer.DisplayLogin))]
     internal static class Patch_InformationDisplayer_Connect
     {
@@ -27,10 +22,7 @@ namespace KMHServerAddon.Features.Discord.Patches
         }
     }
 
-    // Harmony Postfix on InformationDisplayer.DisplayDisconnect - RWT's stock disconnect log call, invoked from the
-    // NetworkRuleset's OnDisconnect delegate (ServerNetwork.OnDisconnect). At this point the client has been
-    // removed from Network.ServerClients but client.GetData<UserFile>() is still populated, so we can read the
-    // username for the announce
+    // The client is already out of Network.ServerClients here, but its UserFile still carries the username.
     [HarmonyPatch(typeof(InformationDisplayer), nameof(InformationDisplayer.DisplayDisconnect))]
     internal static class Patch_InformationDisplayer_Disconnect
     {

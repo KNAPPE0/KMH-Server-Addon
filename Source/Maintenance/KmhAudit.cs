@@ -3,18 +3,15 @@ using System.Collections.Generic;
 
 namespace KMHServerAddon.Maintenance
 {
-    // Read-only, advisory anti-cheat scan for the ban-enforced season. Surfaces economy outliers + strong
-    // modified-client signals for an admin to eyeball - it never bans or mutates. Deeper detail: kmh ledger / inspect.
+    // Advisory only: it never bans or mutates, because these signals have legitimate causes.
     internal static class KmhAudit
     {
         public static void Run(Action<string> reply)
         {
             reply("=== KMH audit (advisory - review, don't auto-act) ===");
 
-            // Active economy / treasury access policy.
             reply($"Economy policy: {Features.Economy.EconomyAccess.Describe()}");
 
-            // Guild Hall policy + coverage (only interesting when a hall rule is enabled).
             Features.Economy.EconomyConfig ecfg = Features.Economy.EconomyConfig.Current;
             if (ecfg.AnyGuildHallRule)
             {
@@ -26,7 +23,6 @@ namespace KMHServerAddon.Maintenance
                 reply(missing == 0 ? $"  all {halls.Count} guild(s) have a Guild Hall." : $"  {missing}/{halls.Count} guild(s) missing a required Guild Hall.");
             }
 
-            // Biggest treasuries.
             List<(string OwnerKey, long Silver, bool IsGuild)> vaults = Features.Treasury.TreasuryStore.TopVaults(10);
             reply($"Top treasury vault(s) by silver ({vaults.Count}):");
             if (vaults.Count == 0) reply("  (none yet)");
@@ -38,15 +34,15 @@ namespace KMHServerAddon.Maintenance
                 reply($"  {Util.SilverFmt.Format(v.Silver)}  -  {who}{(v.IsGuild ? " (guild)" : "")}");
             }
 
-            // Highest reported colony wealth.
             List<Features.PlayerStats.Dto.PlayerLeaderboardEntry> players = Features.PlayerStats.PlayerStatsStore.BuildSnapshot().Entries;
-            players.Sort((a, b) => b.Wealth.CompareTo(a.Wealth));
+            players.Sort((a, b) => b.TotalWealth.CompareTo(a.TotalWealth));
             int wn = Math.Min(10, players.Count);
-            reply($"Top reported colony wealth ({wn}):");
-            for (int i = 0; i < wn; i++) reply($"  {Util.SilverFmt.Format(players[i].Wealth)}  -  {players[i].Username}");
+            reply($"Top total wealth - reported colony + server-side KMH holdings ({wn}):");
+            for (int i = 0; i < wn; i++)
+                reply($"  {Util.SilverFmt.Format(players[i].TotalWealth)}  -  {players[i].Username}" +
+                      $"  ({Util.SilverFmt.Format(players[i].Wealth)} on-map + {Util.SilverFmt.Format(players[i].KmhWealth)} KMH)");
 
-            // Sites declaring zero item value: a stock client reports the real market value, so 0 means the client was
-            // modified - the site value-under-report vector (now throughput-bounded, but still worth an eyeball).
+            // A stock client reports the real market value, so a declared 0 means the client was modified.
             List<Features.Sites.Dto.SiteEntry> sites = Features.Sites.SiteStore.AllForApi();
             List<string> flagged = new List<string>();
             foreach (Features.Sites.Dto.SiteEntry s in sites)
@@ -56,16 +52,14 @@ namespace KMHServerAddon.Maintenance
             if (flagged.Count == 0) reply("  (none)");
             else foreach (string f in flagged) reply(f);
 
-            // Site output catalog classification (uses the client-reported ItemLabelCache as coverage data). Reports
-            // tier distribution + risk so an owner can spot dangerous allowed outputs / incomplete catalogs.
             {
                 var cat = Features.ItemLabels.ItemLabelCache.AllForCatalog();
                 int total = cat.Count, allowed = 0, blocked = 0, unknown = 0;
                 int[] tierAllowed = new int[5];
                 List<string> danger = new List<string>();
-                foreach ((string defName, string label, long value) in cat)
+                foreach ((string defName, string label, long _) in cat)
                 {
-                    Features.Sites.SiteOutputClass c = Features.Sites.SiteOutputRules.Classify(defName, label, value);
+                    Features.Sites.SiteOutputClass c = Features.Sites.SiteOutputRules.Classify(defName, label);
                     if (c.IsUnknownOrSuspicious) unknown++;
                     if (c.IsAllowed) { allowed++; tierAllowed[Math.Max(1, Math.Min(4, c.TierNumber))]++;
                         if (c.TierNumber >= 3 && danger.Count < 20) danger.Add($"    T{c.TierNumber} {label} ({defName})"); }
@@ -80,7 +74,7 @@ namespace KMHServerAddon.Maintenance
                 if (danger.Count > 0) { reply($"  higher-tier allowed outputs to eyeball ({danger.Count}):"); foreach (string d in danger) reply(d); }
             }
 
-            // Guild vaults: orphaned (no live guild -> resurrectable by name reuse) or solo (1 member -> reset shelter).
+            // An orphaned vault is resurrectable by reusing the guild name; a solo one shelters silver from a reset.
             List<(string OwnerKey, long Silver, bool IsGuild)> guildVaults =
                 Features.Treasury.TreasuryStore.TopVaults(1000).FindAll(v => v.IsGuild);
             Dictionary<string, int> memberCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -99,8 +93,7 @@ namespace KMHServerAddon.Maintenance
             reply($"Solo-guild vaults ({solos.Count}):");
             if (solos.Count == 0) reply("  (none)"); else foreach (string sv in solos) reply(sv);
 
-            // Recovery queue: value that couldn't reach an owner (invalid/deleted account, disbanded guild) is parked
-            // here instead of destroyed - anything held is real value awaiting an admin decision.
+            // Anything held here is real value parked rather than destroyed, awaiting an admin decision.
             int recHeld = Features.Recovery.RecoveryStore.HeldCount;
             reply($"Recovery queue: {recHeld} held item/silver record(s)" + (recHeld > 0 ? " - review with 'kmh recover list'." : "."));
 

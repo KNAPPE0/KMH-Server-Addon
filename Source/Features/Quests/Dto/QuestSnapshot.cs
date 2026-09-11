@@ -1,11 +1,13 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using Newtonsoft.Json;
 
 namespace KMHServerAddon.Features.Quests.Dto
 {
-    // Mirror of the patch mod's KMHPatch.Features.Quests.Dto.QuestSnapshot.
+    // Mirrors the patch-side DTO - a field changed here has to change there too.
     public class QuestSnapshot
     {
+        // Monotonic under the store lock; two transports can deliver out of order, so the client drops anything older.
+        [JsonProperty("revision")] public long Revision { get; set; } = 0;
         [JsonProperty("quests")]                      public List<QuestEntry> Quests { get; set; } = new List<QuestEntry>();
         [JsonProperty("lifetime_quests_posted")]      public long             LifetimeQuestsPosted     { get; set; } = 0;
         [JsonProperty("lifetime_quests_completed")]   public long             LifetimeQuestsCompleted  { get; set; } = 0;
@@ -14,9 +16,9 @@ namespace KMHServerAddon.Features.Quests.Dto
 
     public class QuestEntry
     {
+        // Append-only: never reorder or rename a wire value.
         public const string KindDeliverItem = "deliver_item";
         public const string KindBounty      = "bounty";
-        // Quest kinds (append-only - never reorder/rename wire values).
         public const string KindEscort      = "escort";
         public const string KindDefend      = "defend";
         public const string KindHunt        = "hunt";
@@ -34,13 +36,11 @@ namespace KMHServerAddon.Features.Quests.Dto
         public const string VisibilityPublic    = "public";
         public const string VisibilityGuildOnly = "guild_only";
 
-        // Hunt target kinds.
         public const string HuntNone          = "none";
         public const string HuntAnimalSpecies = "animal_species";
         public const string HuntPawnKind      = "pawn_kind";
         public const string HuntNamedRaider   = "named_raider";
 
-        // Poster-review states (Custom + verifiable-kind dispute fallback).
         public const string ReviewNotApplicable = "not_applicable";
         public const string ReviewPending       = "pending";
         public const string ReviewApproved      = "approved";
@@ -76,29 +76,22 @@ namespace KMHServerAddon.Features.Quests.Dto
         [JsonProperty("claimed_utc_ticks")]    public long   ClaimedUtcTicks    { get; set; } = 0;
         [JsonProperty("completed_utc_ticks")]  public long   CompletedUtcTicks  { get; set; } = 0;
 
-        // per-kind fields. Default-valued so old saves + the two base kinds stay wire-compatible; unused fields are
-        // ignored.
-
-        // Escort
+        // Per-kind fields, default-valued so an old save and the two base kinds stay wire-compatible.
         [JsonProperty("escort_pickup_tile")]   public int    EscortPickupTile        { get; set; } = -1;
         [JsonProperty("escort_dropoff_tile")]  public int    EscortDropoffTile       { get; set; } = -1;
         [JsonProperty("escort_target_desc")]   public string EscortTargetDescription { get; set; } = "";
 
-        // Defend
         [JsonProperty("defend_colony_tile")]         public int  DefendColonyTile        { get; set; } = -1;
         [JsonProperty("defend_duration_game_ticks")] public long DefendDurationGameTicks { get; set; } = 0;
 
-        // Hunt
         [JsonProperty("hunt_target_kind")]     public string HuntTargetKind    { get; set; } = HuntNone;
         [JsonProperty("hunt_target_def_name")] public string HuntTargetDefName { get; set; } = "";
         [JsonProperty("hunt_target_count")]    public int    HuntTargetCount   { get; set; } = 0;
 
-        // Build
         [JsonProperty("build_at_tile")]            public int    BuildAtTile           { get; set; } = -1;
         [JsonProperty("build_structure_def_name")] public string BuildStructureDefName { get; set; } = "";
         [JsonProperty("build_count")]              public int    BuildCount            { get; set; } = 1;
 
-        // Proof / poster review
         [JsonProperty("proof_text")]                 public string ProofText               { get; set; } = "";
         [JsonProperty("proof_image_url")]            public string ProofImageUrl           { get; set; } = "";
         [JsonProperty("proof_submitted_utc_ticks")]  public long   ProofSubmittedUtcTicks  { get; set; } = 0;

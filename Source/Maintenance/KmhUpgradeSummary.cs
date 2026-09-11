@@ -1,23 +1,22 @@
-using KMHServerAddon.Diagnostics;
+﻿using KMHServerAddon.Diagnostics;
 using KMHServerAddon.Persistence;
 
 namespace KMHServerAddon.Maintenance
 {
-    // One consolidated boot recap of the v1.1.1 -> v1.2.0 upgrade so an owner sees at a glance what changed and what
-    // needs attention. Read-only; every fact comes from work already done earlier in boot.
+    // Read-only: every fact comes from work already done earlier in boot.
     internal static class KmhUpgradeSummary
     {
         public static void Print(int fieldsBackfilled)
         {
-            ServerLog.Info("=== KMH v1.2.0 startup summary ===");
+            ServerLog.Info($"=== KMH v{KmhVersion.Build} startup summary ===");
             ServerLog.Info(KmhDataMeta.IsFreshInstall
-                ? "  install: fresh - configs generated with v1.2.0 Balanced-safe defaults"
+                ? "  install: fresh - configs generated with this build's Balanced-safe defaults"
                 : $"  install: upgraded from existing data (defaults revision {KmhDataMeta.AppliedDefaultsRevision})");
 
             if (fieldsBackfilled > 0)
                 ServerLog.Info($"  configs: {fieldsBackfilled} missing field(s) backfilled with safe defaults (owner values kept)");
             if (KmhDefaultsUpgrade.RanThisBoot)
-                ServerLog.Info($"  defaults upgrade: {KmhDefaultsUpgrade.Changed.Count} value(s) moved to v1.2.0 defaults, {KmhDefaultsUpgrade.Preserved.Count} kept as owner-set");
+                ServerLog.Info($"  defaults upgrade: {KmhDefaultsUpgrade.Changed.Count} value(s) moved to KMH's defaults, {KmhDefaultsUpgrade.Preserved.Count} kept as owner-set");
 
             ServerLog.Info($"  economy profile: {Features.Economy.EconomyConfig.Current.EconomyMode ?? "Standard"}");
 

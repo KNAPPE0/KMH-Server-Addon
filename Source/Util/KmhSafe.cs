@@ -1,24 +1,30 @@
-using System;
+﻿using System;
 
 namespace KMHServerAddon.Util
 {
-    // Small pure helpers that were copy-pasted across stores, configs, and commands. Centralizing them means a
-    // behaviour tweak (clamping, truncation, duration parsing) is a one-file change instead of N copies drifting.
-    // Files opt in with `using static KMHServerAddon.Util.KmhSafe;` so existing call sites need no change.
     internal static class KmhSafe
     {
         public static long Clamp(long v, long lo, long hi) => v < lo ? lo : (v > hi ? hi : v);
         public static int  Clamp(int  v, int  lo, int  hi) => v < lo ? lo : (v > hi ? hi : v);
 
-        // Truncate to at most maxLen chars; null/empty -> "".
+        // Saturating, because an unchecked `a += b` wraps a client-claimed fortune NEGATIVE and reverses every rule.
+        public static int AddSaturating(int current, long add, out bool clamped)
+        {
+            long sum = (long)current + add;
+            clamped = sum > int.MaxValue || sum < int.MinValue;
+            if (sum > int.MaxValue) return int.MaxValue;
+            if (sum < int.MinValue) return int.MinValue;
+            return (int)sum;
+        }
+
+        public static int AddSaturating(int current, long add) => AddSaturating(current, add, out _);
+
         public static string Cap(string s, int maxLen)
             => string.IsNullOrEmpty(s) ? "" : (s.Length <= maxLen ? s : s.Substring(0, maxLen));
 
-        // Case-insensitive equality treating null as "".
         public static bool Eq(string a, string b) => string.Equals(a ?? "", b ?? "", StringComparison.OrdinalIgnoreCase);
 
-        // Duration token -> minutes. Bare number = minutes; m/h/d suffix ("30", "30m", "2h", "1d"). -1 when the token
-        // isn't a duration at all, so callers can tell a missing/word arg apart from a real 0.
+        // Returns -1, not 0, when the token is not a duration, so a word argument is distinguishable from a real 0.
         public static int ParseDurationMinutes(string s)
         {
             if (string.IsNullOrWhiteSpace(s)) return -1;
@@ -30,7 +36,6 @@ namespace KMHServerAddon.Util
             return unit == 'h' ? v * 60 : unit == 'd' ? v * 1440 : v;
         }
 
-        // Friendly duration label: minutes under an hour, else "Xh" / "Xh Ym".
         public static string FmtDuration(int minutes)
         {
             if (minutes <= 0) return "0m";

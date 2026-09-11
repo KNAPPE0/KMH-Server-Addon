@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -6,28 +6,23 @@ using System.Runtime.Loader;
 
 namespace KMHServerAddon
 {
-    // Entry point + launcher (StartupObject). KMH ships nothing of RWT: it extracts the owner's server assemblies at
-    // runtime, Harmony-patches them, then calls RWT's own Main. Two things make Harmony work on the official build:
-    // run framework-dependent so MonoMod can find clrjit, and re-launch once with DOTNET_ReadyToRun=0 so the runtime
-    // JITs plain IL instead of RWT's un-patchable ReadyToRun images. RwtDiscovery decides which server we load.
+    // Must stay framework-dependent: MonoMod needs to find clrjit, which a self-contained build hides.
     internal static class Bootstrap
     {
         private const string ReExecMarker = "KMH_REEXEC";
 
-        // One payload per generation, compiled against that RWT build; "old" runs in this launcher itself.
+        // One payload per generation; the "old" generation runs in this launcher itself rather than from a payload.
         private const string PayloadNew = "KMHAddon.RTShared.dll";    // 26.6.x, GameServer.dll
         private const string PayloadRt  = "KMHAddon.RTServer.dll";    // 26.7.x, RTServer.dll
 
         public static int Main(string[] args)
         {
-            // Re-launch once with ReadyToRun off, forwarding console, args and exit code.
             if (Environment.GetEnvironmentVariable(ReExecMarker) != "1")
                 return ReExecWithR2RDisabled(args);
 
             string dir = AppContext.BaseDirectory;
             string cache = Path.Combine(dir, ".rwt-runtime");
 
-            // Resolve RWT/deps from the server folder or the extraction cache.
             AssemblyLoadContext.Default.Resolving += (ctx, name) =>
             {
                 try
@@ -78,6 +73,7 @@ namespace KMHServerAddon
             switch (found.Generation)
             {
                 case "old":
+                    if (!OldGenerationIsSupported()) { PrintTooOld(); return 1; }
                     Console.WriteLine($"{Constants.LogPrefix} RWT 26.5.x server detected.");
                     return Main_.RunAndStartServer(args);
                 case "rt":
@@ -85,6 +81,40 @@ namespace KMHServerAddon
                 default:
                     return RunPayload(args, PayloadNew, "RWT 26.6.x server detected");
             }
+        }
+
+        // The file set reads as 26.5.x, but 26.4.18.1 ships TCPNetwork.dll without this type - Harmony finds that late.
+        internal const string OldGenerationProbeType = "TCPNetwork.ServerClient";
+
+        private static bool OldGenerationIsSupported()
+        {
+            try
+            {
+                // By name, not by scanning: RWT resolves lazily, so nothing has pulled TCPNetwork in at this point.
+                var tcp = System.Reflection.Assembly.Load(new System.Reflection.AssemblyName("TCPNetwork"));
+                return tcp?.GetType(OldGenerationProbeType, throwOnError: false) != null;
+            }
+            catch { }
+            // Could not tell. Running is the right default: refusing a server that would have worked is the worse error.
+            return true;
+        }
+
+        private static void PrintTooOld()
+        {
+            TextWriter w = Console.Error;
+            w.WriteLine();
+            w.WriteLine($"{Constants.LogPrefix} This RimWorld Together release is older than KMH supports.");
+            w.WriteLine();
+            w.WriteLine($"  Its TCPNetwork.dll has no {OldGenerationProbeType}, which KMH patches on every");
+            w.WriteLine("  connection. RWT moved that type after 26.4.18.1, so 26.5.24.1 is the oldest release");
+            w.WriteLine("  KMH v1.3.0 runs on.");
+            w.WriteLine();
+            w.WriteLine("  Nothing has been patched and no KMH data has been touched. Update RimWorld Together");
+            w.WriteLine("  to 26.5.24.1 or newer and start the addon again.");
+            w.WriteLine();
+            // Same as the other two refusals: a double-clicked window must not close before this can be read.
+            w.WriteLine("Press Enter to exit...");
+            try { Console.ReadLine(); } catch { }
         }
 
         private static int RunPayload(string[] args, string resource, string what)
@@ -135,7 +165,6 @@ namespace KMHServerAddon
             }
         }
 
-        // Opt-in; successful startup otherwise stays at one line.
         private static void PrintDiscovery(RwtDiscovery.Result found)
         {
             Console.WriteLine($"{Constants.LogPrefix} discovery: folder {found.Directory}");
@@ -222,7 +251,9 @@ namespace KMHServerAddon
                     w.WriteLine("  This usually means a newer RWT release than this KMH build supports.");
                 }
                 w.WriteLine();
-                w.WriteLine("Deleting the .rwt-runtime folder and re-running forces a clean re-extraction.");
+                w.WriteLine("If the extraction itself looks damaged (a half-full disk will do it): stop the");
+                w.WriteLine("addon, delete the .rwt-runtime folder, and run it again - that forces a clean");
+                w.WriteLine("re-extraction. Keep this output if you need to report the problem.");
             }
             else
             {

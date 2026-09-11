@@ -7,13 +7,10 @@ using Newtonsoft.Json.Linq;
 
 namespace KMHServerAddon.Maintenance
 {
-    // One-shot defaults upgrade (marker-gated, never re-runs): flips only values still at the OLD stock default.
+    // Marker-gated and one-shot: only a value still at the old stock default is flipped, never an owner's own choice.
     internal static class KmhDefaultsUpgrade
     {
-        // Revision 1 = v1.2.0: living-world auto events/quests on; API transport promoted to default-on public.
-        // Revision 2 = v1.2.0 fix: normalize a legacy server still at EconomyMode=Standard (backfilled by an earlier
-        // build) to the recommended Balanced. Fresh migrations set Balanced pre-backfill, so they're already there.
-        public const int Revision = 2;
+        public const int Revision = 3;
 
         public static List<string> Changed   { get; } = new List<string>();
         public static List<string> Preserved { get; } = new List<string>();
@@ -52,11 +49,12 @@ namespace KMHServerAddon.Maintenance
                     ("EnableKmhApiTransport", false,       true),
                     ("BindAddress",           "127.0.0.1", "0.0.0.0"),
                 });
-                // Rev 2: a legacy server the earlier build backfilled to Standard moves to the recommended Balanced.
-                // A server whose owner explicitly picked any non-Standard mode is left as-is (AtOldDefault(Standard) fails).
+                // Left alone if the owner picked a non-Standard mode or their own cap: AtOldDefault fails and it is kept.
                 Upgrade(KmhDataPaths.EconomyConfigFile, "Economy.json", new (string key, JToken oldDef, JToken newDef)[]
                 {
-                    ("EconomyMode", "Standard", "Balanced"),
+                    ("EconomyMode",            "Standard",  "Balanced"),
+                    ("MaxSilverDepositPerTx",  100_000_000, 1_000_000),
+                    ("MaxItemDepositQtyPerTx", 100_000,     5_000),
                 });
 
                 Features.Transport.TransportConfig.Reload();
@@ -65,7 +63,7 @@ namespace KMHServerAddon.Maintenance
                 KmhDataMeta.StampDefaultsRevision(Revision);
                 RanThisBoot = true;
 
-                ServerLog.Info($"Defaults upgrade: v1.2.0 recommended defaults applied " +
+                ServerLog.Info($"Defaults upgrade: KMH's recommended defaults applied " +
                                $"({Changed.Count} changed, {Preserved.Count} kept as owner-set). This runs once.");
                 foreach (string c in Changed)   ServerLog.Info($"Defaults upgrade: changed   {c}");
                 foreach (string p in Preserved) ServerLog.Info($"Defaults upgrade: preserved {p} (owner-set)");

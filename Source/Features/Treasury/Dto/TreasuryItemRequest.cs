@@ -3,8 +3,7 @@ using Newtonsoft.Json;
 
 namespace KMHServerAddon.Features.Treasury.Dto
 {
-    // Deposit/withdraw request. Legacy path uses item_def_name + qty; payload path uses payloads (deposit) or
-    // fingerprint (withdraw). All fields optional so old clients (no payloads/fingerprint) still work.
+    // Every field is optional, so an old client that sends no payloads or fingerprint still works.
     public class TreasuryItemRequest
     {
         [JsonProperty("item_def_name")] public string ItemDefName { get; set; } = "";

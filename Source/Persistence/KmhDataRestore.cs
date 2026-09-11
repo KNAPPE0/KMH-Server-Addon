@@ -4,9 +4,7 @@ using KMHServerAddon.Diagnostics;
 
 namespace KMHServerAddon.Persistence
 {
-    // Coordinated rollback. A restore is queued as a one-line marker file (a backup name, "latest", or
-    // "before:<iso|yyyyMMdd-HHmmss>"); it's applied at boot, before any store loads, so KMH lines up with an external
-    // RWT rollback. An external tool can drop the marker itself, or `kmh restore` writes it.
+    // Queued as a marker file so an external RWT rollback tool can drop one, and applied at boot before stores load.
     internal static class KmhDataRestore
     {
         public static void ApplyPendingRestore()
@@ -32,8 +30,7 @@ namespace KMHServerAddon.Persistence
                 ServerLog.Error($"Restore FAILED for '{spec}': {err}. Continuing with existing KMH-Data.");
         }
 
-        // Queue a restore for the next boot. Resolves the spec now and stores the concrete backup name, so the result
-        // is deterministic even if new backups appear before the restart.
+        // Resolved now and stored as a concrete backup name, so "latest" cannot drift if a backup lands before restart.
         public static bool Queue(string spec, out string resolved, out string error)
         {
             resolved = null; error = null;

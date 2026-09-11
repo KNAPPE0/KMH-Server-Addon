@@ -1,17 +1,13 @@
-using System;
+﻿using System;
 using System.Linq;
 using System.Text;
 using KMHServerAddon.Diagnostics;
 
 namespace KMHServerAddon.AdminCommands
 {
-    // Runs ANY registered server console command (RWT's own + KMH's) and returns its output as text, so the Discord
-    // console can drive the full terminal. We temporarily wrap Printer's OnMessage/Warning/Error/Title delegates to
-    // tee output into a buffer (still forwarding to the real console), dispatch like RWT's private ParseCommand
-    // (match Prefix in CMD_Base.Commands, set CommandParameters, call Action), then restore the delegates.
     internal static class ConsoleExecutor
     {
-        // Serialize runs so two Discord console calls don't tangle the capture.
+        // Printer is a global singleton, so two concurrent runs would tangle each other's capture.
         private static readonly object _lock = new object();
 
         public static string Run(string commandLine)
@@ -52,7 +48,7 @@ namespace KMHServerAddon.AdminCommands
             return string.IsNullOrEmpty(outp) ? "(command produced no output)" : outp;
         }
 
-        // Mirror of RWT's private CMD_Base.ParseCommand: first token is the prefix, the rest are parameters
+        // Mirrors RWT's CMD_Base.ParseCommand, which is private and so cannot be called.
         private static void Dispatch(string input)
         {
             int sp = input.IndexOf(' ');

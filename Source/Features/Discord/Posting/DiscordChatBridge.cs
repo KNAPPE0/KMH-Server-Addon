@@ -3,12 +3,9 @@ using KMHServerAddon.Diagnostics;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // Two-way chat relay between Discord (DiscordChatChannelId) and in-game (PKT_Chat). Loops are broken by
-    // filtering Author.IsBot on the Discord side, filtering "[Discord] " usernames on the in-game side, and by the
-    // KmhIntercept Prefix already filtering protocol envelopes
+    // The bot filter one way and the "[Discord] " username filter the other are what stop the relay looping.
     internal static class DiscordChatBridge
     {
-        // Prefix applied to in-game chat that originated on Discord.
         private const string DiscordTagPrefix = "[Discord] ";
 
         public static bool IsEnabled
@@ -20,8 +17,6 @@ namespace KMHServerAddon.Features.Discord
             }
         }
 
-        // in-game -> Discord. Skip messages that are themselves relayed Discord chat (username starts with
-        // "[Discord] "), commands, and empty/protocol messages.
         public static void RelayInGameToDiscord(string username, string message)
         {
             if (!IsEnabled)                                                                return;
@@ -29,19 +24,14 @@ namespace KMHServerAddon.Features.Discord
             if (username.StartsWith(DiscordTagPrefix, StringComparison.Ordinal))           return;
             if (message.Length > 1500) message = message.Substring(0, 1497) + "…";
 
-            // Markdown-escape minimal - Discord renders **bold** and other markup, and a malicious in-game player
-            // could ping @everyone. Escape the @ to prevent role/everyone mentions; leave the rest readable since
-            // marketplace links and short emphasis are useful
-            string safe = message.Replace("@", "@​"); // zero-width space breaks pings
+            // Only mentions are defused; markdown stays so links and emphasis still read naturally.
+            string safe = message.Replace("@", "@​");
 
             DiscordBridge.PostToChannel(
                 DiscordBridge.Config.ChatBridgeChannelId,
                 $"**{username}**: {safe}");
         }
 
-        // Discord -> in-game. Constructs a PKT_Chat tagged "[Discord] X" and broadcasts to every verified client.
-        // Stops if the message exceeds the chat-cap (server's own rate limit handles spammy sources; we just clamp
-        // display length here)
         public static void RelayDiscordToInGame(string displayName, string message)
         {
             if (!IsEnabled)                                                          return;

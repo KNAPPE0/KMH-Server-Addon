@@ -3,7 +3,7 @@ using Newtonsoft.Json;
 
 namespace KMHServerAddon.Features.Notifications.Dto
 {
-    // Batch of offline notices delivered to a client on login. Byte-identical to the patch-side DTO.
+    // Mirrors the patch-side DTO - a field changed here has to change there too.
     public class NotificationBatch
     {
         [JsonProperty("notifications")] public List<NotificationDto> Notifications { get; set; } = new List<NotificationDto>();

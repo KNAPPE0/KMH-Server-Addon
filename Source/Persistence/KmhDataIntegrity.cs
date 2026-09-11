@@ -7,7 +7,6 @@ using Newtonsoft.Json.Linq;
 
 namespace KMHServerAddon.Persistence
 {
-    // Read-only KMH JSON health check for kmh verify; missing is fine, empty or unparseable gets flagged.
     internal static class KmhDataIntegrity
     {
         public enum State { Missing, Ok, Empty, Corrupt }
@@ -18,6 +17,7 @@ namespace KMHServerAddon.Persistence
             public string Path;
             public State  State;
             public bool   Regenerable;
+            public bool   AbsentIsNormal;
             public long   Bytes;
             public string Detail = "";
         }
@@ -25,12 +25,14 @@ namespace KMHServerAddon.Persistence
         public sealed class ScanResult
         {
             public List<FileStatus> Files = new List<FileStatus>();
-            public List<string> StrayCorruptFiles = new List<string>(); // .corrupt-* recovery leftovers (informational)
-            public List<string> StrayTmpFiles      = new List<string>(); // .tmp interrupted writes (safe to remove)
+            public List<string> StrayCorruptFiles = new List<string>();
+            public List<string> StrayTmpFiles      = new List<string>();
             public int Ok, Missing, Empty, Corrupt;
-            public bool CriticalDamage; // a non-regenerable file is empty/corrupt - the loud case
+            public int MissingRequired, MissingOptional;
+            // Only a non-regenerable file counts: this is what stops boot backup pruning.
+            public bool CriticalDamage;
             public string Summary =>
-                $"{Ok} ok, {Missing} not-yet-created, {Empty} empty, {Corrupt} corrupt" +
+                $"{Ok} ok, {MissingRequired} required missing, {MissingOptional} optional/lazy absent, {Empty} empty, {Corrupt} corrupt" +
                 (StrayCorruptFiles.Count > 0 ? $", {StrayCorruptFiles.Count} salvaged .corrupt file(s)" : "") +
                 (StrayTmpFiles.Count > 0 ? $", {StrayTmpFiles.Count} stray .tmp file(s)" : "");
         }
@@ -40,12 +42,15 @@ namespace KMHServerAddon.Persistence
             ScanResult r = new ScanResult();
             foreach (KmhDataPaths.DataFile f in KmhDataPaths.KnownDataFiles)
             {
-                FileStatus fs = new FileStatus { Label = f.Label, Path = f.Path, Regenerable = f.Regenerable };
+                FileStatus fs = new FileStatus { Label = f.Label, Path = f.Path, Regenerable = f.Regenerable,
+                                                 AbsentIsNormal = f.AbsentIsNormal };
                 try
                 {
                     if (!File.Exists(f.Path))
                     {
-                        fs.State = State.Missing; fs.Detail = "not created yet"; r.Missing++;
+                        fs.State = State.Missing; r.Missing++;
+                        if (f.AbsentIsNormal) { fs.Detail = "not present - normal for this file"; r.MissingOptional++; }
+                        else                  { fs.Detail = "not created yet"; r.MissingRequired++; }
                     }
                     else
                     {
@@ -88,14 +93,22 @@ namespace KMHServerAddon.Persistence
             return r;
         }
 
-        // Boot logging: one summary line, then loud per-file errors only for the damaged irreplaceable files.
         public static void LogScan(ScanResult r)
         {
+            // A brand-new server has nothing to have lost, and "23 required missing" reads as a fault to the owner who just installed it.
+            bool fresh = KmhDataMeta.IsFreshInstall && !r.CriticalDamage;
+
             if (r.CriticalDamage)
                 ServerLog.Error($"Data integrity: {r.Summary} - IRREPLACEABLE DATA IS DAMAGED (see below). " +
                                 "Restore from KMH-Data-Backups before players reconnect.");
+            else if (fresh)
+                ServerLog.Info($"Data integrity: new server - {r.Ok} file(s) in place, the rest are written as each system is first used.");
             else
                 ServerLog.Info($"Data integrity: {r.Summary}.");
+
+            if (!fresh)
+                foreach (FileStatus fs in r.Files.Where(x => x.State == State.Missing && !x.AbsentIsNormal))
+                    ServerLog.Warn($"Data integrity: {fs.Label} ({Path.GetFileName(fs.Path)}) has not been created yet.");
 
             foreach (FileStatus fs in r.Files.Where(x => x.State == State.Corrupt || x.State == State.Empty))
             {

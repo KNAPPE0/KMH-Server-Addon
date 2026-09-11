@@ -4,9 +4,6 @@ using KMHServerAddon.Diagnostics;
 
 namespace KMHServerAddon.AdminCommands
 {
-    // In-game /kmh server chat command. Thin wrapper around KmhServerCommands - the same logic backs the
-    // server-console "kmh server" command. Read subcommands (status / extensions / help) are open; mutating ones
-    // are gated on the caller's IsAdmin flag
     [HarmonyPatch(typeof(PM_Chat), nameof(PM_Chat.Receive))]
     internal static class Patch_PM_Chat_ServerCommands
     {
@@ -28,8 +25,7 @@ namespace KMHServerAddon.AdminCommands
 
             try
             {
-                // Drop the two-word "/kmh server" prefix; parts[2..] is [subcommand, args...] (parts[0]="/kmh",
-                // parts[1]="server")
+                // Index 2 because the prefix is two words: parts[0]="/kmh", parts[1]="server".
                 string[] parts = msg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
                 string[] args  = parts.Length > 2 ? parts[2..] : Array.Empty<string>();
 
@@ -42,7 +38,7 @@ namespace KMHServerAddon.AdminCommands
             {
                 ServerLog.Error("/kmh server command handler threw", ex);
                 try { PM_Chat.SendConsoleMessage(client, "[KMH] /kmh server command failed unexpectedly."); }
-                catch { /* nothing we can do */ }
+                catch { }
             }
             return false; // handled
         }

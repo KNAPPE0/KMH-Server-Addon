@@ -1,0 +1,51 @@
+KMH Server Addon - Third-Party Notices
+======================================
+
+The KMH Server Addon is distributed under the KMH Project Proprietary
+License (see LICENSE). It bundles the following third-party components,
+each governed by its own license.
+
+
+SixLabors.ImageSharp 3.1.11
+---------------------------
+Copyright (c) Six Labors
+Six Labors Split License, Version 1.0
+https://github.com/SixLabors/ImageSharp/blob/main/LICENSE
+
+Used by the server media resolver to decode WebP images that the KMH
+client cannot decode, and to re-encode them as PNG (static) or animated
+GIF (animated) so they can be displayed in game.
+
+The Six Labors Split License grants use under the terms of the Apache
+License 2.0 where the consumer is, among other qualifying categories,
+"a For-profit company/individual with less than 1M USD annual gross
+revenue". KMH is distributed under that clause.
+
+Version note: the 3.1.x line is pinned deliberately. ImageSharp 4.x
+introduces a build-time license-key requirement (the build fails with
+"No Six Labors license found" unless SixLaborsLicenseKey,
+SixLaborsLicenseFile, or a sixlabors.lic file is supplied). 3.1.x has
+no such requirement and provides the animated-WebP decoding and
+animated-GIF encoding the resolver needs. Do not upgrade this
+dependency to 4.x without first obtaining a license key.
+
+
+Newtonsoft.Json
+---------------
+Copyright (c) James Newton-King
+MIT License
+https://github.com/JamesNK/Newtonsoft.Json/blob/master/LICENSE.md
+
+
+Discord.Net
+-----------
+Copyright (c) Discord.Net Contributors
+MIT License
+https://github.com/discord-net/Discord.Net/blob/dev/LICENSE
+
+
+Lib.Harmony (0Harmony)
+----------------------
+Copyright (c) Andreas Pardeike
+MIT License
+https://github.com/pardeike/Harmony/blob/master/LICENSE

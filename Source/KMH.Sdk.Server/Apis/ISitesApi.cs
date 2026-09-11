@@ -4,9 +4,8 @@ using KMH.Sdk.Server.Records;
 namespace KMH.Sdk.Server.Apis
 {
     /// <summary>
-    /// Read the custom-site registry. Sites have build cost, worker, and
-    /// production rules the server owns, so this is read-only - react to changes
-    /// via <see cref="IKmhEvents.SiteChanged"/>.
+    /// Read the site registry. Build cost, worker and production rules are server-owned, so this is read-only;
+    /// react to changes via <see cref="IKmhEvents.SiteChanged"/>.
     /// </summary>
     public interface ISitesApi
     {

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using KMHServerAddon.Features.Guilds.Dto;
 using KMHServerAddon.Persistence;
@@ -14,19 +14,15 @@ namespace KMHServerAddon.Features.Guilds
         private static readonly Dictionary<string, GuildSnapshot> _guilds
             = new Dictionary<string, GuildSnapshot>(StringComparer.OrdinalIgnoreCase);
 
-        // username -> guild name (lowercase usernames; values preserve casing of the guild name as created). Empty
-        // when player isn't in a guild
         private static readonly Dictionary<string, string> _userToGuild
             = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-        // Daily guild-vault withdraw tally keyed by guild+user (not the member row, which is destroyed on leave), so
-        // leaving and rejoining can't reset it. In-memory only - a daily cap resetting on server restart is fine.
+        // Keyed by guild+user rather than the member row, so leaving and rejoining cannot reset the daily cap.
         private static readonly Dictionary<string, (long DayStartUtc, long Withdrawn)> _withdrawTally
             = new Dictionary<string, (long, long)>(StringComparer.OrdinalIgnoreCase);
         private static string TallyKey(string guild, string user) => (guild ?? "") + "\u0001" + (user ?? "");
 
-        // Raise the SDK GuildChanged event. Always called OUTSIDE _lock so a subscriber can't deadlock or observe
-        // half-applied state
+        // Always called outside _lock, so a subscriber cannot deadlock or observe half-applied state.
         private static void RaiseChanged(string guildName, string reason, string actor = "")
         {
             if (string.IsNullOrEmpty(guildName)) return;
@@ -34,19 +30,18 @@ namespace KMHServerAddon.Features.Guilds
                 new KMH.Sdk.Server.Events.GuildChangedEvent { GuildName = guildName, Reason = reason ?? "", Actor = actor ?? "" });
         }
 
-        // --- admin/tooling API ---
-
         public static bool CreateGuild(string name)
         {
             if (string.IsNullOrWhiteSpace(name)) return false;
             bool ok = false;
             lock (_lock)
             {
+                AuthorityPoint before = AuthorityPointLocked();
                 if (_guilds.ContainsKey(name)) return false;
                 _guilds[name] = new GuildSnapshot { Name = name };
-                ok = true;
+                ok = CommitAuthorityLocked(before);
             }
-            if (ok) { SaveToDisk(); RaiseChanged(name, "created"); }
+            if (ok) RaiseChanged(name, "created");
             return ok;
         }
 
@@ -57,11 +52,12 @@ namespace KMHServerAddon.Features.Guilds
             bool ok = false;
             lock (_lock)
             {
+                AuthorityPoint before = AuthorityPointLocked();
                 if (!_guilds.TryGetValue(guildName, out GuildSnapshot g)) return false;
                 g.Motd = motd ?? "";
-                ok = true;
+                ok = CommitAuthorityLocked(before);
             }
-            if (ok) { SaveToDisk(); RaiseChanged(guildName, "motd"); }
+            if (ok) RaiseChanged(guildName, "motd");
             return ok;
         }
 
@@ -71,6 +67,7 @@ namespace KMHServerAddon.Features.Guilds
             bool ok = false;
             lock (_lock)
             {
+                AuthorityPoint before = AuthorityPointLocked();
                 if (!_guilds.TryGetValue(guildName, out GuildSnapshot g)) return false;
                 if (_userToGuild.ContainsKey(username)) return false; // already in a guild
                 g.Members.Add(new GuildMemberDto
@@ -80,14 +77,13 @@ namespace KMHServerAddon.Features.Guilds
                     JoinedUtcTicks = DateTime.UtcNow.Ticks,
                 });
                 _userToGuild[username] = g.Name;
-                ok = true;
+                ok = CommitAuthorityLocked(before);
             }
-            if (ok) { SaveToDisk(); RaiseChanged(guildName, "member_joined", username); }
+            if (ok) RaiseChanged(guildName, "member_joined", username);
             return ok;
         }
 
-        // Convenience for the chat-command path: create a guild and add the caller as its initial Admin. Atomic -
-        // if either step fails, the store is rolled back
+        // Atomic: if either step fails the store is rolled back.
         public static bool CreateGuildAndJoinAsAdmin(string creator, string guildName, out string errorReason, int hallTile = -1)
         {
             errorReason = null;
@@ -96,12 +92,13 @@ namespace KMHServerAddon.Features.Guilds
                 errorReason = "Both creator and guild name are required.";
                 return false;
             }
-            // P8: a server can require a Guild Hall to create a guild (needs a chosen tile).
+            // A server can require a Guild Hall to create a guild (needs a chosen tile).
             if (!GuildHallRules.CanCreate(hallTile, out errorReason)) return false;
             guildName = Util.KmhSafe.Cap(guildName.Trim(), 48);   // bound client-supplied name (also the dict key)
             bool ok = false;
             lock (_lock)
             {
+                AuthorityPoint before = AuthorityPointLocked();
                 if (_guilds.ContainsKey(guildName))
                 {
                     errorReason = $"A guild named '{guildName}' already exists.";
@@ -119,8 +116,7 @@ namespace KMHServerAddon.Features.Guilds
                     Rank           = GuildMemberDto.RankOwner,
                     JoinedUtcTicks = DateTime.UtcNow.Ticks,
                 });
-                // A fresh guild starts with NO hall unless one was designated at creation - a reused name never
-                // inherits an old hall (the hall lives on the guild record, which is brand new here).
+                // The hall lives on the guild record, so a reused name never inherits an old one.
                 if (hallTile >= 0)
                     g.Hall = new GuildHallDto
                     {
@@ -131,14 +127,14 @@ namespace KMHServerAddon.Features.Guilds
                 _guilds[guildName]    = g;
                 _userToGuild[creator] = guildName;
                 PurgeInvitesLocked(creator);
-                ok = true;
+                ok = CommitAuthorityLocked(before);
+                if (!ok) errorReason = "The server could not save that guild - nothing was created. Try again shortly.";
             }
-            if (ok) { SaveToDisk(); RaiseChanged(guildName, "created", creator); }
+            if (ok) RaiseChanged(guildName, "created", creator);
             return ok;
         }
 
-        // Set (or move) the guild's hall to a world tile. Admin-only. Radius comes from config. Overwrites any prior
-        // hall so there's never a duplicate. Returns (ok, reason).
+        // Overwrites any prior hall, so a guild can never end up with two.
         public static (bool ok, string reason) SetGuildHall(string actor, int tile)
         {
             if (string.IsNullOrEmpty(actor)) return (false, "No user.");
@@ -146,6 +142,7 @@ namespace KMHServerAddon.Features.Guilds
             string guildName;
             lock (_lock)
             {
+                AuthorityPoint before = AuthorityPointLocked();
                 if (!_userToGuild.TryGetValue(actor, out string gname) || !_guilds.TryGetValue(gname, out GuildSnapshot g))
                     return (false, "You are not in a guild.");
                 if (RankOrder(FindRankLocked(g, actor)) > RankOrder(GuildMemberDto.RankAdmin))
@@ -157,14 +154,12 @@ namespace KMHServerAddon.Features.Guilds
                     CreatedUtcTicks = DateTime.UtcNow.Ticks,
                 };
                 guildName = g.Name;
+                if (!CommitAuthorityLocked(before)) return (false, "The server could not save that - the Guild Hall is unchanged.");
             }
-            SaveToDisk();
             RaiseChanged(guildName, "hall_set", actor);
             return (true, "Guild Hall set.");
         }
 
-        // Audit helper: (guildName, hasHall) for every guild. Halls live ON the guild record, so an orphaned hall or a
-        // hall bound to a deleted/reused guild is structurally impossible - this just reports coverage.
         public static System.Collections.Generic.List<(string Name, bool HasHall)> AllGuildHallStatus()
         {
             var list = new System.Collections.Generic.List<(string, bool)>();
@@ -180,20 +175,19 @@ namespace KMHServerAddon.Features.Guilds
             string guildName;
             lock (_lock)
             {
+                AuthorityPoint before = AuthorityPointLocked();
                 if (!_userToGuild.TryGetValue(actor, out string gname) || !_guilds.TryGetValue(gname, out GuildSnapshot g))
                     return (false, "You are not in a guild.");
                 if (RankOrder(FindRankLocked(g, actor)) > RankOrder(GuildMemberDto.RankAdmin))
                     return (false, "Only the guild admin can remove the Guild Hall.");
                 g.Hall = null;
                 guildName = g.Name;
+                if (!CommitAuthorityLocked(before)) return (false, "The server could not save that - the Guild Hall is unchanged.");
             }
-            SaveToDisk();
             RaiseChanged(guildName, "hall_removed", actor);
             return (true, "Guild Hall removed.");
         }
 
-        // Join a guild. Requires an open guild or a standing invite (which is consumed). Admins/mods issue invites
-        // via Invite()
         public static bool JoinGuild(string username, string guildName, out string errorReason, Economy.EconomyContext ctx = default)
         {
             errorReason = null;
@@ -205,6 +199,7 @@ namespace KMHServerAddon.Features.Guilds
             bool ok = false;
             lock (_lock)
             {
+                AuthorityPoint before = AuthorityPointLocked();
                 if (_userToGuild.ContainsKey(username))
                 {
                     errorReason = "You are already in a guild - /kmh guild leave first.";
@@ -215,13 +210,14 @@ namespace KMHServerAddon.Features.Guilds
                     errorReason = $"No guild named '{guildName}' exists.";
                     return false;
                 }
-                bool invited = g.PendingInvites.RemoveAll(u => string.Equals(u, username, StringComparison.OrdinalIgnoreCase)) > 0;
+                // Not consumed here: a later gate can still fail the join, which would burn the invite.
+                bool invited = g.PendingInvites.Exists(u => string.Equals(u, username, StringComparison.OrdinalIgnoreCase));
                 if (!g.OpenJoin && !invited)
                 {
                     errorReason = $"'{guildName}' is invite-only - ask an admin to /kmh guild invite you.";
                     return false;
                 }
-                if (!GuildHallRules.CanJoin(g, ctx, out errorReason)) return false;   // P8 proximity-to-join rule
+                if (!GuildHallRules.CanJoin(g, ctx, out errorReason)) return false;   // proximity-to-join rule
                 g.Members.Add(new GuildMemberDto
                 {
                     Username       = username,
@@ -230,9 +226,10 @@ namespace KMHServerAddon.Features.Guilds
                 });
                 _userToGuild[username] = g.Name;
                 PurgeInvitesLocked(username);   // invites elsewhere are stale now
-                ok = true;
+                ok = CommitAuthorityLocked(before);
+                if (!ok) errorReason = "The server could not save that join - nothing changed. Try again shortly.";
             }
-            if (ok) { SaveToDisk(); RaiseChanged(guildName, "member_joined", username); }
+            if (ok) RaiseChanged(guildName, "member_joined", username);
             return ok;
         }
 
@@ -251,18 +248,23 @@ namespace KMHServerAddon.Features.Guilds
             {
                 if (!_userToGuild.TryGetValue(actor, out string gname)) { errorReason = "You're not in a guild."; return false; }
                 if (!_guilds.TryGetValue(gname, out GuildSnapshot g))   { errorReason = "Your guild record is missing."; return false; }
-                if (RankOrder(FindRankLocked(g, actor)) > RankOrder(GuildMemberDto.RankModerator))
+                if (!GuildPermissions.Can(FindRankLocked(g, actor), GuildCapability.Invite))
                 { errorReason = "Only an Admin or Moderator can invite."; return false; }
-                if (!GuildHallRules.CanInvite(g, ctx, out errorReason)) return false;   // P8: remote invites can be disabled
+                if (!GuildHallRules.CanInvite(g, ctx, out errorReason)) return false;   // remote invites can be disabled
                 if (_userToGuild.ContainsKey(target)) { errorReason = $"'{target}' is already in a guild."; return false; }
+                AuthorityPoint before = AuthorityPointLocked();
+                PruneInvitesLocked(g, DateTime.UtcNow.Ticks);
+                if (g.PendingInvites.Count >= MaxPendingInvites
+                    && !g.PendingInvites.Exists(u => string.Equals(u, target, StringComparison.OrdinalIgnoreCase)))
+                { errorReason = $"This guild already has {MaxPendingInvites} pending invites."; return false; }
                 if (!g.PendingInvites.Exists(u => string.Equals(u, target, StringComparison.OrdinalIgnoreCase)))
                     g.PendingInvites.Add(target);
                 (g.InviteMeta ?? (g.InviteMeta = new Dictionary<string, GuildInviteMetaDto>(StringComparer.OrdinalIgnoreCase)))[target]
                     = new GuildInviteMetaDto { Inviter = actor, CreatedUtcTicks = DateTime.UtcNow.Ticks };
                 guildName = gname;
-                ok = true;
+                ok = CommitAuthorityLocked(before);
             }
-            if (ok) SaveToDisk();
+            if (!ok) errorReason = "The server couldn't save that invite - nothing changed. Try again shortly.";
             return ok;
         }
 
@@ -277,13 +279,14 @@ namespace KMHServerAddon.Features.Guilds
             {
                 if (!_guilds.TryGetValue(guildName.Trim(), out GuildSnapshot g))
                 { errorReason = $"No guild named '{guildName}' exists."; return false; }
+                AuthorityPoint before = AuthorityPointLocked();
                 if (g.PendingInvites.RemoveAll(u => string.Equals(u, username, StringComparison.OrdinalIgnoreCase)) == 0)
                 { errorReason = $"'{g.Name}' has no standing invite for you."; return false; }
                 if (g.InviteMeta != null && g.InviteMeta.TryGetValue(username, out GuildInviteMetaDto meta))
                 { inviter = meta.Inviter; g.InviteMeta.Remove(username); }
-                ok = true;
+                ok = CommitAuthorityLocked(before);
             }
-            if (ok) SaveToDisk();
+            if (!ok) errorReason = "The server couldn't save that - nothing changed. Try again shortly.";
             return ok;
         }
 
@@ -337,15 +340,15 @@ namespace KMHServerAddon.Features.Guilds
                 if (RankOrder(FindRankLocked(g, actor)) > RankOrder(GuildMemberDto.RankAdmin))
                 { errorReason = "Only an Admin can change join mode."; return false; }
                 if (g.OpenJoin == open) { errorReason = "noop"; return false; }   // already in that mode - no save, no log
+                AuthorityPoint before = AuthorityPointLocked();
                 g.OpenJoin = open;
-                ok = true;
+                ok = CommitAuthorityLocked(before);
             }
-            if (ok) SaveToDisk();
+            if (!ok) errorReason = "The server couldn't save that - nothing changed. Try again shortly.";
             return ok;
         }
 
-        // Leave the caller's current guild. Rejects when caller is the only Admin left - would orphan the guild.
-        // Real solution (promote oldest Mod, or transfer-admin command) is a follow-up
+        // Rejects the last remaining Admin, which would orphan the guild.
         public static bool Leave(string username, out string errorReason)
         {
             errorReason = null;
@@ -359,6 +362,7 @@ namespace KMHServerAddon.Features.Guilds
             string gname          = null;
             lock (_lock)
             {
+                AuthorityPoint before = AuthorityPointLocked();
                 if (!_userToGuild.TryGetValue(username, out gname))
                 {
                     errorReason = "You are not in a guild.";
@@ -385,18 +389,18 @@ namespace KMHServerAddon.Features.Guilds
                 // Last member out -> remove the guild entirely.
                 if (g.Members.Count == 0) { _guilds.Remove(gname); guildDestroyed = true; }
 
-                ok = true;
+                // Commit before the vault moves, or a disband the disk never took leaves the guild its silver already handed out.
+                ok = CommitAuthorityLocked(before);
+                if (!ok) { guildDestroyed = false; errorReason = "The server could not save that - you are still in the guild. Try again shortly."; }
             }
             if (ok)
             {
-                // Disband: hand the vault back to the departing member (outside the guild lock) so nothing is orphaned
-                // or resurrectable by re-creating the name.
+                // Handed back outside the guild lock, so re-creating the name cannot resurrect the vault.
                 if (guildDestroyed)
                 {
                     long moved = Treasury.TreasuryStore.MoveGuildVaultToPersonal(gname, username);
                     if (moved > 0) Diagnostics.ServerLog.Info($"Guild '{gname}' disbanded - {moved}s vault returned to {username}");
                 }
-                SaveToDisk();
                 RaiseChanged(gname, "member_left", username);
             }
             return ok;
@@ -435,6 +439,7 @@ namespace KMHServerAddon.Features.Guilds
                     errorReason = $"'{targetUsername}' is not in your guild.";
                     return false;
                 }
+                AuthorityPoint before = AuthorityPointLocked();
                 if (!_guilds.TryGetValue(cGuild, out GuildSnapshot g))
                 {
                     errorReason = "Your guild record is missing - server state may be corrupted.";
@@ -456,10 +461,31 @@ namespace KMHServerAddon.Features.Guilds
 
                 target.Rank = GuildMemberDto.RankOwner;
                 caller.Rank = GuildMemberDto.RankAdmin;   // outgoing owner keeps admin powers, never a second owner
-                ok = true;
+                ok = CommitAuthorityLocked(before);
+                if (!ok) errorReason = "The server could not save that transfer - ownership is unchanged.";
             }
-            if (ok) { SaveToDisk(); RaiseChanged(CurrentGuildOf(callerUsername), "rank_changed", targetUsername); }
+            if (ok) RaiseChanged(CurrentGuildOf(callerUsername), "rank_changed", targetUsername);
             return ok;
+        }
+
+        // Returns "" when it could not be recorded; the donation itself is unaffected either way.
+        private static string RecordCompletedDonationTx(string actor, string guildName, long amount)
+        {
+            try
+            {
+                Transactions.KmhTransaction tx = Transactions.KmhTransaction.Create(
+                    actor, "guild", Transactions.KmhTxType.GuildContribution, $"{amount}s to '{guildName}'");
+                tx.Guild = guildName;
+                tx.Validated = tx.Requested;
+                if (!Transactions.KmhTransactionRepository.Add(tx)) return "";
+                foreach (Transactions.KmhTxState s in new[]
+                { Transactions.KmhTxState.Validating, Transactions.KmhTxState.Reserved, Transactions.KmhTxState.Approved,
+                  Transactions.KmhTxState.Delivered, Transactions.KmhTxState.Confirmed })
+                    tx.Advance(s);
+                Transactions.KmhTransactionRepository.Update(tx);
+                return tx.Id;
+            }
+            catch { return ""; }
         }
 
         // (name, memberCount) tuples for the /kmh guild list command.
@@ -507,6 +533,31 @@ namespace KMHServerAddon.Features.Guilds
             return result;
         }
 
+        // Attributed once across members, so a shared vault is never counted in full for each of them.
+        public static long VaultShareFor(string username)
+        {
+            if (string.IsNullOrEmpty(username)) return 0;
+            string guild = CurrentGuildOf(username);
+            if (string.IsNullOrEmpty(guild)) return 0;
+            long vault = Treasury.TreasuryStore.GetGuildSilver(guild);
+            if (vault <= 0) return 0;
+
+            lock (_lock)
+            {
+                if (!_guilds.TryGetValue(guild, out Dto.GuildSnapshot g) || g?.Members == null || g.Members.Count == 0) return 0;
+                long mine = 0, total = 0; bool member = false;
+                foreach (Dto.GuildMemberDto m in g.Members)
+                {
+                    if (m == null) continue;
+                    long c = Math.Max(0L, m.SilverContributed);
+                    total += c;
+                    if (string.Equals(m.Username, username, StringComparison.OrdinalIgnoreCase)) { mine = c; member = true; }
+                }
+                if (!member) return 0;
+                return total > 0 ? (long)(vault * ((double)mine / total)) : vault / g.Members.Count;
+            }
+        }
+
         // Returns the caller's current guild name, or null if not in one.
         public static string CurrentGuildOf(string username)
         {
@@ -529,8 +580,7 @@ namespace KMHServerAddon.Features.Guilds
             }
         }
 
-        // The user's guild name IF they are its only member (a solo guild), else null. The save-reset guard uses this
-        // to also clear a solo-guild vault, which would otherwise shelter silver from the reset.
+        // Null unless the user is the guild's only member, since a solo guild vault would shelter a save reset.
         public static string SoloGuildOf(string username)
         {
             if (string.IsNullOrEmpty(username)) return null;
@@ -558,10 +608,7 @@ namespace KMHServerAddon.Features.Guilds
             }
         }
 
-        // --- marketplace economy hooks (consumed by MarketplaceStore) ---
-
-        // House-tax reduction (percentage points) granted by a guild's MarketplaceTaxReduction perk. 0 when the
-        // guild doesn't exist
+        // 0 when the guild does not exist.
         public static int GetMarketplaceTaxReductionPoints(string guildName)
         {
             if (string.IsNullOrEmpty(guildName)) return 0;
@@ -584,12 +631,70 @@ namespace KMHServerAddon.Features.Guilds
             }
         }
 
-        // --- site economy hooks (consumed by SiteStore) ---
-
         public static int SiteMaxWorkersBonusFor(string guildName)
         {
             if (string.IsNullOrEmpty(guildName)) return 0;
             lock (_lock) { return _guilds.TryGetValue(guildName, out GuildSnapshot g) ? g.Perks.SiteMaxWorkersBonus : 0; }
+        }
+
+        // Cached member summary, exactly like SilverContributed - the contribution ledger stays authoritative.
+        public static void AddItemsContributed(string guildName, string actor, long qty)
+        {
+            if (string.IsNullOrEmpty(guildName) || string.IsNullOrEmpty(actor) || qty <= 0) return;
+            lock (_lock)
+            {
+                if (!_guilds.TryGetValue(guildName, out GuildSnapshot g) || g == null) return;
+                GuildMemberDto m = g.Members.Find(x => string.Equals(x.Username, actor, StringComparison.OrdinalIgnoreCase));
+                if (m == null) return;
+                m.ItemsContributed += qty;
+            }
+            SaveToDisk();
+        }
+
+        // Bounded, or nothing but accepting or declining would ever remove a pending invite.
+        public const int InviteLifetimeDays   = 14;
+        public const int MaxPendingInvites    = 25;
+
+        // Undated invites are stamped on first sight, so an upgrade does not wipe every outstanding one.
+        internal static int PruneInvitesLocked(GuildSnapshot g, long nowTicks)
+        {
+            if (g?.PendingInvites == null) return 0;
+            long cutoff = nowTicks - TimeSpan.FromDays(InviteLifetimeDays).Ticks;
+            var dead = new List<string>();
+            foreach (string u in g.PendingInvites)
+            {
+                GuildInviteMetaDto meta = null;
+                g.InviteMeta?.TryGetValue(u, out meta);
+                if (meta == null)
+                {
+                    (g.InviteMeta ?? (g.InviteMeta = new Dictionary<string, GuildInviteMetaDto>(StringComparer.OrdinalIgnoreCase)))[u]
+                        = new GuildInviteMetaDto { Inviter = "", CreatedUtcTicks = nowTicks };
+                    continue;
+                }
+                if (meta.CreatedUtcTicks <= 0) { meta.CreatedUtcTicks = nowTicks; continue; }
+                if (meta.CreatedUtcTicks < cutoff) dead.Add(u);
+            }
+            foreach (string u in dead) { g.PendingInvites.Remove(u); g.InviteMeta?.Remove(u); }
+            // Metadata for someone no longer invited is an orphan whichever way it got there.
+            if (g.InviteMeta != null)
+            {
+                var orphans = new List<string>();
+                foreach (KeyValuePair<string, GuildInviteMetaDto> kv in g.InviteMeta)
+                    if (!g.PendingInvites.Exists(u => string.Equals(u, kv.Key, StringComparison.OrdinalIgnoreCase)))
+                        orphans.Add(kv.Key);
+                foreach (string k in orphans) g.InviteMeta.Remove(k);
+            }
+            return dead.Count;
+        }
+
+        // Runs on the shared expiry sweep - no new loop.
+        public static int PruneExpiredInvites()
+        {
+            int removed = 0;
+            long now = DateTime.UtcNow.Ticks;
+            lock (_lock) foreach (GuildSnapshot g in _guilds.Values) removed += PruneInvitesLocked(g, now);
+            if (removed > 0) { SaveToDisk(); Diagnostics.ServerLog.Info($"Guilds: {removed} invite(s) expired after {InviteLifetimeDays} days."); }
+            return removed;
         }
 
         public static double WorkerXpMultiplierFor(string guildName)
@@ -604,8 +709,7 @@ namespace KMHServerAddon.Features.Guilds
             lock (_lock) { return _guilds.TryGetValue(guildName, out GuildSnapshot g) ? g.Perks.CustomSiteCostMultiplier : 1.0; }
         }
 
-        // Skim the recipient's guild site-reward tax from a silver reward into the guild vault. Returns the
-        // recipient's net
+        // Returns the recipient's net after the guild's site-reward tax.
         public static int ApplyGuildSiteRewardTax(string username, int silverGross)
         {
             if (silverGross <= 0 || string.IsNullOrEmpty(username)) return silverGross;
@@ -624,14 +728,14 @@ namespace KMHServerAddon.Features.Guilds
             return silverGross - tax;
         }
 
-        // --- snapshot accessor ---
-
         public static GuildSnapshotEnvelope BuildEnvelopeFor(string username)
         {
             GuildSnapshotEnvelope env = new GuildSnapshotEnvelope();
             if (string.IsNullOrEmpty(username)) return env;
             lock (_lock)
             {
+                // Stamped before either exit: the guildless reply is a snapshot too, and a late one must not overwrite a newer push.
+                env.Revision = Util.KmhSnapshotRevision.Next();
                 if (!_userToGuild.TryGetValue(username, out string gname) || !_guilds.TryGetValue(gname, out GuildSnapshot g))
                 {
                     env.MyInvites = InvitesForLocked(username);   // guildless: show standing invites
@@ -643,10 +747,7 @@ namespace KMHServerAddon.Features.Guilds
             return env;
         }
 
-        // --- wire mutations ---
-
-        // Member-management gating: only Admin / Moderator can act on others;
-        // can never act on self; can never act on equal-or-higher rank.
+        // Nobody may act on themselves, or on an equal-or-higher rank.
         public static bool Promote(string actor, string target)
         {
             return MutateMemberRank(actor, target, promote: true);
@@ -665,15 +766,13 @@ namespace KMHServerAddon.Features.Guilds
             string guildName = null;
             lock (_lock)
             {
+                AuthorityPoint before = AuthorityPointLocked();
                 if (!_userToGuild.TryGetValue(actor, out string aGuild)) return false;
                 if (!_userToGuild.TryGetValue(target, out string tGuild)) return false;
                 if (!string.Equals(aGuild, tGuild, StringComparison.OrdinalIgnoreCase)) return false;
                 if (!_guilds.TryGetValue(aGuild, out GuildSnapshot g)) return false;
 
-                int actorOrder  = RankOrder(FindRankLocked(g, actor));
-                int targetOrder = RankOrder(FindRankLocked(g, target));
-                if (actorOrder  > RankOrder(GuildMemberDto.RankModerator)) return false;
-                if (targetOrder <= actorOrder) return false;
+                if (!GuildPermissions.CanActOnMember(FindRankLocked(g, actor), FindRankLocked(g, target))) return false;
 
                 g.Members.RemoveAll(m => string.Equals(m.Username, target, StringComparison.OrdinalIgnoreCase));
                 _userToGuild.Remove(target);
@@ -681,9 +780,9 @@ namespace KMHServerAddon.Features.Guilds
                 g.PendingInvites?.RemoveAll(u => string.Equals(u, target, StringComparison.OrdinalIgnoreCase));
                 g.InviteMeta?.Remove(target);
                 guildName = aGuild;
-                ok = true;
+                ok = CommitAuthorityLocked(before);
             }
-            if (ok) { SaveToDisk(); RaiseChanged(guildName, "member_kicked", target); }
+            if (ok) RaiseChanged(guildName, "member_kicked", target);
             return ok;
         }
 
@@ -722,8 +821,7 @@ namespace KMHServerAddon.Features.Guilds
             return true;
         }
 
-        // Reconcile membership: rebuild the username->guild reverse map from the authoritative per-guild Members lists.
-        // Clears ghosts (mapped to a guild that no longer lists them - e.g. after a wipe/desync) + fixes wrong entries.
+        // The per-guild Members lists are authoritative, so the reverse map is rebuilt from them.
         public static int RepairMembership(out System.Collections.Generic.List<string> notes)
         {
             notes = new System.Collections.Generic.List<string>();
@@ -754,16 +852,18 @@ namespace KMHServerAddon.Features.Guilds
             return changed;
         }
 
-        // Buy the next perk level from the GUILD vault (admin-only). Price under the lock, charge via TreasuryStore
-        // outside it, re-acquire to bump; a lost race refunds so silver is never burned. Returns reason/new level+cost.
+        // Priced under the lock and charged outside it, so a lost race refunds rather than burning silver.
         public static bool BuyPerk(string actor, string perkKey, out string reason, out int newLevel, out int cost)
         {
             reason = null; newLevel = 0; cost = 0;
             if (string.IsNullOrEmpty(actor) || string.IsNullOrEmpty(perkKey)) { reason = "Unknown perk."; return false; }
 
             string guildName;
+            int pricedLevel = 0;   // the level this purchase is PRICED for; re-checked under the bump lock below
+            long ticket;
             lock (_lock)
             {
+                ticket = AuthorityTicketLocked();
                 if (!_userToGuild.TryGetValue(actor, out string aGuild) || !_guilds.TryGetValue(aGuild, out GuildSnapshot g))
                 { reason = "You are not in a guild."; return false; }
                 if (RankOrder(FindRankLocked(g, actor)) > RankOrder(GuildMemberDto.RankAdmin))
@@ -772,11 +872,11 @@ namespace KMHServerAddon.Features.Guilds
                 int current = CurrentPerkLevelLocked(g.Perks, perkKey);
                 if (current < 0)                       { reason = "Unknown perk."; return false; }
                 if (current >= GuildPerksDto.MaxLevel) { reason = $"{PerkLabel(perkKey)} is already maxed (Lv {GuildPerksDto.MaxLevel})."; return false; }
-                cost      = GuildPerksDto.CostFor(current);          // 5k/15k/30k ladder
-                guildName = g.Name;
+                cost        = GuildPerksDto.CostFor(current);          // 5k/15k/30k ladder
+                pricedLevel = current;
+                guildName   = g.Name;
             }
 
-            // Charge the guild vault. Fails if the guild can't afford it.
             if (!Treasury.TreasuryStore.WithdrawGuildSilver(guildName, cost, actor,
                     note: $"guild perk '{perkKey}' purchase"))
             {
@@ -787,7 +887,10 @@ namespace KMHServerAddon.Features.Guilds
             bool bumped = false;
             lock (_lock)
             {
-                if (_guilds.TryGetValue(guildName, out GuildSnapshot g))
+                // The vault charge released the lock, so re-check both rank and priced level or two buys jump two levels for one price.
+                if (AuthorityTicketLocked() == ticket
+                    && _guilds.TryGetValue(guildName, out GuildSnapshot g)
+                    && CurrentPerkLevelLocked(g.Perks, perkKey) == pricedLevel)
                 {
                     bumped = BumpPerkLocked(g.Perks, perkKey);
                     if (bumped) newLevel = CurrentPerkLevelLocked(g.Perks, perkKey);
@@ -796,15 +899,23 @@ namespace KMHServerAddon.Features.Guilds
 
             if (!bumped)
             {
-                // Couldn't apply after charging (maxed by a concurrent buy, or guild vanished) - refund so nothing
-                // is burned
+                // Charged but not applied, so it is refunded rather than burned.
                 Treasury.TreasuryStore.DepositGuildSilver(guildName, cost, actor,
                     note: $"guild perk '{perkKey}' purchase refund");
                 reason = "Could not apply the perk (a concurrent change won) - your silver was refunded.";
                 return false;
             }
 
-            SaveToDisk();
+            // The vault already paid, so an unwritten purchase is undone and refunded rather than lost on restart.
+            if (!SaveToDisk())
+            {
+                lock (_lock)
+                    if (_guilds.TryGetValue(guildName, out GuildSnapshot g2))
+                        SetPerkLevelLocked(g2.Perks, perkKey, pricedLevel);
+                Treasury.TreasuryStore.DepositGuildSilver(guildName, cost, actor, note: $"guild perk '{perkKey}' purchase refund (not saved)");
+                reason = "The server couldn't save that purchase - the vault was refunded. Try again shortly.";
+                return false;
+            }
             RaiseChanged(guildName, "perk", actor);
             return true;
         }
@@ -838,8 +949,6 @@ namespace KMHServerAddon.Features.Guilds
             }
         }
 
-        // --- guild treasury contributions (chat-command surface) ---
-
         // Move silver personal-vault -> guild-vault (any member; real transfer, not minting); credits the member row.
         public static bool DepositToGuild(string actor, int amount, out string errorReason, Economy.EconomyContext ctx = default, string txnId = null)
         {
@@ -850,9 +959,7 @@ namespace KMHServerAddon.Features.Guilds
             string guildName = CurrentGuildOf(actor);
             if (string.IsNullOrEmpty(guildName)) { errorReason = "You are not in a guild."; return false; }
 
-            // Access gate: a contribution spends personal silver into the guild vault. Guild Hall rules layer on
-            // top. ctx carries the caller's game context when the contribution came from the UI (empty on a chat cmd,
-            // which makes proximity checks permissive - the "require a hall exists" checks still apply).
+            // An empty ctx comes from a chat command, which makes proximity checks permissive.
             if (!Economy.EconomyAccess.CheckAccess(actor, isWithdraw: true, isGuild: false, isItem: false, ctx, out errorReason)) return false;
             if (!Economy.EconomyAccess.CheckAccess(actor, isWithdraw: false, isGuild: true, isItem: false, ctx, out errorReason)) return false;
             // Cap check counts other in-flight (pending) donations so commits can't overshoot the vault cap.
@@ -863,8 +970,7 @@ namespace KMHServerAddon.Features.Guilds
             if (!GuildHallRules.CanAccessTreasury(gForHall, out errorReason)) return false;
             if (!GuildHallRules.CanContribute(gForHall, ctx, out errorReason)) return false;
 
-            // Debit the donor and book a PENDING donation - the guild vault is credited only when the donor's save
-            // confirms (same pipeline as treasury deposits); revert/timeout refunds the donor.
+            // The guild is credited only once the donor's save confirms; a revert refunds them.
             if (string.IsNullOrEmpty(txnId)) txnId = Guid.NewGuid().ToString("N");
             if (!Treasury.TreasuryStore.BeginPendingGuildDonation(actor, guildName, amount, txnId, out errorReason))
                 return false;
@@ -873,9 +979,7 @@ namespace KMHServerAddon.Features.Guilds
             return true;
         }
 
-        // Save-confirmed donation bookkeeping - the guild vault was already credited atomically by the treasury
-        // commit; this settles member totals + metrics. If the guild disbanded while pending, the credit is pulled
-        // back out of the ghost vault and refunded to the donor (a revert never reaches here).
+        // The vault was already credited by the treasury commit; a guild that disbanded while pending refunds instead.
         public static void FinalizeDonation(string actor, string guildName, int amount)
         {
             if (string.IsNullOrEmpty(actor) || string.IsNullOrEmpty(guildName) || amount <= 0) return;
@@ -886,13 +990,17 @@ namespace KMHServerAddon.Features.Guilds
                 if (exists && _guilds.TryGetValue(guildName, out GuildSnapshot g))
                 {
                     GuildMemberDto m = g.Members.Find(x => string.Equals(x.Username, actor, StringComparison.OrdinalIgnoreCase));
-                    if (m != null) m.SilverContributed += amount;
+                    if (m != null) m.SilverContributed += amount;   // cached summary; the ledger below is authoritative
+
+                    // Audit only: the donation already committed above.
+                    string txId = RecordCompletedDonationTx(actor, guildName, amount);
+                    Contributions.KmhGuildContributionLedger.RecordSilver(guildName, actor, amount, txId);
                 }
             }
             if (!exists)
             {
                 if (Treasury.TreasuryStore.WithdrawGuildSilver(guildName, amount, actor, note: "guild disbanded - donation refund"))
-                    Treasury.TreasuryStore.DepositSilver(actor, amount, note: $"donation refund - guild '{guildName}' no longer exists");
+                    Items.KmhPayloadEscrow.DeliverSilver(actor, amount, $"donation refund - guild '{guildName}' no longer exists", "donation refund could not be credited");
                 Diagnostics.ServerLog.Warn($"Guild: donation of {amount}s from {actor} finalized after guild '{guildName}' disbanded - refunded.");
                 return;
             }
@@ -911,8 +1019,10 @@ namespace KMHServerAddon.Features.Guilds
             if (amount <= 0)                 { errorReason = "Amount must be positive.";   return false; }
 
             string guildName;
+            bool reservedTally = false; long reservedDayStart = 0, ticket;
             lock (_lock)
             {
+                ticket = AuthorityTicketLocked();
                 if (!_userToGuild.TryGetValue(actor, out guildName)) { errorReason = "You are not in a guild."; return false; }
                 if (!_guilds.TryGetValue(guildName, out GuildSnapshot g)) { errorReason = "Your guild record is missing."; return false; }
                 GuildMemberDto m = g.Members.Find(x => string.Equals(x.Username, actor, StringComparison.OrdinalIgnoreCase));
@@ -925,46 +1035,54 @@ namespace KMHServerAddon.Features.Guilds
                 {
                     long dayStart = DateTime.UtcNow.Date.Ticks;
                     _withdrawTally.TryGetValue(TallyKey(guildName, actor), out (long DayStartUtc, long Withdrawn) t);
-                    long already = t.DayStartUtc == dayStart ? t.Withdrawn : 0; // guild+user keyed, so leave/rejoin can't reset it
+                    long already = WithdrawnToday(dayStart, t.DayStartUtc, t.Withdrawn, m.WithdrawDayStartUtc, m.WithdrawnTodaySilver);
                     if (already + amount > cap)
                     {
                         errorReason = $"Daily withdraw cap is {Util.SilverFmt.Format(cap)}; you've taken {Util.SilverFmt.Format(already)} today.";
                         return false;
                     }
+                    // Reserved atomically with the check, or two concurrent withdraws could both pass the daily cap.
+                    long nowTally = already + amount;
+                    _withdrawTally[TallyKey(guildName, actor)] = (dayStart, nowTally);
+                    m.WithdrawnTodaySilver = nowTally; m.WithdrawDayStartUtc = dayStart; // mirror for client display
+                    reservedTally = true; reservedDayStart = dayStart;
                 }
             }
 
             if (!Treasury.TreasuryStore.WithdrawGuildSilver(guildName, amount, actor, note: $"withdraw to {actor}"))
             {
+                // Vault couldn't cover it - release the reservation so a failed attempt doesn't burn the daily cap.
+                if (reservedTally) ReleaseWithdrawTally(guildName, actor, amount, reservedDayStart);
                 errorReason = "The guild vault doesn't have that much silver.";
                 return false;
             }
-            // Record the withdrawal against the daily tally.
-            lock (_lock)
+            // The vault charge released the lock, so the caller's rank may have been taken away since it was checked.
+            bool stillAuthorized;
+            lock (_lock) stillAuthorized = AuthorityTicketLocked() == ticket;
+            if (!stillAuthorized)
             {
-                if (_guilds.TryGetValue(guildName, out GuildSnapshot g))
-                {
-                    GuildMemberDto m = g.Members.Find(x => string.Equals(x.Username, actor, StringComparison.OrdinalIgnoreCase));
-                    if (m != null && DailyCapFor(g.Settings, m.Rank) > 0)
-                    {
-                        long dayStart = DateTime.UtcNow.Date.Ticks;
-                        string key = TallyKey(guildName, actor);
-                        _withdrawTally.TryGetValue(key, out (long DayStartUtc, long Withdrawn) t);
-                        long cur = (t.DayStartUtc == dayStart ? t.Withdrawn : 0) + amount;
-                        _withdrawTally[key] = (dayStart, cur);
-                        m.WithdrawnTodaySilver = cur; m.WithdrawDayStartUtc = dayStart; // mirror for client display
-                    }
-                }
+                if (reservedTally) ReleaseWithdrawTally(guildName, actor, amount, reservedDayStart);
+                Treasury.TreasuryStore.DepositGuildSilver(guildName, amount, actor, note: $"withdraw by {actor} - membership changed mid-withdraw");
+                errorReason = "Your guild membership changed while that was processing - nothing was taken.";
+                return false;
             }
-            Treasury.TreasuryStore.DepositSilver(actor, amount, note: $"withdraw from guild '{guildName}'");
+            // The tally reaches disk before the silver moves, or a restart hands back a fresh daily cap on top of what was taken.
+            if (!SaveToDisk())
+            {
+                if (reservedTally) ReleaseWithdrawTally(guildName, actor, amount, reservedDayStart);
+                Treasury.TreasuryStore.DepositGuildSilver(guildName, amount, actor, note: $"withdraw to {actor} could not be saved");
+                errorReason = "The server couldn't record that withdrawal - the vault was untouched. Try again shortly.";
+                return false;
+            }
+            // The vault is already debited, so a credit that cannot land must be held rather than dropped.
+            Items.KmhPayloadEscrow.DeliverSilver(actor, amount, $"withdraw from guild '{guildName}'", "guild withdrawal could not be credited");
             // Net the donation metric back down so contribute -> withdraw cycling can't inflate it (floored at 0).
             PlayerStats.PlayerStatsStore.AddSilverDonated(actor, -amount);
             RaiseChanged(guildName, "treasury", actor);
             return true;
         }
 
-        // Human-readable perk levels + next-level costs for /kmh guild perks. Returns null if the caller isn't in a
-        // guild
+        // Null when the caller is not in a guild.
         public static List<string> DescribePerksFor(string actor)
         {
             string guildName = CurrentGuildOf(actor);
@@ -999,10 +1117,10 @@ namespace KMHServerAddon.Features.Guilds
                 if (!_userToGuild.TryGetValue(actor, out string aGuild)) return false;
                 if (!_guilds.TryGetValue(aGuild, out GuildSnapshot g)) return false;
                 if (RankOrder(FindRankLocked(g, actor)) > RankOrder(GuildMemberDto.RankAdmin)) return false;
+                AuthorityPoint before = AuthorityPointLocked();
                 g.Motd = motd ?? "";
-                ok = true;
+                ok = CommitAuthorityLocked(before);
             }
-            if (ok) SaveToDisk();
             return ok;
         }
 
@@ -1023,10 +1141,10 @@ namespace KMHServerAddon.Features.Guilds
                 if (!_userToGuild.TryGetValue(actor, out string aGuild)) return false;
                 if (!_guilds.TryGetValue(aGuild, out GuildSnapshot g)) return false;
                 if (RankOrder(FindRankLocked(g, actor)) > RankOrder(GuildMemberDto.RankAdmin)) return false;
+                AuthorityPoint before = AuthorityPointLocked();
                 g.Settings = settings;
-                ok = true;
+                ok = CommitAuthorityLocked(before);
             }
-            if (ok) SaveToDisk();
             return ok;
         }
 
@@ -1039,16 +1157,15 @@ namespace KMHServerAddon.Features.Guilds
                 if (!_userToGuild.TryGetValue(actor, out string aGuild)) return false;
                 if (!_guilds.TryGetValue(aGuild, out GuildSnapshot g)) return false;
                 if (RankOrder(FindRankLocked(g, actor)) > RankOrder(GuildMemberDto.RankAdmin)) return false;
-                // Use the other guild's canonical stored name for keys - the relationships dict is case-sensitive, so
-                // client-supplied casing must be normalized or later lookups (accept / AreAllied) would miss.
+                // The relationships dictionary is case-sensitive, so client casing must be normalised to the stored name.
                 GuildSnapshot og = _guilds.TryGetValue(otherGuild, out GuildSnapshot found) ? found : null;
                 string other = og?.Name ?? otherGuild.Trim();
                 if (string.Equals(other, g.Name, StringComparison.OrdinalIgnoreCase)) return false;
 
+                AuthorityPoint before = AuthorityPointLocked();
                 if (newState == GuildSnapshot.RelationAllied)
                 {
-                    // Accepting an alliance: valid only if the other guild proposed (or already allied). Set BOTH
-                    // sides to Allied so it's mutual - one side alone can never make AreAllied true.
+                    // Both sides are set, so one side alone can never make AreAllied true.
                     if (og == null) return false;
                     og.Relationships.TryGetValue(g.Name, out string theirs);
                     if (theirs != GuildSnapshot.RelationAlliedRequested && theirs != GuildSnapshot.RelationAllied)
@@ -1066,13 +1183,10 @@ namespace KMHServerAddon.Features.Guilds
                     // Proposal / hostile - one-sided, grants nothing on its own.
                     g.Relationships[other] = newState;
                 }
-                ok = true;
+                ok = CommitAuthorityLocked(before);
             }
-            if (ok) SaveToDisk();
             return ok;
         }
-
-        // --- helpers ---
 
         private static bool MutateMemberRank(string actor, string target, bool promote)
         {
@@ -1082,6 +1196,7 @@ namespace KMHServerAddon.Features.Guilds
             string guildName = null;
             lock (_lock)
             {
+                AuthorityPoint before = AuthorityPointLocked();
                 if (!_userToGuild.TryGetValue(actor,  out string aGuild)) return false;
                 if (!_userToGuild.TryGetValue(target, out string tGuild)) return false;
                 if (!string.Equals(aGuild, tGuild, StringComparison.OrdinalIgnoreCase)) return false;
@@ -1110,9 +1225,9 @@ namespace KMHServerAddon.Features.Guilds
                     m.Rank = RankFromOrder(newOrder);
                 }
                 guildName = aGuild;
-                ok = true;
+                ok = CommitAuthorityLocked(before);
             }
-            if (ok) { SaveToDisk(); RaiseChanged(guildName, "rank_changed", target); }
+            if (ok) RaiseChanged(guildName, "rank_changed", target);
             return ok;
         }
 
@@ -1137,6 +1252,40 @@ namespace KMHServerAddon.Features.Guilds
             }
         }
 
+        // Undo for a failed write: sets rather than decrements, so it restores the quoted level even if something else moved.
+        private static void SetPerkLevelLocked(GuildPerksDto p, string key, int level)
+        {
+            switch (key)
+            {
+                case "site_max_workers":      p.SiteMaxWorkersBonusLevel      = level; break;
+                case "marketplace_tax_cut":   p.MarketplaceTaxReductionLevel  = level; break;
+                case "worker_xp_bonus":       p.WorkerXpBonusLevel            = level; break;
+                case "custom_site_cost_cut":  p.CustomSiteCostDiscountLevel   = level; break;
+            }
+        }
+
+        // Hands back a reservation whose withdrawal never happened, so a refused attempt costs nothing off the cap.
+        private static void ReleaseWithdrawTally(string guildName, string actor, long amount, long reservedDayStart)
+        {
+            lock (_lock)
+            {
+                string key = TallyKey(guildName, actor);
+                if (!_withdrawTally.TryGetValue(key, out (long DayStartUtc, long Withdrawn) t) || t.DayStartUtc != reservedDayStart) return;
+                long back = Math.Max(0, t.Withdrawn - amount);
+                _withdrawTally[key] = (t.DayStartUtc, back);
+                if (_guilds.TryGetValue(guildName, out GuildSnapshot g)
+                    && g.Members.Find(x => string.Equals(x.Username, actor, StringComparison.OrdinalIgnoreCase)) is GuildMemberDto gm
+                    && gm.WithdrawDayStartUtc == reservedDayStart)
+                    gm.WithdrawnTodaySilver = back;
+            }
+        }
+
+        // The in-memory tally needs the persisted member mirror, or a restart would hand out a fresh daily cap.
+        internal static long WithdrawnToday(long dayStart, long tallyDay, long tallyAmount, long memberDay, long memberAmount)
+            => tallyDay  == dayStart ? tallyAmount
+             : memberDay == dayStart ? memberAmount
+             : 0;
+
         private static int DailyCapFor(GuildSettingsDto s, string rank)
         {
             switch (rank)
@@ -1155,38 +1304,17 @@ namespace KMHServerAddon.Features.Guilds
             return m?.Rank ?? GuildMemberDto.RankMember;
         }
 
-        // Every guild has exactly ONE Owner: none (pre-owner migration) -> first admin, else founder, else first member;
-        // duplicates (should never happen) -> keep the first, demote the rest to Admin. Logged when it changes anything.
+        // Every guild ends with exactly one Owner, so a missing or duplicated one is repaired here.
         private static void RepairOwnerLocked(GuildSnapshot g)
         {
-            if (g?.Members == null || g.Members.Count == 0) return;
-            List<GuildMemberDto> owners = g.Members.FindAll(m => string.Equals(m?.Rank, GuildMemberDto.RankOwner, StringComparison.OrdinalIgnoreCase));
-            if (owners.Count == 1) return;
-            if (owners.Count == 0)
-            {
-                GuildMemberDto pick = g.Members.Find(m => string.Equals(m?.Rank, GuildMemberDto.RankAdmin, StringComparison.OrdinalIgnoreCase)) ?? g.Members[0];
-                pick.Rank = GuildMemberDto.RankOwner;
-                Diagnostics.ServerLog.Info($"Guild '{g.Name}': promoted '{pick.Username}' to Owner (pre-owner-era guild).");
-            }
-            else
-            {
-                for (int i = 1; i < owners.Count; i++) owners[i].Rank = GuildMemberDto.RankAdmin;
-                Diagnostics.ServerLog.Warn($"Guild '{g.Name}': had {owners.Count} Owners - kept '{owners[0].Username}', demoted the rest to Admin.");
-            }
+            GuildIntegrity.Result r = GuildIntegrity.EnsureSingleOwner(g);
+            if (r.Fix == GuildIntegrity.OwnerFix.PromotedNoOwner)
+                Diagnostics.ServerLog.Info($"Guild '{g.Name}': promoted '{r.KeptOrPromoted}' to Owner (pre-owner-era guild).");
+            else if (r.Fix == GuildIntegrity.OwnerFix.DemotedExtraOwners)
+                Diagnostics.ServerLog.Warn($"Guild '{g.Name}': had {r.OwnersBefore} Owners - kept '{r.KeptOrPromoted}', demoted the rest to Admin.");
         }
 
-        private static int RankOrder(string rank)
-        {
-            switch (rank)
-            {
-                case GuildMemberDto.RankOwner:     return 0;
-                case GuildMemberDto.RankAdmin:     return 1;
-                case GuildMemberDto.RankModerator: return 2;
-                case GuildMemberDto.RankOfficer:   return 3;
-                case GuildMemberDto.RankMember:    return 4;
-                default:                           return 5;
-            }
-        }
+        private static int RankOrder(string rank) => GuildPermissions.RankOrder(rank);
 
         // Owner (order 0) is deliberately unreachable here - ownership moves only via TransferAdmin.
         private static string RankFromOrder(int order)
@@ -1201,59 +1329,30 @@ namespace KMHServerAddon.Features.Guilds
             }
         }
 
+        internal static GuildSnapshot CopyForTest(GuildSnapshot g) => CopyLocked(g);
+
         private static GuildSnapshot CopyLocked(GuildSnapshot g)
         {
-            GuildSnapshot copy = new GuildSnapshot
-            {
-                Name     = g.Name,
-                Motd     = g.Motd,
-                GuildSilver = Treasury.TreasuryStore.GetGuildSilver(g.Name),   // authoritative vault balance for the UI
-                PendingDonationsSilver = Treasury.TreasuryStore.PendingGuildDonationTotal(g.Name),
-                GuildTreasuryEnabled = !string.Equals(Economy.EconomyConfig.Current.GuildTreasuryAccessMode, "Disabled", StringComparison.OrdinalIgnoreCase),
+            // Clones rather than listing fields, so a newly added one still reaches clients.
+            GuildSnapshot copy = g.ShallowClone();
+            copy.Settings = g.Settings?.ShallowClone() ?? new GuildSettingsDto();
+            copy.Perks    = g.Perks?.ShallowClone()    ?? new GuildPerksDto();
+            copy.Hall     = g.Hall?.ShallowClone();
+            copy.Relationships = new Dictionary<string, string>(g.Relationships, StringComparer.OrdinalIgnoreCase);
+            copy.PendingInvites = new List<string>(g.PendingInvites);
+            copy.InviteMeta = g.InviteMeta == null
+                ? new Dictionary<string, GuildInviteMetaDto>(StringComparer.OrdinalIgnoreCase)
+                : new Dictionary<string, GuildInviteMetaDto>(g.InviteMeta, StringComparer.OrdinalIgnoreCase);
 
-                Settings = new GuildSettingsDto
-                {
-                    SiteRewardSilverTaxPercent = g.Settings.SiteRewardSilverTaxPercent,
-                    MarketplaceSaleTaxPercent  = g.Settings.MarketplaceSaleTaxPercent,
-                    MemberDailyWithdrawCap     = g.Settings.MemberDailyWithdrawCap,
-                    OfficerDailyWithdrawCap    = g.Settings.OfficerDailyWithdrawCap,
-                    ModeratorDailyWithdrawCap  = g.Settings.ModeratorDailyWithdrawCap,
-                    AdminDailyWithdrawCap      = g.Settings.AdminDailyWithdrawCap,
-                    DefaultListingsGuildOnly   = g.Settings.DefaultListingsGuildOnly,
-                },
-                Perks    = new GuildPerksDto
-                {
-                    SiteMaxWorkersBonusLevel    = g.Perks.SiteMaxWorkersBonusLevel,
-                    MarketplaceTaxReductionLevel = g.Perks.MarketplaceTaxReductionLevel,
-                    WorkerXpBonusLevel          = g.Perks.WorkerXpBonusLevel,
-                    CustomSiteCostDiscountLevel = g.Perks.CustomSiteCostDiscountLevel,
-                },
-                Relationships = new Dictionary<string, string>(g.Relationships, StringComparer.OrdinalIgnoreCase),
-                OpenJoin       = g.OpenJoin,
-                PendingInvites = new List<string>(g.PendingInvites),
-                InviteMeta     = g.InviteMeta == null
-                    ? new Dictionary<string, GuildInviteMetaDto>(StringComparer.OrdinalIgnoreCase)
-                    : new Dictionary<string, GuildInviteMetaDto>(g.InviteMeta, StringComparer.OrdinalIgnoreCase),
-            };
+            // Live, not stored: authoritative elsewhere, so never carried over from the guild record.
+            copy.GuildSilver = Treasury.TreasuryStore.GetGuildSilver(g.Name);
+            copy.PendingDonationsSilver = Treasury.TreasuryStore.PendingGuildDonationTotal(g.Name);
+            copy.GuildTreasuryEnabled = !string.Equals(Economy.EconomyConfig.Current.GuildTreasuryAccessMode, "Disabled", StringComparison.OrdinalIgnoreCase);
+
             copy.Members = new List<GuildMemberDto>(g.Members.Count);
-            foreach (GuildMemberDto m in g.Members)
-            {
-                copy.Members.Add(new GuildMemberDto
-                {
-                    Username           = m.Username,
-                    Rank               = m.Rank,
-                    SilverContributed  = m.SilverContributed,
-                    ItemsContributed   = m.ItemsContributed,
-                    QuestsCompleted    = m.QuestsCompleted,
-                    JoinedUtcTicks     = m.JoinedUtcTicks,
-                    WithdrawnTodaySilver = m.WithdrawnTodaySilver,
-                    WithdrawDayStartUtc  = m.WithdrawDayStartUtc,
-                });
-            }
+            foreach (GuildMemberDto m in g.Members) copy.Members.Add(m.ShallowClone());
             return copy;
         }
-
-        // --- persistence ---
 
         public static void LoadFromDisk()
         {
@@ -1270,8 +1369,7 @@ namespace KMHServerAddon.Features.Guilds
                             if (g == null || string.IsNullOrEmpty(g.Name)) continue;
                             _guilds[g.Name] = g;
                             RepairOwnerLocked(g);   // pre-owner-era guilds: promote the first admin/founder to Owner
-                            // Rebuild username -> guild lookup from membership lists rather than persisting it
-                            // separately - keeps the two views provably consistent post-load
+                            // Rebuilt rather than persisted separately, so the two views cannot disagree after a load.
                             if (g.Members != null)
                             {
                                 foreach (GuildMemberDto m in g.Members)
@@ -1287,14 +1385,50 @@ namespace KMHServerAddon.Features.Guilds
             }
         }
 
-        public static void SaveToDisk()
+        // False means in-memory only; perk levels and the withdraw tally are vault-paid, so an untaken write burns silver or refunds the cap.
+        public static bool SaveToDisk()
         {
             PersistedState state = new PersistedState();
             lock (_lock)
             {
                 state.Guilds = new List<GuildSnapshot>(_guilds.Values);
             }
-            JsonFileStore.Save(KmhDataPaths.GuildsFile, state);
+            return JsonFileStore.Save(KmhDataPaths.GuildsFile, state);
+        }
+
+        private sealed class AuthorityPoint
+        {
+            public List<GuildSnapshot> Guilds;
+            public Dictionary<string, string> UserToGuild;
+        }
+
+        // Membership and rank gate who may spend guild silver later, so they are authoritative even though they move none themselves.
+        internal static long AuthorityGenerationForTest { get { lock (_lock) return _authorityGeneration; } }
+
+        private static AuthorityPoint AuthorityPointLocked()
+            => new AuthorityPoint
+            {
+                Guilds = JsonFileStore.FromJson<List<GuildSnapshot>>(JsonFileStore.ToJson(new List<GuildSnapshot>(_guilds.Values))),
+                UserToGuild = new Dictionary<string, string>(_userToGuild, StringComparer.OrdinalIgnoreCase),
+            };
+
+        // Bumped only by authority changes the disk took; an operation that leaves the lock carries the ticket and refuses if it moved.
+        private static long _authorityGeneration;
+        private static long AuthorityTicketLocked() => _authorityGeneration;
+
+        private static bool CommitAuthorityLocked(AuthorityPoint before)
+        {
+            if (SaveToDisk()) { _authorityGeneration++; return true; }
+            if (before?.Guilds != null)
+            {
+                _guilds.Clear();
+                foreach (GuildSnapshot g in before.Guilds)
+                    if (!string.IsNullOrEmpty(g?.Name)) _guilds[g.Name] = g;
+                _userToGuild.Clear();
+                foreach (KeyValuePair<string, string> kv in before.UserToGuild) _userToGuild[kv.Key] = kv.Value;
+            }
+            Diagnostics.ServerLog.Warn("Guilds: rolled back an unsaved authority change - the request was refused rather than acknowledged.");
+            return false;
         }
 
         private class PersistedState

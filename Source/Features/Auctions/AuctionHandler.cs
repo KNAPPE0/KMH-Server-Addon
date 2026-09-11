@@ -2,8 +2,7 @@ using KMHServerAddon.SubProtocol;
 
 namespace KMHServerAddon.Features.Auctions
 {
-    // kmh.auction.* handler. Per-caller snapshot (guild visibility); post/bid/cancel are attributed to the
-    // authenticated session user, never an envelope field.
+    // Every action is attributed to the authenticated session user, never to a field in the envelope.
     internal static class AuctionHandler
     {
         public static void Register()
@@ -23,8 +22,15 @@ namespace KMHServerAddon.Features.Auctions
             KmhRouter.SendTo(client, KmhProtocol.Kind.AuctionSnapshot, AuctionStore.BuildSnapshot(u));
         }
 
+        // Derived once per broadcast, so viewers sharing a key share one build and one serialization.
         public static void BroadcastSnapshot()
-            => KmhRouter.BroadcastToInterested(KmhProtocol.Kind.AuctionSnapshot, u => AuctionStore.BuildSnapshot(u));
+        {
+            Maintenance.KmhInvalidation.AuctionsAnnounced();
+            System.Collections.Generic.HashSet<string> nonPublic = AuctionStore.SellersOfNonPublic();
+            KmhRouter.BroadcastToInterested(KmhProtocol.Kind.AuctionSnapshot,
+                u => Features.Guilds.GuildVisibility.SnapshotShareKey(u, nonPublic),
+                u => AuctionStore.BuildSnapshot(u));
+        }
 
         private static void OnPost(ServerClient client, KmhEnvelope env)
         {
@@ -42,9 +48,13 @@ namespace KMHServerAddon.Features.Auctions
             string vis     = env?.GetString("visibility") ?? "public";
             string fingerprint = env?.GetString("fingerprint") ?? "";
 
+            var op = new Security.KmhOpClaim("auction.post", seller, env);
+            if (!op.Begin()) { SendSnapshotTo(client); Push(client, seller); return; }
+
             (long id, string reason) = string.IsNullOrEmpty(fingerprint)
                 ? AuctionStore.Post(seller, itemDef, stuff, quality, qty, startBid, minInc, buyout, hours, vis)
                 : AuctionStore.PostPayload(seller, fingerprint, qty, startBid, minInc, buyout, hours, vis);
+            if (id <= 0) op.Release();
             KmhRouter.Notify(client, id > 0 ? "positive" : "negative", reason);
             if (id > 0)
             {
@@ -82,7 +92,6 @@ namespace KMHServerAddon.Features.Auctions
             }
         }
 
-        // Win / sold / no-bid notices for a settled auction (online players). Called by the buyout path + the sweeper.
         public static void NotifySettled(AuctionStore.SettleOutcome o)
         {
             if (o == null || !o.Done) return;
@@ -99,12 +108,10 @@ namespace KMHServerAddon.Features.Auctions
             }
         }
 
-        // Online -> live toast; offline -> queued as a letter for next login (auctions settle on a sweeper while
-        // the seller/winner may be away, so these must never be dropped).
+        // Queued when offline, because an auction settles on the sweeper while both parties may be away.
         private static void NotifyUser(string user, string level, string title, string text)
-            => Notifications.KmhMail.ToUser(user, level, title, text);
+            => Notifications.KmhNotify.ToUser(user, level, title, text);
 
-        // The plain def name from a composed treasury key, for short notice text.
         private static string ItemName(string key)
         {
             Util.ItemKey.Split(key, out string def, out _, out _);
@@ -122,8 +129,6 @@ namespace KMHServerAddon.Features.Auctions
             if (ok) { Push(client, seller); BroadcastSnapshot(); }
         }
 
-        // Admin recovery for a stuck auction: full undo (item back to seller, bid refunded to the high bidder), then
-        // push the affected treasuries + notices and rebroadcast. Returns a console/chat-ready summary line.
         public static string AdminVoid(long id)
         {
             AuctionStore.VoidOutcome o = AuctionStore.AdminVoid(id);

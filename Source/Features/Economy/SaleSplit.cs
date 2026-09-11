@@ -1,11 +1,8 @@
-using System;
+﻿using System;
 
 namespace KMHServerAddon.Features.Economy
 {
-    // The one authoritative sale breakdown shared by the marketplace, auctions and the want board.
-    // Invariant: BuyerCharge + PoolBoost == SellerPayout + ServerTax + GuildTax + PoolReturn - a sale distributes
-    // exactly what the buyer paid. World-event payout boosts are funded from the house pool (never minted) and
-    // crashes return the seller's shortfall to the pool (never vanish).
+    // BuyerCharge + PoolBoost == SellerPayout + ServerTax + GuildTax + PoolReturn, so a sale never mints silver.
     public sealed class SaleSplit
     {
         public long   BuyerCharge;       // what the buyer actually paid
@@ -20,7 +17,7 @@ namespace KMHServerAddon.Features.Economy
             BuyerCharge + PoolBoost == SellerPayout + ServerTax + GuildTax + PoolReturn
             && ServerTax >= 0 && GuildTax >= 0 && SellerPayout >= 0 && PoolBoost >= 0 && PoolReturn >= 0;
 
-        // Call only at commit points (buyer silver already secured) - a boom debits the house pool here.
+        // Plans the split without moving anything; the boom boost is only taken by CommitBoost, which a caller can unwind.
         public static SaleSplit Compute(string seller, string itemDefName, long buyerCharge,
                                         bool demandDrift, bool worldPayoutEvents)
         {
@@ -33,7 +30,7 @@ namespace KMHServerAddon.Features.Economy
             if (World.WorldStore.IsTaxHoliday()) pct = 0;
             else if (demandDrift && cfg.DynamicDemandPricingEnabled)
             {
-                // In-demand items get a tax rebate, gluts a surcharge - buyer cost unchanged, only the split moves.
+                // Only the seller/house split moves; the buyer's cost is already fixed.
                 long demand = WantBoard.WantStore.OpenDemandQty(itemDefName);
                 long supply = Marketplace.MarketplaceStore.OpenSupplyQty(itemDefName);
                 long denom  = demand + supply;
@@ -53,8 +50,7 @@ namespace KMHServerAddon.Features.Economy
                 {
                     long boost = (long)Math.Round(sellerShare * mult) - sellerShare;
                     boost = Math.Min(boost, Marketplace.MarketplaceStore.HousePoolBalance());
-                    if (boost > 0 && Marketplace.MarketplaceStore.TryDebitHousePool(boost))
-                    { s.PoolBoost = boost; sellerShare += boost; }
+                    if (boost > 0) { s.PoolBoost = boost; sellerShare += boost; }
                 }
                 else if (mult < 1.0)
                 {
@@ -74,17 +70,54 @@ namespace KMHServerAddon.Features.Economy
             return s;
         }
 
-        // Move the tax legs (house pool + guild vault). The caller pays the seller and logs the sale.
-        public void Settle(string seller, string note)
+        // A pool that cannot fund the boost rebalances the split down rather than paying a seller silver nobody has.
+        public bool CommitBoost(string note)
+        {
+            if (PoolBoost <= 0) return true;
+            if (Marketplace.MarketplaceStore.TryDebitHousePool(PoolBoost, note)) return true;
+            SellerPayout = Math.Max(0, SellerPayout - PoolBoost);
+            PoolBoost = 0;
+            return false;
+        }
+
+        // Both legs are silver already taken out of the buyer's charge, so one that did not land must stay owed somewhere.
+        public struct Unsettled
+        {
+            public long ToHousePool;
+            public long ToGuild;
+            public string GuildName;
+            public bool Any => ToHousePool > 0 || ToGuild > 0;
+        }
+
+        // Moves only the tax legs - paying the seller stays with the caller; settlementKey makes both replay-safe.
+        public Unsettled Settle(string seller, string note, string settlementKey)
         {
             if (!Balances)
                 Diagnostics.ServerLog.Warn($"SaleSplit imbalance ({note}): charge={BuyerCharge} payout={SellerPayout} " +
                                            $"tax={ServerTax} guild={GuildTax} boost={PoolBoost} return={PoolReturn}");
+            Unsettled left = new Unsettled { GuildName = GuildName };
             long toPool = ServerTax + PoolReturn;
-            if (toPool > 0) Marketplace.MarketplaceStore.CreditHousePool(toPool, note);
-            if (GuildTax > 0 && !string.IsNullOrEmpty(GuildName))
-                Treasury.TreasuryStore.DepositGuildSilver(GuildName, (int)Math.Min(int.MaxValue, GuildTax), seller,
-                    note: note + " - guild sale tax");
+            string house = string.IsNullOrEmpty(settlementKey) ? null : settlementKey + ":house";
+            string guild = string.IsNullOrEmpty(settlementKey) ? null : settlementKey + ":guild";
+            if (toPool > 0 && !Marketplace.MarketplaceStore.TryCreditHousePoolOnce(house, toPool, note))
+                left.ToHousePool = toPool;
+            if (GuildTax > 0 && !string.IsNullOrEmpty(GuildName)
+                && !Treasury.TreasuryStore.DepositGuildSilverOnce(GuildName, guild,
+                                                                  (int)Math.Min(int.MaxValue, GuildTax), seller,
+                                                                  note: note + " - guild sale tax"))
+                left.ToGuild = GuildTax;
+            HoldUnsettled(left, seller, note);
+            return left;
+        }
+
+        // Parked rather than dropped: the tax was already deducted from the buyer, so vanishing shrinks the economy on every failed write.
+        private static void HoldUnsettled(Unsettled left, string seller, string note)
+        {
+            if (left.ToHousePool > 0)
+                Recovery.RecoveryStore.HoldSilver(seller, left.ToHousePool, note, "house tax could not be credited");
+            if (left.ToGuild > 0)
+                Recovery.RecoveryStore.HoldSilver(string.IsNullOrEmpty(left.GuildName) ? seller : left.GuildName,
+                    left.ToGuild, note, "guild sale tax could not be credited");
         }
     }
 }

@@ -11,12 +11,9 @@ using KMHServerAddon.Features.Marketplace.Dto;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // Mutating market commands (!kmh-buy/-sell/-cancel). Security: authenticates the caller via the snowflake id on
-    // LinkedAccountsStore, not display name.
     internal static class DiscordTradeCommands
     {
-        // Same hard cap the in-game Buy path uses. Without this, qty * unitPrice can overflow int and corrupt
-        // treasury moves
+        // Matches the in-game cap, without which qty times unitPrice can overflow int and corrupt a treasury move.
         private const int MaxBuyQty = 10_000;
 
         public static async Task<bool> TryHandleAsync(SocketMessage raw, string cmd, string[] parts)
@@ -38,8 +35,6 @@ namespace KMHServerAddon.Features.Discord
             }
         }
 
-        // -- !kmh-buy --
-
         private static async Task HandleBuy(SocketMessage raw, string[] parts)
         {
             string caller = RequireLinkedAsync(raw, out string error);
@@ -58,8 +53,7 @@ namespace KMHServerAddon.Features.Discord
             if (parts.Length >= 3 && int.TryParse(parts[2], out int q) && q > 0) qty = q;
             if (qty > MaxBuyQty) qty = MaxBuyQty;
 
-            // Pre-buy lookup for the receipt. Caller-scoped so a guild-only listing the caller can't see returns
-            // "not found" rather than leaking its existence
+            // Caller-scoped, so a listing they cannot see reads as "not found" rather than leaking its existence.
             MarketplaceSnapshot snap = MarketplaceStore.BuildSnapshot(caller);
             MarketplaceListing listing = null;
             if (snap?.Listings != null)
@@ -82,8 +76,7 @@ namespace KMHServerAddon.Features.Discord
                 return;
             }
 
-            // Compute what we expect to take + pay. Store.Buy clamps to RemainingQty; we mirror that so the receipt
-            // matches reality
+            // Mirrors Store.Buy's own clamp to RemainingQty, or the receipt would promise more than was bought.
             int    boughtQty = Math.Min(qty, listing.RemainingQty);
             long   expected  = (long)listing.UnitPriceSilver * boughtQty;
             string label     = ItemLabelCache.LabelFor(listing.ItemDefName, listing.StuffDefName, listing.QualityIndex);
@@ -95,9 +88,15 @@ namespace KMHServerAddon.Features.Discord
                 return;
             }
 
+            if (!Maintenance.KmhAdmission.AllowsPlayerFeature(Maintenance.KmhIngress.Discord, "marketplace", out string blocked))
+            {
+                await raw.Channel.SendMessageAsync(blocked).ConfigureAwait(false);
+                return;
+            }
+
             try
             {
-                if (!MarketplaceStore.Buy(caller, listingId, qty, out string sellerUsername))
+                if (!MarketplaceStore.Buy(caller, listingId, qty, out string sellerUsername, out boughtQty, out int paidSilver))
                 {
                     await raw.Channel.SendMessageAsync(
                         "Buy failed - insufficient silver in your treasury, listing already sold, " +
@@ -113,10 +112,10 @@ namespace KMHServerAddon.Features.Discord
                 Embed eb = new EmbedBuilder()
                     .WithTitle("Purchase complete")
                     .WithDescription(
-                        $"Bought **{boughtQty}× {DiscordText.Escape(label)}** for `{expected}s`.\n" +
+                        $"Bought **{boughtQty}× {DiscordText.Escape(label)}** for `{paidSilver}s`.\n" +
                         "Items delivered to your treasury.")
                     .AddField("Listing", $"#{listingId}", inline: true)
-                    .AddField("Seller",  DiscordText.Escape(sellerUsername),  inline: true)
+                    .AddField("Seller",  DiscordText.SafeName(sellerUsername),  inline: true)
                     .WithColor(new Color(0x8C, 0xDC, 0x8C))
                     .WithCurrentTimestamp()
                     .Build();
@@ -132,8 +131,6 @@ namespace KMHServerAddon.Features.Discord
             }
         }
 
-        // -- !kmh-cancel --
-
         private static async Task HandleCancel(SocketMessage raw, string[] parts)
         {
             string caller = RequireLinkedAsync(raw, out string error);
@@ -146,6 +143,12 @@ namespace KMHServerAddon.Features.Discord
             {
                 await raw.Channel.SendMessageAsync("Usage: `!kmh-cancel <listing-id>`")
                     .ConfigureAwait(false);
+                return;
+            }
+
+            if (!Maintenance.KmhAdmission.AllowsPlayerFeature(Maintenance.KmhIngress.Discord, "marketplace", out string blocked))
+            {
+                await raw.Channel.SendMessageAsync(blocked).ConfigureAwait(false);
                 return;
             }
 
@@ -173,8 +176,6 @@ namespace KMHServerAddon.Features.Discord
             }
         }
 
-        // -- !kmh-sell --
-
         private static async Task HandleSell(SocketMessage raw, string[] parts)
         {
             string caller = RequireLinkedAsync(raw, out string error);
@@ -196,8 +197,7 @@ namespace KMHServerAddon.Features.Discord
                 return;
             }
 
-            // Last two tokens must be qty + price; everything between parts[1] and them is the (possibly
-            // multi-word) item name, so "!kmh-sell power armor 1 800" parses correctly.
+            // qty and price are taken from the end, because the item name in between can be several words.
             string[] tokens = ReparseQuoted(raw.Content?.Substring(_config_prefix_len(raw)) ?? "");
             if (tokens.Length < 4
              || !int.TryParse(tokens[tokens.Length - 2], out int qty)   || qty   <= 0
@@ -217,7 +217,6 @@ namespace KMHServerAddon.Features.Discord
             }
             string itemRaw = nameSb.ToString().Replace('_', ' ').Trim();
 
-            // optional trailing quality word: "!kmh-sell power armor excellent 1 800"
             int requestedQuality = 0;
             int lastSpace = itemRaw.LastIndexOf(' ');
             if (lastSpace > 0)
@@ -226,9 +225,7 @@ namespace KMHServerAddon.Features.Discord
                 if (qw > 0) { requestedQuality = qw; itemRaw = itemRaw.Substring(0, lastSpace).Trim(); }
             }
 
-            // Resolve friendly name → defName via the cache. Ambiguous matches return a candidate list so the user
-            // can re-issue more precisely. Unknown items fall through to raw input as a defName (works for mods the
-            // server hasn't seen yet - the treasury withdraw will fail cleanly if it really isn't one)
+            // An unknown name falls through as a raw defName, which lets a mod the server has not seen still work.
             string defName = ItemLabelCache.ResolveDefNameByQuery(itemRaw, out List<string> candidates);
             if (defName == null)
             {
@@ -244,11 +241,10 @@ namespace KMHServerAddon.Features.Discord
                     await raw.Channel.SendMessageAsync(sb.ToString()).ConfigureAwait(false);
                     return;
                 }
-                // Last resort - treat the raw input as a defName.
                 string fallback = itemRaw.Replace(' ', '_');
                 defName = fallback.Length > 64 ? fallback.Substring(0, 64) : fallback;
             }
-            // Resolve which vault stack this sells: the def may exist plain or as material/quality variants.
+            // The same def can sit in the vault plain or as material and quality variants, so the stack must be chosen.
             string sellStuff = ""; int sellQuality = 0;
             {
                 var vault = Treasury.TreasuryStore.GetSnapshotFor(caller);
@@ -283,10 +279,8 @@ namespace KMHServerAddon.Features.Discord
                         .ConfigureAwait(false);
                     return;
                 }
-                // zero variants + no quality asked: fall through with the plain def - the escrow fails cleanly
             }
 
-            // Mirror the in-game post path's sanity bounds.
             if (qty   > MaxBuyQty)        qty   = MaxBuyQty;
             if (price > 1_000_000)        price = 1_000_000;
             long expectedTotal = (long)qty * price;
@@ -295,6 +289,12 @@ namespace KMHServerAddon.Features.Discord
                 await raw.Channel.SendMessageAsync(
                     "Total list value would overflow - try a smaller qty or price.")
                     .ConfigureAwait(false);
+                return;
+            }
+
+            if (!Maintenance.KmhAdmission.AllowsPlayerFeature(Maintenance.KmhIngress.Discord, "marketplace", out string blocked))
+            {
+                await raw.Channel.SendMessageAsync(blocked).ConfigureAwait(false);
                 return;
             }
 
@@ -333,10 +333,6 @@ namespace KMHServerAddon.Features.Discord
             }
         }
 
-        // -- helpers --
-
-        // Returns the in-game username linked to the calling Discord user. Returns null + populates the error
-        // message when the user isn't linked - caller forwards the message and returns
         private static string RequireLinkedAsync(SocketMessage raw, out string errorMessage)
         {
             errorMessage = null;
@@ -345,31 +341,27 @@ namespace KMHServerAddon.Features.Discord
                 errorMessage = "Could not resolve your Discord identity.";
                 return null;
             }
-            ulong  id      = raw.Author.Id;
-            string display = ResolveDiscordDisplay(raw.Author);
-            string user    = LinkedAccountsStore.FindUsernameByDiscordId(id);
-            if (string.IsNullOrEmpty(user) && !string.IsNullOrEmpty(display))
-                user = LinkedAccountsStore.FindUsernameByDiscord(display);
+            // Id only: display names are attacker-settable, so a fallback would let anyone drain another player's treasury.
+            string user = LinkedAccountsStore.FindUsernameByDiscordId(raw.Author.Id);
             if (string.IsNullOrEmpty(user))
             {
                 errorMessage =
                     "Link your Discord first to use trade commands. " +
-                    "In-game: `/kmh link`, then on Discord: `!kmh-link <code>`.";
+                    "In-game: `/kmh link`, then on Discord: `!kmh-link <code>`. " +
+                    "(Linked long ago? Re-run `/kmh link` so your Discord id is on file.)";
                 return null;
             }
             return user;
         }
 
-        // Compute the prefix length for the calling message so we can strip the leading "!" / "kmh-prefix" off
-        // raw.Content before re-parsing. Same length DiscordBridge.OnMessage stripped to compute `cmd`
+        // Must match what DiscordBridge.OnMessage stripped, or re-parsing shifts every token.
         private static int _config_prefix_len(SocketMessage raw)
         {
             string prefix = DiscordBridge.Config?.CommandPrefix ?? "!";
             return Math.Min(prefix.Length, raw?.Content?.Length ?? 0);
         }
 
-        // Quote-aware tokenizer - splits on whitespace but treats anything inside "..." as a single token, so
-        // multi-word item names (`!kmh-sell "power armor" 1 800`) parse correctly.
+        // Quotes hold a multi-word item name together, which plain whitespace splitting would break apart.
         private static string[] ReparseQuoted(string content)
         {
             List<string> tokens = new List<string>();
@@ -389,16 +381,6 @@ namespace KMHServerAddon.Features.Discord
             }
             if (cur.Length > 0) tokens.Add(cur.ToString());
             return tokens.ToArray();
-        }
-
-        private static string ResolveDiscordDisplay(IUser user)
-        {
-            string g = user?.GlobalName;
-            if (!string.IsNullOrEmpty(g)) return g;
-            string u = user?.Username;
-            string d = user?.Discriminator;
-            if (!string.IsNullOrEmpty(d) && d != "0" && d != "0000") return $"{u}#{d}";
-            return u ?? "";
         }
     }
 }

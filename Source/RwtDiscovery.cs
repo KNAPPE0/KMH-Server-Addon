@@ -8,9 +8,7 @@ using System.Text.RegularExpressions;
 
 namespace KMHServerAddon
 {
-    // Finds the owner's RWT server and its generation. Identification is by CONTENT - we read each candidate's
-    // bundle manifest for a known server assembly - because names are unreliable: RWT renamed GameServer -> RTServer,
-    // and Bisect layouts rename KMH itself to GameServer.
+    // Identifies by CONTENT, never by filename: RWT renamed its server, and a Bisect layout renames KMH to GameServer.
     internal static class RwtDiscovery
     {
         public const string ServerDllRt  = "RTServer.dll";      // 26.7.x+
@@ -91,8 +89,7 @@ namespace KMHServerAddon
             catch { return exePath + "|?"; }
         }
 
-        // Slim RWT runs on whatever .NET is installed - here, the runtime KMH is already on. A newer requirement
-        // fails later in a way that looks nothing like the cause, so name it up front.
+        // Named up front because a newer runtime requirement otherwise fails later, looking nothing like the cause.
         public static string CheckRuntimeRequirement(string dir, string serverDll)
         {
             if (serverDll == null) return null;

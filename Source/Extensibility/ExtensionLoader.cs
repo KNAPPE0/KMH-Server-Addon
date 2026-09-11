@@ -9,9 +9,7 @@ using KMHServerAddon.Persistence;
 
 namespace KMHServerAddon.Extensibility
 {
-    // Discovers + loads server-side extensions at startup. Recursively scans kmh-extensions/ (next to the exe) for any
-    // *.dll, whether one folder per extension or flat. Every load step is wrapped in try/catch: a broken extension
-    // logs + skips, KMH itself continues.
+    // Every load step is caught separately, so a broken extension is skipped rather than taking KMH down with it.
     internal static class ExtensionLoader
     {
         private static readonly List<LoadedExtension> _loaded = new List<LoadedExtension>();
@@ -23,8 +21,6 @@ namespace KMHServerAddon.Extensibility
             string dir = Path.Combine(KmhDataPaths.AddonDir, "kmh-extensions");
             if (!Directory.Exists(dir))
             {
-                // First-time install - create the empty folder + a tiny README so admins see where to drop
-                // extensions without hunting through the docs
                 try
                 {
                     Directory.CreateDirectory(dir);
@@ -83,8 +79,7 @@ namespace KMHServerAddon.Extensibility
             try { types = asm.GetTypes(); }
             catch (ReflectionTypeLoadException ex)
             {
-                // Partial type load - surface the loader exceptions so missing-dep diagnostics aren't silently
-                // swallowed
+                // The loader exceptions name the missing dependency, which the outer message alone never does.
                 ServerLog.Warn($"Extensions: type load failure in '{Path.GetFileName(dllPath)}':");
                 foreach (Exception inner in ex.LoaderExceptions.Take(3))
                 {
@@ -114,6 +109,15 @@ namespace KMHServerAddon.Extensibility
             string name    = string.IsNullOrWhiteSpace(instance.Name)    ? type.FullName : instance.Name;
             string version = string.IsNullOrWhiteSpace(instance.Version) ? "0.0.0"       : instance.Version;
 
+            // Refused up front, because an incompatible extension otherwise half-loads and fails later as a reflection error.
+            int contract = instance is KMH.Sdk.Server.IKmhSdkTargeted targeted ? targeted.TargetSdkContract : KmhExtensionCompat.Baseline;
+            if (!KmhExtensionCompat.IsCompatible(contract))
+            {
+                ServerLog.Warn($"Extensions: skipping '{name}' v{version} - {KmhExtensionCompat.Explain(contract)} " +
+                               $"(this server provides SDK contract {KmhExtensionCompat.Current}).");
+                return;
+            }
+
             KmhServerHost host = new KmhServerHost(name);
             try { instance.Register(host); }
             catch (Exception ex)
@@ -126,20 +130,22 @@ namespace KMHServerAddon.Extensibility
             {
                 Name        = name,
                 Version     = version,
+                SdkContract = contract,
                 SourceDll   = Path.GetFileName(sourceDllPath),
                 Instance    = instance,
                 Host        = host,
             });
-            ServerLog.Info($"Extensions: loaded '{name}' v{version} (from {Path.GetFileName(sourceDllPath)})");
+            ServerLog.Info($"Extensions: loaded '{name}' v{version} (SDK contract {contract}, from {Path.GetFileName(sourceDllPath)})");
         }
     }
 
     internal sealed class LoadedExtension
     {
-        public string                Name      { get; set; }
-        public string                Version   { get; set; }
-        public string                SourceDll { get; set; }
-        public IKmhServerExtension   Instance  { get; set; }
-        public KmhServerHost         Host      { get; set; }
+        public string                Name        { get; set; }
+        public string                Version     { get; set; }
+        public int                   SdkContract { get; set; }
+        public string                SourceDll   { get; set; }
+        public IKmhServerExtension   Instance    { get; set; }
+        public KmhServerHost         Host        { get; set; }
     }
 }

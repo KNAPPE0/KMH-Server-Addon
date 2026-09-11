@@ -2,11 +2,7 @@ using System;
 
 namespace KMH.Sdk.Server.Apis
 {
-    /// <summary>
-    /// Pipes extension messages through KMH's standard server logger.
-    /// Output is automatically prefixed with the extension name so
-    /// admins can tell which extension is talking.
-    /// </summary>
+    /// <summary>KMH's server logger, prefixing every line with the extension name so admins can tell who is talking.</summary>
     public interface IServerLog
     {
         void Info(string message);

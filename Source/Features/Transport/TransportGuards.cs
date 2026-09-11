@@ -4,9 +4,7 @@ using System.Threading;
 
 namespace KMHServerAddon.Features.Transport
 {
-    // DoS guards for the API transport, split out of KmhApiServer so they're testable without real sockets.
-
-    // Caps total + per-IP in-flight sockets. Every TryAdmit that returns true must be paired with a Release.
+    // Every TryAdmit that returns true must be paired with a Release, or the count leaks a slot.
     internal sealed class ConnectionLimiter
     {
         private readonly int _maxTotal;
@@ -43,7 +41,7 @@ namespace KMHServerAddon.Features.Transport
         }
     }
 
-    // Per-IP failed-auth throttle: too many rejects inside the window trip a temporary block. A clean auth clears the IP.
+    // A clean auth clears the IP, so a legitimate player who mistyped is not left blocked.
     internal sealed class AuthFailThrottle
     {
         private sealed class Fails { public int Count; public long WindowStart; public long BlockUntil; }
@@ -69,7 +67,7 @@ namespace KMHServerAddon.Features.Transport
             lock (r) return _now() < r.BlockUntil;
         }
 
-        // Returns true on the call that trips the block; total is the running in-window count.
+        // True only on the call that trips the block, so a caller cannot log it once per failure.
         public bool NoteFailure(string ip, out int total)
         {
             long now = _now();

@@ -6,7 +6,6 @@ using KMHServerAddon.Features.LinkedAccounts;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // Want-To-Buy board embed, newest-first (trimmed oldest-first to the 25-field embed cap).
     internal static class DiscordWtbBuilder
     {
         private const int MaxFields = 25;

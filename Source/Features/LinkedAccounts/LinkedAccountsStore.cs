@@ -1,12 +1,11 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using KMHServerAddon.Features.LinkedAccounts.Dto;
 using KMHServerAddon.Persistence;
 
 namespace KMHServerAddon.Features.LinkedAccounts
 {
-    // username -> Discord identity. Security: mutating commands authenticate against the stable snowflake Id, not the
-    // volatile display name (Ids stay server-only; the wire snapshot ships display names for UI rendering only).
+    // Ids stay server-only and are what authenticates a mutation; the wire snapshot carries display names for UI only.
     internal static class LinkedAccountsStore
     {
         private static readonly object _lock = new object();
@@ -26,20 +25,38 @@ namespace KMHServerAddon.Features.LinkedAccounts
             }
         }
 
-        // Bind an in-game username to a Discord identity. discordId may be 0
-        // for legacy callers that haven't been updated to pass it (those
-        // links remain display-name-only, so handle-rename will break them until re-linked)
-        public static void SetLink(string username, string discordName, ulong discordId)
+        // One snowflake, one username - two would let dictionary order decide which KMH account acts. A 0 id is a legacy caller.
+        public static bool SetLink(string username, string discordName, ulong discordId, out string refusal)
         {
-            if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(discordName)) return;
+            refusal = "";
+            if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(discordName))
+            { refusal = "No username or Discord name."; return false; }
+
             lock (_lock)
             {
+                if (discordId != 0)
+                    foreach (KeyValuePair<string, ulong> kv in _ids)
+                        if (kv.Value == discordId
+                            && !string.Equals(kv.Key, username, StringComparison.OrdinalIgnoreCase))
+                        {
+                            refusal = $"That Discord account is already linked to '{kv.Key}'. Unlink there first.";
+                            return false;
+                        }
+
                 _links[username] = discordName;
                 if (discordId != 0) _ids[username] = discordId;
                 else                _ids.Remove(username);
             }
-            SaveToDisk();
+
+            // A link nobody wrote down is a link the next restart does not have, so the caller is told.
+            if (!SaveToDisk())
+            {
+                lock (_lock) { _links.Remove(username); _ids.Remove(username); }
+                refusal = "The server could not record that link - nothing was changed. Try again shortly.";
+                return false;
+            }
             Extensibility.KmhEventBus.Instance.RaisePlayerLinked(new KMH.Sdk.Server.Events.PlayerLinkedEvent { Username = username, DiscordDisplay = discordName, DiscordId = discordId });
+            return true;
         }
 
         public static void Unlink(string username)
@@ -58,7 +75,7 @@ namespace KMHServerAddon.Features.LinkedAccounts
             Extensibility.KmhEventBus.Instance.RaisePlayerUnlinked(new KMH.Sdk.Server.Events.PlayerUnlinkedEvent { Username = username, PreviousDiscordDisplay = previousDisplay ?? "", DiscordId = previousId });
         }
 
-        // Every current link as (username, discordId) - used by the Discord guild-role sync to reconcile all members.
+        // Legacy links carry no snowflake, and there is no Discord member to reconcile one against.
         public static List<KeyValuePair<string, ulong>> AllLinked()
         {
             lock (_lock)
@@ -70,17 +87,12 @@ namespace KMHServerAddon.Features.LinkedAccounts
             }
         }
 
-        // Cheap membership check - used by /kmh unlink to differentiate "you have no link" from "we just removed
-        // it"
         public static bool IsLinked(string username)
         {
             if (string.IsNullOrEmpty(username)) return false;
             lock (_lock) { return _links.ContainsKey(username); }
         }
 
-        // Read a single link without rebuilding the whole snapshot. Used by /kmh link status, !kmh-whois, and the
-        // announce-channel composer ("X unlinked - was: Y") so we can include the previous display in the message
-        // without a snapshot round-trip
         public static bool TryGetLink(string username, out string display)
         {
             display = null;
@@ -88,37 +100,25 @@ namespace KMHServerAddon.Features.LinkedAccounts
             lock (_lock) { return _links.TryGetValue(username, out display); }
         }
 
-        // Reverse lookup for the Discord side: a Discord user runs !kmh-unlink and we need to find which in-game
-        // username they're bound to. Case-insensitive compare - Discord display names aren't case-sensitive in any
-        // user-visible way
-        public static string FindUsernameByDiscord(string discordName)
-        {
-            if (string.IsNullOrEmpty(discordName)) return null;
-            lock (_lock)
-            {
-                foreach (KeyValuePair<string, string> kv in _links)
-                {
-                    if (string.Equals(kv.Value, discordName, StringComparison.OrdinalIgnoreCase))
-                        return kv.Key;
-                }
-            }
-            return null;
-        }
-
-        // Preferred reverse lookup for the Discord side - works across handle renames, doesn't care about case or
-        // discriminator. Returns null when no link has the supplied snowflake id (e.g., a legacy link from before
-        // Id storage landed - callers fall back to the display-name lookup)
+        // Snowflake only: display names are attacker-settable. A duplicate refuses rather than letting enumeration order pick.
         public static string FindUsernameByDiscordId(ulong discordId)
         {
             if (discordId == 0) return null;
+            string found = null;
             lock (_lock)
-            {
                 foreach (KeyValuePair<string, ulong> kv in _ids)
                 {
-                    if (kv.Value == discordId) return kv.Key;
+                    if (kv.Value != discordId) continue;
+                    if (found != null)
+                    {
+                        Diagnostics.ServerLog.Error(
+                            $"LinkedAccounts: Discord id {discordId} is linked to more than one username " +
+                            $"('{found}' and '{kv.Key}'). Refusing to act as either - unlink one with 'kmh unlink <name>'.");
+                        return null;
+                    }
+                    found = kv.Key;
                 }
-            }
-            return null;
+            return found;
         }
 
         public static ulong DiscordIdFor(string username)
@@ -126,8 +126,6 @@ namespace KMHServerAddon.Features.LinkedAccounts
             if (string.IsNullOrEmpty(username)) return 0;
             lock (_lock) { return _ids.TryGetValue(username, out ulong id) ? id : 0; }
         }
-
-        // --- persistence ---
 
         public static void LoadFromDisk()
         {
@@ -143,10 +141,33 @@ namespace KMHServerAddon.Features.LinkedAccounts
                 Diagnostics.ServerLog.Info(
                     $"LinkedAccounts: loaded {state.Links.Count} link(s) from disk " +
                     $"({_ids.Count} with snowflake id)");
+                ReportDuplicateIds();
             }
         }
 
-        public static void SaveToDisk()
+        // Naming a pre-rule duplicate is the whole job; deleting one at boot would pick a winner without being asked.
+        private static void ReportDuplicateIds()
+        {
+            var byId = new Dictionary<ulong, List<string>>();
+            lock (_lock)
+                foreach (KeyValuePair<string, ulong> kv in _ids)
+                {
+                    if (kv.Value == 0) continue;
+                    if (!byId.TryGetValue(kv.Value, out List<string> names)) byId[kv.Value] = names = new List<string>();
+                    names.Add(kv.Key);
+                }
+
+            foreach (KeyValuePair<ulong, List<string>> kv in byId)
+            {
+                if (kv.Value.Count < 2) continue;
+                kv.Value.Sort(StringComparer.OrdinalIgnoreCase);   // reported the same way on every boot
+                Diagnostics.ServerLog.Error(
+                    $"LinkedAccounts: Discord id {kv.Key} is linked to {kv.Value.Count} usernames " +
+                    $"({string.Join(", ", kv.Value)}). That identity is refused until an admin unlinks all but one.");
+            }
+        }
+
+        public static bool SaveToDisk()
         {
             PersistedState state = new PersistedState();
             lock (_lock)
@@ -154,11 +175,20 @@ namespace KMHServerAddon.Features.LinkedAccounts
                 state.Links      = new Dictionary<string, string>(_links, StringComparer.OrdinalIgnoreCase);
                 state.DiscordIds = new Dictionary<string, ulong>(_ids,    StringComparer.OrdinalIgnoreCase);
             }
-            JsonFileStore.Save(KmhDataPaths.LinkedAccountsFile, state);
+            return JsonFileStore.Save(KmhDataPaths.LinkedAccountsFile, state);
         }
 
-        // On-disk schema. Older files (pre-snowflake) have only the Links field - DiscordIds deserializes to null
-        // and we treat it as an empty map (those entries stay display-name-only until re-linked)
+        internal static void ResetForTest()
+        {
+            lock (_lock) { _links.Clear(); _ids.Clear(); }
+        }
+
+        internal static void SeedDuplicateForTest(string a, string b, ulong id)
+        {
+            lock (_lock) { _links[a] = "dup"; _links[b] = "dup"; _ids[a] = id; _ids[b] = id; }
+        }
+
+        // Pre-snowflake files carry only Links, so DiscordIds can arrive empty and those entries stay name-only.
         private class PersistedState
         {
             public Dictionary<string, string> Links      { get; set; } = new Dictionary<string, string>();

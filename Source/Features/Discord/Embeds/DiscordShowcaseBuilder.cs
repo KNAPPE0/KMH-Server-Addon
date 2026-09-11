@@ -8,18 +8,14 @@ using KMHServerAddon.Features.Marketplace.Dto;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // Per-user marketplace showcase embed; centralized so post/edit/sweep-refresh stay consistent.
     internal static class DiscordShowcaseBuilder
     {
-        // Discord caps embeds at 25 fields. We sort by price ascending so the cheapest listings always make the cut
-        // when the seller has more than 25 active items
+        // Discord's own embed field cap.
         private const int MaxFields = 25;
 
         public static Embed Build(string username, string tagline, List<MarketplaceListing> listings)
         {
             string title = $"{username}'s marketplace";
-            // Suffix the linked discord handle (when known) so cross- referencing a showcase to a chat user is one
-            // glance
             if (LinkedAccountsStore.TryGetLink(username, out string discord) && !string.IsNullOrEmpty(discord))
             {
                 title += $"  ·  {discord}";
@@ -32,8 +28,6 @@ namespace KMHServerAddon.Features.Discord
 
             if (!string.IsNullOrEmpty(tagline))
             {
-                // Italic + leading-space margin so the tagline reads as a banner above the listing table rather
-                // than another listing row
                 eb.WithDescription($"_{tagline}_");
             }
 
@@ -44,8 +38,7 @@ namespace KMHServerAddon.Features.Discord
                 return eb.Build();
             }
 
-            // Sort by unit price ascending - best deals at the top of the visible field set when the seller exceeds
-            // the 25-field cap
+            // Cheapest first, so a seller over the field cap still shows their best prices rather than an arbitrary 25.
             List<MarketplaceListing> sorted = new List<MarketplaceListing>(listings);
             sorted.Sort((a, b) => a.UnitPriceSilver.CompareTo(b.UnitPriceSilver));
             int show = Math.Min(MaxFields, sorted.Count);

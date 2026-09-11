@@ -4,9 +4,7 @@ using KMHServerAddon.Diagnostics;
 
 namespace KMHServerAddon.AdminCommands
 {
-    // Surfaces the KMH command family in RWT's /help. The real KMH commands are Harmony-intercepted on
-    // PM_Chat.Receive (swallowed before dispatch), so they never self-register; we add one "/kmh" entry for the
-    // listing plus an intercept (below) so bare "/kmh" and "/kmh help" always print the command list.
+    // KMH commands are intercepted on PM_Chat.Receive and never reach dispatch, so they would otherwise be absent from /help.
     internal static class KmhHelpCommand
     {
         private static bool _registered;
@@ -17,14 +15,11 @@ namespace KMHServerAddon.AdminCommands
             _registered = true;
             try
             {
-                // One umbrella entry for /help. Its Action is a fallback - the root intercept normally handles
-                // "/kmh" and "/kmh help" first
+                // A fallback only, since the root intercept below normally answers "/kmh" and "/kmh help" first.
                 CMD_Base.ChatCommands.Add(new KmhChatCommand(
                     "/kmh", "KMH commands - guild / link / server (type /kmh help)",
                     () => SendHelp(PM_Chat.TargetClient)));
 
-                // Console command (operator types "kmh ..." in the server console) - same admin actions as the
-                // in-game chat command
                 CMD_Base.Commands.Add(new KmhServerConsoleCommand());
                 ServerLog.Info("Registered KMH commands into /help + server console");
             }
@@ -39,13 +34,12 @@ namespace KMHServerAddon.AdminCommands
             PM_Chat.SendConsoleMessage(client, "  /kmh link [status] - link your Discord account (get a code from the bot)");
             PM_Chat.SendConsoleMessage(client, "  /kmh unlink        - unlink your Discord account");
             PM_Chat.SendConsoleMessage(client, "  /kmh server help   - server status / admin");
+            PM_Chat.SendConsoleMessage(client, "  Chat, guild chat, DMs and player mail live in the KMH tab -> Communications.");
             PM_Chat.SendConsoleMessage(client, "  Most KMH features live in the in-game KMH tab.");
         }
     }
 
-    // Owns the bare "/kmh" root and explicit "/kmh help". The guild / link /
-    // server intercepts own their own sub-namespaces and run independently;
-    // this one only fires when no subcommand (or "help") was given, so it never steals a real subcommand
+    // Fires only when no subcommand was given, so it never steals one the guild/link/server intercepts own.
     [HarmonyPatch(typeof(PM_Chat), nameof(PM_Chat.Receive))]
     internal static class Patch_PM_Chat_KmhRoot
     {
@@ -69,8 +63,6 @@ namespace KMHServerAddon.AdminCommands
         }
     }
 
-    // A CMD_Base entry for the shared ChatCommands list. Optional handler runs on dispatch; used only for the
-    // umbrella /kmh entry's fallback
     internal sealed class KmhChatCommand : CMD_Base
     {
         private readonly Action _onAction;
