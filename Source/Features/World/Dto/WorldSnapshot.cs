@@ -1,12 +1,14 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using Newtonsoft.Json;
 
 namespace KMHServerAddon.Features.World.Dto
 {
-    // World Engine wire shapes (events + server quests). Byte-identical to the patch-side DTO. Type tags are strings.
+    // Mirrors the patch-side DTO - a field changed here has to change there too.
     public class WorldSnapshot
     {
+        // Monotonic under the store lock; two transports can deliver out of order, so the client drops anything older.
+        [JsonProperty("revision")] public long Revision { get; set; } = 0;
         [JsonProperty("events")]        public List<WorldEventDto>  Events       { get; set; } = new List<WorldEventDto>();
         [JsonProperty("server_quests")] public List<ServerQuestDto> ServerQuests { get; set; } = new List<ServerQuestDto>();
     }
@@ -31,6 +33,8 @@ namespace KMHServerAddon.Features.World.Dto
         [JsonProperty("target")]            public string Target          { get; set; } = "";
         [JsonProperty("started_utc_ticks")] public long   StartedUtcTicks { get; set; } = 0;
         [JsonProperty("ends_utc_ticks")]    public long   EndsUtcTicks    { get; set; } = 0; // <= now means over; 0 only in pre-1.2.2 data
+
+        public WorldEventDto ShallowClone() => (WorldEventDto)MemberwiseClone();
     }
 
     // A server-owned quest (distinct from player-posted), funded from the house pool.
@@ -42,6 +46,27 @@ namespace KMHServerAddon.Features.World.Dto
         public const string ObjDeliver = "deliver";
         public const string ObjHunt    = "hunt";
         public const string ObjBuild   = "build";
+
+        public const string OpNone     = "";
+        public const string OpAssault  = "assault";
+        public const string OpCapture  = "capture";
+        public const string OpSupply   = "supply";
+        public const string OpRepair   = "repair";
+        public const string OpReclaim  = "reclaim";
+        public const string OpDefend   = "defend";
+
+        public static readonly string[] AllOperationTypes =
+            { OpAssault, OpCapture, OpSupply, OpRepair, OpReclaim, OpDefend };
+
+        public const string SourceWorldDirector = "world_director";
+
+        public const string ConsequenceNone             = "";
+        public const string ConsequenceOutpostClaimable = "outpost_claimable";
+        public const string ConsequenceOutpostReclaimed = "outpost_reclaimed";
+        public const string ConsequenceOutpostCaptured  = "outpost_captured";
+
+        public static readonly string[] AllConsequences =
+            { ConsequenceOutpostClaimable, ConsequenceOutpostReclaimed, ConsequenceOutpostCaptured };
 
         public const string StateActive    = "active";
         public const string StateCompleted = "completed";
@@ -56,14 +81,26 @@ namespace KMHServerAddon.Features.World.Dto
         [JsonProperty("goal_qty")]        public int    GoalQty       { get; set; } = 0;
         [JsonProperty("progress_qty")]    public int    ProgressQty   { get; set; } = 0;
         [JsonProperty("reward_pool")]     public long   RewardPool    { get; set; } = 0;
-        // How much of RewardPool is real house-pool silver vs minted by the central bank. Only this portion is
-        // refunded to the pool on expiry/cancel - refunding the minted part would inflate the pool. Server-owned;
-        // the client ignores it.
+        // Only this portion is refunded on expiry, because returning the minted part would inflate the pool.
         [JsonProperty("reserved_from_pool")] public long ReservedFromPool { get; set; } = 0;
         [JsonProperty("state")]           public string State         { get; set; } = StateActive;
         [JsonProperty("winner")]          public string Winner        { get; set; } = ""; // competitive only
         [JsonProperty("ends_utc_ticks")]  public long   EndsUtcTicks  { get; set; } = 0;
+
+        [JsonProperty("operation_type")]   public string OperationType   { get; set; } = OpNone;
+        [JsonProperty("operation_source")] public string OperationSource { get; set; } = "";
+        [JsonProperty("target_site_tile")] public int    TargetSiteTile  { get; set; } = -1;
+        [JsonProperty("consequence")]      public string Consequence     { get; set; } = ConsequenceNone;
+        [JsonProperty("window_ends_utc")]  public long   WindowEndsUtcTicks { get; set; } = 0;
+
+        // Breaks a tie on quantity by who started first, so the winner is a rule rather than dictionary order.
+        [JsonProperty("contributor_first_utc")] public Dictionary<string, long> ContributorFirstUtc { get; set; }
+            = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+
         [JsonProperty("contributors")]    public Dictionary<string, int> Contributors
             { get; set; } = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+        // Both dictionaries above are mutated by every delivery, so a snapshot must own its own copies.
+        public ServerQuestDto ShallowClone() => (ServerQuestDto)MemberwiseClone();
     }
 }

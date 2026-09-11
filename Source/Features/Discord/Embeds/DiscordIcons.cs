@@ -5,12 +5,8 @@ using KMHServerAddon.Persistence;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // Resolves Discord embed icons from KMH-Data/Icons - the single icons folder, shipped pre-filled and read
-    // straight from there. Names are extension-less; the resolver probes raster formats (Discord can't show .dds),
-    // null if none
     internal static class DiscordIcons
     {
-        // Semantic icon names (no extension) - drop e.g. kmh_logo.png in the folder.
         public const string Logo          = "kmh_logo";
         public const string Marketplace   = "marketplace";
         public const string Leaderboard   = "leaderboard";
@@ -22,10 +18,9 @@ namespace KMHServerAddon.Features.Discord
         public const string Warning       = "warning";
         public const string Error         = "error";
 
-        // Formats Discord renders as an embed thumbnail, best first.
+        // Ordered best first, and deliberately without .dds, which Discord cannot render.
         private static readonly string[] Extensions = { ".png", ".webp", ".gif", ".jpg", ".jpeg" };
 
-        // Path to an existing icon for the name (or the Logo fallback), or null. Honours UseBundledIcons
         public static string ResolveExistingPath(DiscordConfig cfg, string name)
         {
             if (cfg == null || !cfg.UseBundledIcons) return null;
@@ -36,7 +31,7 @@ namespace KMHServerAddon.Features.Discord
                 string hit = Probe(KmhDataPaths.IconsDir, name);
                 if (hit != null) return hit;
 
-                // Missing-icon fallback: the logo, so embeds still get a thumbnail.
+                // Falls back to the logo, so a missing icon still leaves the embed with a thumbnail.
                 if (!string.Equals(name, Logo, StringComparison.OrdinalIgnoreCase))
                     return Probe(KmhDataPaths.IconsDir, Logo);
             }
@@ -44,8 +39,7 @@ namespace KMHServerAddon.Features.Discord
             return null;
         }
 
-        // First existing file for "<name><ext>" across the supported formats. Also accepts a name that already
-        // carries its own extension (back-compat)
+        // A name arriving with its own extension is taken as-is, since older configs spelled icons out in full.
         private static string Probe(string root, string name)
         {
             if (Path.HasExtension(name))

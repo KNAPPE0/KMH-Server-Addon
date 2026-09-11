@@ -4,7 +4,7 @@ namespace KMH.Sdk.Server.Records
 {
     // Immutable SDK record contracts; use mutation APIs to change state, not the returned snapshots.
 
-    // Snapshot of one open marketplace listing.
+    /// <summary>Snapshot of one open marketplace listing.</summary>
     public sealed class MarketplaceListingRecord
     {
         public long   Id                { get; init; }
@@ -19,7 +19,7 @@ namespace KMH.Sdk.Server.Records
         public string Visibility        { get; init; } = "public";
     }
 
-    // One treasury recent-transaction entry.
+    /// <summary>One treasury recent-transaction entry.</summary>
     public sealed class TreasuryTransactionRecord
     {
         public long   UtcTicks    { get; init; }
@@ -30,7 +30,7 @@ namespace KMH.Sdk.Server.Records
         public string Note        { get; init; } = "";
     }
 
-    // Snapshot of one quest on the board.
+    /// <summary>Snapshot of one quest on the board.</summary>
     public sealed class QuestRecord
     {
         public long   Id                { get; init; }
@@ -49,7 +49,7 @@ namespace KMH.Sdk.Server.Records
         public long   ExpiresUtcTicks   { get; init; }
     }
 
-    // Basic guild stats for leaderboards and browsing.
+    /// <summary>Basic guild stats for leaderboards and browsing.</summary>
     public sealed class GuildSummaryRecord
     {
         public string Name           { get; init; } = "";
@@ -57,7 +57,7 @@ namespace KMH.Sdk.Server.Records
         public long   TreasurySilver { get; init; }
     }
 
-    // Player quest reputation score and tier.
+    /// <summary>Player quest reputation score and tier.</summary>
     public sealed class ReputationRecord
     {
         public string Username { get; init; } = "";
@@ -65,7 +65,7 @@ namespace KMH.Sdk.Server.Records
         public string Tier     { get; init; } = "Neutral";
     }
 
-    // Custom site ownership, production type, and live output state.
+    /// <summary>Custom site ownership, production type, and live output state.</summary>
     public sealed class SiteRecord
     {
         public int    Tile                  { get; init; }
@@ -81,7 +81,7 @@ namespace KMH.Sdk.Server.Records
         public double TotalSilverGenerated  { get; init; }
     }
 
-    // Player lifetime stats.
+    /// <summary>Per-player totals, cumulative on this server until a destructive season reset clears them.</summary>
     public sealed class PlayerStatRecord
     {
         public string Username           { get; init; } = "";
@@ -91,12 +91,16 @@ namespace KMH.Sdk.Server.Records
         public int    MarketplaceSales   { get; init; }
         public int    QuestsCompleted    { get; init; }
         public int    QuestsPosted       { get; init; }
+        // SitesBuilt and FrontierCaptures are cumulative history; SitesOwned and OutpostsHeld are current ownership.
         public int    SitesBuilt         { get; init; }
+        public int    SitesOwned         { get; init; }
+        public int    OutpostsHeld       { get; init; }
+        public int    FrontierCaptures   { get; init; }
         public long   WorkerXp           { get; init; }
         public long   EconomyScore       { get; init; }
     }
 
-    // Open auction snapshot with escrowed item and live bidding.
+    /// <summary>Open auction snapshot with escrowed item and live bidding.</summary>
     public sealed class AuctionRecord
     {
         public long   Id                { get; init; }
@@ -117,7 +121,7 @@ namespace KMH.Sdk.Server.Records
         public string Visibility        { get; init; } = "public";
     }
 
-    // Live World Engine event; magnitude meaning depends on event type.
+    /// <summary>Live World Engine event; magnitude meaning depends on event type.</summary>
     public sealed class WorldEventRecord
     {
         public long   Id              { get; init; }
@@ -130,7 +134,7 @@ namespace KMH.Sdk.Server.Records
         public long   EndsUtcTicks    { get; init; }          // 0 = instantaneous
     }
 
-    // Server-owned global quest funded by the house pool, separate from player quests.
+    /// <summary>Server-owned global quest funded by the house pool, separate from player quests.</summary>
     public sealed class ServerQuestRecord
     {
         public long   Id            { get; init; }

@@ -1,11 +1,13 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using Newtonsoft.Json;
 
 namespace KMHServerAddon.Features.Auctions.Dto
 {
-    // Mirror of the patch mod's KMHPatch.Features.Auctions.Dto - same JsonProperty names + defaults.
+    // JsonProperty names and defaults must stay identical to the patch mod's mirror of this DTO.
     public class AuctionSnapshot
     {
+        // Monotonic under the store lock: two transports can deliver snapshots out of order, and the client drops the older one.
+        [JsonProperty("revision")] public long Revision { get; set; } = 0;
         [JsonProperty("auctions")] public List<AuctionDto> Auctions { get; set; } = new List<AuctionDto>();
     }
 
@@ -28,9 +30,11 @@ namespace KMHServerAddon.Features.Auctions.Dto
         [JsonProperty("ends_utc_ticks")]      public long   EndsUtcTicks      { get; set; } = 0;
         [JsonProperty("visibility")]          public string Visibility        { get; set; } = "public";
 
-        // State-preserving escrow (persisted; STRIPPED from wire). When set, this is a payload auction.
+        // Persisted but stripped from the wire, since an item's full state is nobody else's business.
         [JsonProperty("escrow_payloads")]     public List<Items.KmhThingPayload> EscrowPayloads { get; set; }
         [JsonProperty("state_fingerprint")]   public string StateFingerprint  { get; set; } = "";
         [JsonProperty("state_note")]          public string StateNote         { get; set; } = "";
+
+        public AuctionDto ShallowClone() => (AuctionDto)MemberwiseClone();
     }
 }

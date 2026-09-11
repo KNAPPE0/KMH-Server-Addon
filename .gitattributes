@@ -1,0 +1,19 @@
+# LF everywhere, stored AND checked out, whatever core.autocrlf happens to be set to on a contributor's machine.
+# Patterns below win over this one - gitattributes is last-match-wins - so the binaries keep their own rule.
+* text=auto eol=lf
+
+# core.autocrlf is on for this repo, so a fresh Windows checkout would rewrite the shipped shell script
+# with CRLF and Linux would refuse it - "bad interpreter: /usr/bin/env bash^M". Pin it to LF.
+*.sh text eol=lf
+
+# Never line-ending-translate a binary. Icons and release archives are byte-exact by definition, and a
+# translated .dll or .png is simply corrupt.
+*.png  binary
+*.dds  binary
+*.zstd binary
+*.dll  binary
+*.so   binary
+*.pdb  binary
+*.exe  binary
+*.zip  binary
+*.nupkg binary

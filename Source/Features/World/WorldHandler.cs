@@ -2,7 +2,6 @@ using KMHServerAddon.SubProtocol;
 
 namespace KMHServerAddon.Features.World
 {
-    // kmh.world.* handler. The snapshot (events + server quests) is the same for everyone.
     internal static class WorldHandler
     {
         public static void Register()
@@ -31,7 +30,11 @@ namespace KMHServerAddon.Features.World
             string itemDef = env?.GetString("item_def_name", "") ?? "";
             int    qty     = env?.GetInt("qty", 0) ?? 0;
             if (string.IsNullOrEmpty(user) || id <= 0 || string.IsNullOrEmpty(itemDef) || qty <= 0) return;
-            WorldEngine.ApplyDelivery(user, id, itemDef, qty);
+
+            var op = new Security.KmhOpClaim("world.deliver", user, env);
+            if (!op.Begin()) { SendSnapshotTo(client); return; }
+
+            if (!WorldEngine.ApplyDelivery(user, id, itemDef, qty)) op.Release();
         }
 
         public static void SendSnapshotTo(ServerClient client)

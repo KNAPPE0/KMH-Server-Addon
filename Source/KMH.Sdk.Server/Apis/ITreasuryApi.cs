@@ -3,55 +3,32 @@ using KMH.Sdk.Server.Records;
 
 namespace KMH.Sdk.Server.Apis
 {
-    /// <summary>
-    /// Read + mutate the KMH treasury (player + guild vaults).
-    /// </summary>
+    /// <summary>Read and mutate the treasury: player and guild vaults.</summary>
     /// <remarks>
-    /// Mutations automatically push a fresh treasury snapshot to the
-    /// affected user if they're online, so any in-game Treasury dialog
-    /// they have open refreshes immediately. Failed mutations return
-    /// false without touching state - silver/items aren't moved
-    /// partially.
+    /// A mutation pushes a fresh snapshot to the affected user if they are online, so you never have to. A failed
+    /// mutation returns false without touching state - nothing moves partially.
     /// </remarks>
     public interface ITreasuryApi
     {
         /// <summary>Current silver balance for the user's vault. 0 if they have no vault yet.</summary>
         long GetSilver(string username);
 
-        /// <summary>
-        /// Items currently in the user's vault as defName → quantity.
-        /// Returned dictionary is a snapshot; the underlying store can
-        /// mutate without affecting your copy.
-        /// </summary>
+        /// <summary>Items in the user's vault as defName → quantity, as a snapshot the store cannot mutate.</summary>
         IReadOnlyDictionary<string, int> GetItems(string username);
 
-        /// <summary>
-        /// Last N transactions (newest last, matching the store's
-        /// append order). Cap is the server-side recent-transactions
-        /// retention (currently 100 - don't rely on the number).
-        /// </summary>
+        /// <summary>Recent transactions, newest last, capped by the server's retention setting.</summary>
         IReadOnlyList<TreasuryTransactionRecord> GetRecentTransactions(string username);
 
-        /// <summary>
-        /// Add silver. Note string lands in the transaction log so
-        /// audit trails make sense. Returns false on invalid input
-        /// (empty username, non-positive amount).
-        /// </summary>
+        /// <summary>Add silver, recording the note in the transaction log. False on an empty user or non-positive amount.</summary>
         bool DepositSilver(string username, int amount, string note = "");
 
-        /// <summary>
-        /// Take silver. Returns false if the user doesn't have enough
-        /// - never goes negative.
-        /// </summary>
+        /// <summary>Take silver. Returns false if the user does not have enough; a vault never goes negative.</summary>
         bool WithdrawSilver(string username, int amount, string note = "");
 
         /// <summary>Add an item stack to the vault.</summary>
         bool DepositItem(string username, string defName, int qty, string note = "");
 
-        /// <summary>
-        /// Take an item stack from the vault. Returns false if qty
-        /// isn't available - partial withdrawals are not performed.
-        /// </summary>
+        /// <summary>Take an item stack. Returns false if the quantity is not available; there are no partial withdrawals.</summary>
         bool WithdrawItem(string username, string defName, int qty, string note = "");
     }
 }

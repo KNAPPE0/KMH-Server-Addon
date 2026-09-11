@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -7,58 +7,71 @@ using KMHServerAddon.SubProtocol;
 
 namespace KMHServerAddon.Maintenance
 {
-    // Sweeps expired marketplace listings and open quests once per minute; fire-and-forget, lightweight, and cancellable for safety.
     internal static class ExpirySweeper
     {
         private static readonly TimeSpan SweepInterval = TimeSpan.FromMinutes(1);
-        private static Task              _task;
-        private static CancellationTokenSource _cts;
 
         public static void Start()
         {
-            if (_task != null) return; // idempotent - already running
-
-            _cts  = new CancellationTokenSource();
-            _task = Task.Run(() => RunLoop(_cts.Token));
-            ServerLog.Verbose($"ExpirySweeper started (interval {SweepInterval.TotalSeconds:F0}s)");
-        }
-
-        // Defensive - not currently called (RWT exits without cleanup), but useful if a future host wants graceful shutdown
-        public static void Stop()
-        {
-            _cts?.Cancel();
-            _cts = null;
-            _task = null;
-        }
-
-        private static async Task RunLoop(CancellationToken ct)
-        {
-            // Publish an initial status snapshot promptly (stores are loaded by the time the sweeper starts).
             try { KmhStatusExport.WriteToDisk(); } catch { }
 
-            // Initial delay so the sweeper doesn't fight bootstrap I/O.
-            try { await Task.Delay(SweepInterval, ct); }
-            catch (TaskCanceledException) { return; }
+            // Its own job: an unwritable store must be retried whether or not the expiry sweep has anything to do.
+            KmhScheduler.Register("persistence-retry", SweepInterval, RetryUnwritableStores, SweepInterval);
+            KmhScheduler.Register("expiry-sweep",      SweepInterval, Tick,                  SweepInterval);
 
-            while (!ct.IsCancellationRequested)
-            {
-                try { Tick(); }
-                catch (Exception ex)
-                {
-                    ServerLog.Error("ExpirySweeper tick threw", ex);
-                }
-
-                try { await Task.Delay(SweepInterval, ct); }
-                catch (TaskCanceledException) { return; }
-            }
+            // FlushAll only covers `kmh save`, backups and exit, so without this a crash costs every message since boot.
+            KmhScheduler.Register("chat-save", SweepInterval, Features.Chat.ChatStore.SaveIfDirty, SweepInterval);
         }
 
-        // Sweeps expired IDs outside store locks, expires each item, and pushes affected online treasury snapshots.
-        private static void Tick()
-        {
-            long now = DateTime.UtcNow.Ticks;
+        public static void Stop() => KmhScheduler.Stop();
 
-            // --- marketplace listings ---
+        // One failed save is enough to retry: the freeze threshold would leave a transient failure unscheduled in memory.
+        internal static bool ShouldRetrySaves => Persistence.JsonFileStore.AnyStoreUnsaved;
+
+        // Value moves are what would have saved the store, so without this retry the freeze outlives the disk problem.
+        private static void RetryUnwritableStores()
+        {
+            if (!ShouldRetrySaves) return;
+            ServerLog.Warn("Persistence: retrying the stores that could not be written...");
+            KmhDataFlush.FlushAll();
+        }
+
+        // Drives the real tick at a chosen instant, so expiry can be exercised without waiting for one.
+        internal static void TickForTest(long nowTicks) => Tick(nowTicks);
+
+        // The scheduler only isolates whole jobs, so one throw here would starve every duty after it.
+        private static void Tick() => Tick(DateTime.UtcNow.Ticks);
+
+        private static void Tick(long now)
+        {
+
+            // A timer coming due is not permission to move value: these stay due for a later tick rather than pay through the freeze.
+            if (KmhAdmission.AllowsValueMutation(KmhIngress.Scheduler, out _))
+            {
+                Step("marketplace expiry", () => SweepMarketplace(now));
+                Step("quest expiry",       () => SweepQuests(now));
+                Step("site production",    SweepSiteProduction);
+                Step("auction settlement", () => SweepAuctions(now));
+                Step("want expiry",        () => SweepWants(now));
+                Step("guild invites",      () => Features.Guilds.GuildStore.PruneExpiredInvites());
+                Step("stale deposits",     RevertStalePendingDeposits);
+                Step("mail",               () => SweepMail(now));
+            }
+
+            Step("stale snapshots",    KmhInvalidation.Drain);
+            Step("snapshot requests",  Persistence.KmhSnapshot.ConsumePendingRequests);
+            Step("snapshot pruning",   Persistence.KmhSnapshot.PruneOldIfDue);
+            Step("status export",      () => KmhStatusExport.WriteToDisk());
+        }
+
+        private static void Step(string what, Action work)
+        {
+            try { work(); }
+            catch (Exception ex) { ServerLog.Error($"ExpirySweeper: {what} failed", ex); }
+        }
+
+        private static void SweepMarketplace(long now)
+        {
             List<long> expiredListings = Features.Marketplace.MarketplaceStore.CollectExpiredIds(now);
             bool marketplaceChanged = false;
             foreach (long id in expiredListings)
@@ -71,8 +84,10 @@ namespace KMHServerAddon.Maintenance
                 }
             }
             if (marketplaceChanged) Features.Marketplace.MarketplaceHandler.BroadcastSnapshot();
+        }
 
-            // --- open quests ---
+        private static void SweepQuests(long now)
+        {
             List<long> expiredQuests = Features.Quests.QuestStore.CollectExpiredOpenIds(now);
             bool questsChanged = false;
             foreach (long id in expiredQuests)
@@ -84,19 +99,22 @@ namespace KMHServerAddon.Maintenance
                     PushTreasuryTo(posterAffected);
                 }
             }
-            // Drop day-old completed quests so the board doesn't grow forever.
             if (Features.Quests.QuestStore.PruneFinalized(now)) questsChanged = true;
             if (questsChanged) Features.Quests.QuestHandler.BroadcastSnapshot();
+        }
 
-            // --- custom-site production ---
-            System.Collections.Generic.HashSet<string> sitePaid = Features.Sites.SiteStore.RunRewardCycle();
+        private static void SweepSiteProduction()
+        {
+            HashSet<string> sitePaid = Features.Sites.SiteStore.RunRewardCycle();
             if (sitePaid.Count > 0)
             {
                 foreach (string u in sitePaid) PushTreasuryTo(u);
                 Features.Sites.SiteHandler.BroadcastSnapshot();
             }
+        }
 
-            // --- auctions ---
+        private static void SweepAuctions(long now)
+        {
             bool auctionsChanged = false;
             foreach (long id in Features.Auctions.AuctionStore.CollectEndedIds(now))
             {
@@ -107,8 +125,10 @@ namespace KMHServerAddon.Maintenance
                 Features.Auctions.AuctionHandler.NotifySettled(o);   // won / sold / no-bid notices
             }
             if (auctionsChanged) Features.Auctions.AuctionHandler.BroadcastSnapshot();
+        }
 
-            // --- want-to-buy board ---
+        private static void SweepWants(long now)
+        {
             bool wantsChanged = false;
             foreach (long id in Features.WantBoard.WantStore.CollectEndedIds(now))
             {
@@ -117,13 +137,15 @@ namespace KMHServerAddon.Maintenance
                 wantsChanged = true;
                 PushTreasuryTo(o.Buyer);
                 if (o.Refunded > 0)
-                    Features.Notifications.KmhMail.ToUser(o.Buyer, "neutral", "Want expired",
+                    Features.Notifications.KmhNotify.ToUser(o.Buyer, "neutral", "Want expired",
                         $"Your want expired - {Util.SilverFmt.Format(o.Refunded)} of unspent escrow was refunded to your treasury.");
             }
             if (wantsChanged) Features.WantBoard.WantHandler.BroadcastSnapshot();
+        }
 
-            // --- stale pending deposits: revert any never confirmed durably saved (disconnect/rollback dupe guard) ---
-            // Skip currently-online owners: they'll still save + confirm, so only abandoned (offline) deposits time out.
+        // Online owners will still save and confirm, so only an abandoned deposit is allowed to time out.
+        private static void RevertStalePendingDeposits()
+        {
             HashSet<string> online = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (ServerClient c in Network.ServerClients.Keys)
             {
@@ -136,11 +158,12 @@ namespace KMHServerAddon.Maintenance
                 u => online.Contains(u));
             if (revertedPending > 0)
                 ServerLog.Info($"ExpirySweeper: reverted {revertedPending} stale pending deposit(s) (unconfirmed past timeout).");
+        }
 
-            // Consume any snapshot requests an external backup routine dropped, prune old ones, refresh heartbeat.
-            Persistence.KmhSnapshot.ConsumePendingRequests();
-            Persistence.KmhSnapshot.PruneOldIfDue();
-            KmhStatusExport.WriteToDisk();
+        private static void SweepMail(long now)
+        {
+            Features.Mail.MailStore.PruneOld(now);
+            Features.Mail.MailHandler.SweepUnclaimedAttachments(now);   // never-opened attachments go home to their sender
         }
 
         private static void PushTreasuryTo(string username)

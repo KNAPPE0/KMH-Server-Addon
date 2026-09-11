@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    KMH Server Extension - Server Rules  (FLAGSHIP EXAMPLE)
+    ======================================================
+
+    A complete, useful example that demonstrates the THREE pillars of the
+    KMH server SDK in one file:
+
+      1. host.Hooks  - enforce custom server RULES (veto an action before it
+                       happens). Used on all four player boards.
+      2. host.Events - OBSERVE what happened (a completed sale) and keep a stat.
+      3. host.StorageFor - PERSIST owner-editable config + counters.
+
+    Everything is driven by rules.json in the extension's storage folder
+    (../kmh-data/extensions/Server Rules/), written with defaults on first run,
+    so an owner customises the rules without recompiling.
+
+    Build:   dotnet build -c Release
+    Deploy:  drop bin/Release/net8.0/ServerRules.dll into kmh-extensions/ next
+             to KMHServerAddon.exe, then restart the addon.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <Version>1.0.0</Version>
+    <!-- The addon already ships the SDK; don't copy it into the extension output. -->
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="KMH.Sdk.Server">
+      <!-- Owners: point this at the KMH.Sdk.Server.dll shipped alongside KMHServerAddon.exe (usually the Deploy folder).
+           It is set to the in-repo SDK build output here so the example compiles straight from a source checkout. -->
+      <HintPath>..\..\Source\KMH.Sdk.Server\bin\Release\net8.0\KMH.Sdk.Server.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>

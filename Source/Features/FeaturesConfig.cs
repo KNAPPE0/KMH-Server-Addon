@@ -4,8 +4,7 @@ using KMHServerAddon.Persistence;
 
 namespace KMHServerAddon.Features
 {
-    // Owner on/off switches for the major KMH systems (all default on). Turning one off blocks its requests server-side
-    // and shows it disabled client-side; stored data is untouched, so re-enabling restores everything.
+    // Turning a feature off blocks its requests but never touches its stored data, so re-enabling restores everything.
     internal sealed class FeaturesConfig
     {
         public int  SchemaVersion { get; set; } = 1;
@@ -17,6 +16,11 @@ namespace KMHServerAddon.Features
         public bool WantBoard   { get; set; } = true;
         public bool LivingWorld { get; set; } = true;   // world events + global quests
         public bool Standings   { get; set; } = true;   // leaderboards / records boards
+
+        // Off makes KMH a safe place to hide wealth from the storyteller; the maths itself runs client-side.
+        public bool Wealth      { get; set; } = true;
+        public bool Mail        { get; set; } = true;   // self-hosted player-to-player mail
+        public bool Chat        { get; set; } = true;   // KMH live chat channels
 
         private static FeaturesConfig _current;
         public static FeaturesConfig Current => _current ?? (_current = LoadOrDefault());
@@ -45,12 +49,14 @@ namespace KMHServerAddon.Features
                 case "wantboard":   return WantBoard;
                 case "world":       return LivingWorld;
                 case "standings":   return Standings;
+                case "wealth":      return Wealth;
+                case "mail":        return Mail;
+                case "chat":        return Chat;
                 default:            return true;
             }
         }
 
-        // Feature a request kind belongs to, or null for kinds that are never gated (handshake, notices, transport,
-        // enforcement, linked accounts, item catalog, etc.). Prefix-matched against KmhProtocol.Kind values.
+        // Null means the kind is never gated, which is why handshake and transport traffic falls through here.
         public static string FeatureForKind(string kind)
         {
             if (string.IsNullOrEmpty(kind)) return null;
@@ -63,7 +69,11 @@ namespace KMHServerAddon.Features
             if (kind.StartsWith("kmh.world"))       return "world";
             if (kind.StartsWith("kmh.player_stats")
              || kind.StartsWith("kmh.colonist")
+             || kind.StartsWith("kmh.records")      // colonist records board
+             || kind.StartsWith("kmh.archive")      // season archive
              || kind.StartsWith("kmh.season"))      return "standings";
+            if (kind.StartsWith("kmh.mail"))        return "mail";
+            if (kind.StartsWith("kmh.chat"))        return "chat";
             return null;
         }
 
@@ -79,6 +89,9 @@ namespace KMHServerAddon.Features
             if (!WantBoard)   d.Add("wantboard");
             if (!LivingWorld) d.Add("world");
             if (!Standings)   d.Add("standings");
+            if (!Wealth)      d.Add("wealth");
+            if (!Mail)        d.Add("mail");
+            if (!Chat)        d.Add("chat");
             return d;
         }
     }

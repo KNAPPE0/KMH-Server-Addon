@@ -1,10 +1,9 @@
-using System;
+﻿using System;
 using KMHServerAddon.Diagnostics;
 
 namespace KMHServerAddon.Maintenance
 {
-    // Live admin player-cleanup for cheat/reset/duper cases. Mutates in-memory stores (JSON edits are ignored until a
-    // restart), backs up before any confirm, refunds/holds escrow recovery-safe, writes ledger entries, and repushes.
+    // Mutates the in-memory stores, because a hand-edited JSON file is ignored until a restart.
     internal static class KmhPlayerCleanup
     {
         public static void WipeEconomy(string user, bool commit, Action<string> reply)
@@ -12,7 +11,10 @@ namespace KMHServerAddon.Maintenance
             if (Bad(user, "wipe-economy", reply)) return;
             Head("wipe-economy", user, commit, reply);
             if (commit && !Backup($"wipe-economy-{user}", reply)) return;
+            if (!Open(user, commit, Features.Economy.KmhResetScope.Economy, reply)) return;
+            OwnershipWork(user, commit, reply, wholePlayer: false);
             EconomyWork(user, commit, reply);
+            Close(user, commit);
             Finish(user, commit, reply, RepushEconomy);
         }
 
@@ -21,9 +23,26 @@ namespace KMHServerAddon.Maintenance
             if (Bad(user, "wipe-player", reply)) return;
             Head("wipe-player", user, commit, reply);
             if (commit && !Backup($"wipe-player-{user}", reply)) return;
+            if (!Open(user, commit, Features.Economy.KmhResetScope.Player, reply)) return;
+            OwnershipWork(user, commit, reply, wholePlayer: true);
             EconomyWork(user, commit, reply);
             NonEconomyWork(user, commit, reply);
+            Close(user, commit);
             Finish(user, commit, reply, RepushAll);
+        }
+
+        // Intent on disk before anything is destroyed, the admission barrier held, and the generation advanced so pre-wipe ops cannot apply.
+        private static bool Open(string user, bool commit, Features.Economy.KmhResetScope scope, Action<string> reply)
+        {
+            if (!commit) return true;
+            if (Features.Economy.KmhEconomyReset.Begin(user, "", scope, out string why)) return true;
+            reply($"  [ABORT] could not record the cleanup ({why}) - no changes made.");
+            return false;
+        }
+
+        private static void Close(string user, bool commit)
+        {
+            if (commit) Features.Economy.KmhEconomyReset.Finish(user);
         }
 
         // Safe one-command rollback/reset-abuse cleanup: backup -> audit -> wipe economy -> rebuild -> verify -> repush.
@@ -33,7 +52,10 @@ namespace KMHServerAddon.Maintenance
             Head("reset-cleanup", user, commit, reply);
             if (commit && !Backup($"reset-cleanup-{user}", reply)) return;
             AdminCommands.KmhCleanupCommands.AuditPlayer(new[] { "audit-player", user }, reply);
+            if (!Open(user, commit, Features.Economy.KmhResetScope.Economy, reply)) return;
+            OwnershipWork(user, commit, reply, wholePlayer: false);
             EconomyWork(user, commit, reply);
+            Close(user, commit);
             if (commit) { Features.PlayerStats.PlayerStatsStore.LoadFromDisk(); Features.PlayerStats.PlayerStatsHandler.BroadcastSnapshot(); reply("  standings rebuilt."); }
             Finish(user, commit, reply, RepushAll);
         }
@@ -87,7 +109,6 @@ namespace KMHServerAddon.Maintenance
             reply("Re-pushed Marketplace/Auction/Want/Sites/Standings/Reputation/World/LinkedAccounts snapshots. (Treasury is per-user - refreshes on the player's next action.)");
         }
 
-        // ---- shared work (no backup/repush; the public entry points own those) ----
 
         private static void EconomyWork(string user, bool commit, Action<string> reply)
         {
@@ -114,6 +135,22 @@ namespace KMHServerAddon.Maintenance
                 Features.Recovery.RecoveryStore.ClearUser(user);
             }
 
+            // Escrow sits outside the treasury, so a wipe that skipped it could be recovered by cancelling afterwards.
+            if (commit)
+            {
+                (int q, int m, int roads, long roadSilver) = Features.Economy.KmhEscrowPurge.BurnAll(user);
+                reply($"  quest bounty escrow: {q} quest(s) removed (escrow burned)");
+                reply($"  mail attachment escrow: {m} message(s) cleared (escrow burned)");
+                reply($"  roadworks escrow: {roads} project(s) dropped ({Util.SilverFmt.Format(roadSilver)} reserved silver burned; completed roads kept)");
+            }
+            else
+            {
+                (int roads, long roadSilver) = Features.Roadworks.RoadworksStore.PurgeOwner(user, dryRun: true);
+                reply($"  quest bounty escrow: {(Features.Economy.KmhEscrowPurge.HasQuestEscrow(user) ? "present - WOULD be removed" : "none")}");
+                reply($"  mail attachment escrow: {(Features.Economy.KmhEscrowPurge.HasMailEscrow(user) ? "present - WOULD be cleared" : "none")}");
+                reply($"  roadworks escrow: {(roads > 0 ? $"{roads} project(s) - WOULD drop ({Util.SilverFmt.Format(roadSilver)} reserved silver burned)" : "none")}");
+            }
+
             // Treasury LAST: escrow above refunds into it first, so this single removal captures + logs everything.
             (long silver, int stacks, int pend) = Features.Treasury.TreasuryStore.PersonalSummary(user);
             if (commit)
@@ -125,10 +162,34 @@ namespace KMHServerAddon.Maintenance
             else reply($"  treasury: {Util.SilverFmt.Format(silver)} silver + {stacks} item stack(s) + {pend} pending WOULD be removed");
         }
 
+        // The pieces no per-store purge covers; inside the durable operation so a crash resumes and no refund resurrects them.
+        private static void OwnershipWork(string user, bool commit, Action<string> reply, bool wholePlayer)
+        {
+            if (!commit)
+            {
+                reply($"  pending transactions: {Transactions.KmhTransactionRepository.PendingCountFor(user)} WOULD be closed (no refund - the value is being destroyed)");
+                reply($"  unacked deliveries: {Features.Delivery.DeliveryStore.OwedFor(user).Count} WOULD be dropped");
+                if (wholePlayer) reply($"  mailbox: {Features.Mail.MailStore.CountFor(user)} message(s) WOULD be removed (others' attachments returned to them)");
+                return;
+            }
+            reply($"  pending transactions: {Transactions.KmhTransactionRepository.AbortAllFor(user)} closed (no refund - the value is being destroyed)");
+            reply($"  unacked deliveries: {Features.Delivery.DeliveryStore.PurgeUser(user)} dropped");
+            if (wholePlayer)
+            {
+                (int removed, int burned, int returned) = Features.Mail.MailStore.PurgeUser(user);
+                reply($"  mailbox: {removed} message(s) removed ({burned} own attachment(s) burned, {returned} returned to their senders)");
+            }
+        }
+
         private static void NonEconomyWork(string user, bool commit, Action<string> reply)
         {
             string g = Features.Guilds.GuildStore.CurrentGuildOf(user);
-            reply($"  guild: {(string.IsNullOrEmpty(g) ? "(none)" : g)}{(commit && !string.IsNullOrEmpty(g) && Features.Guilds.GuildStore.Leave(user, out _) ? " - removed" : "")}");
+            string guild = string.IsNullOrEmpty(g) ? "(none)" : g;
+            // Said out loud, because Verify only checks economy and site data and would miss a failed leave.
+            if (commit && !string.IsNullOrEmpty(g))
+                guild += Features.Guilds.GuildStore.Leave(user, out string leaveErr)
+                       ? " - removed" : $" - [WARN] leave failed ({leaveErr}), still a member";
+            reply($"  guild: {guild}");
             (int sites, int pawns) = Features.Sites.SiteStore.PurgeOwner(user, dryRun: !commit);
             reply($"  sites owned: {sites}{(commit ? " removed" : "")} ({pawns} pawn-worker assignment(s); client pawns NOT deleted)");
             // Also drop them as a worker at OTHER owners' sites - their pawns no longer exist, so they must not keep producing.
@@ -136,12 +197,12 @@ namespace KMHServerAddon.Maintenance
             reply($"  worker slots at other sites: {foreignWorker}{(commit ? " dropped" : " WOULD drop")} (those sites stay; client recalls the pawn)");
             bool stats = commit && Features.PlayerStats.PlayerStatsStore.RemoveUser(user);
             bool rep = commit && Features.Reputation.ReputationStore.RemoveUser(user);
-            int mail = commit ? Features.Notifications.NotificationStore.ClearUser(user) : Features.Notifications.NotificationStore.PeekForUser(user).Count;
+            // Notifications are the notice queue, not Player Mail; the mailbox is cleared by OwnershipWork.
+            int notices = commit ? Features.Notifications.NotificationStore.ClearUser(user) : Features.Notifications.NotificationStore.PeekForUser(user).Count;
             if (commit) Features.LinkedAccounts.LinkedAccountsStore.Unlink(user);
-            reply($"  standings {(stats ? "removed" : commit ? "none" : "WOULD remove")} · reputation {(rep ? "removed" : commit ? "none" : "WOULD remove")} · mail {mail}{(commit ? " cleared" : "")} · Discord link {(commit ? "removed" : "WOULD remove")}");
+            reply($"  standings {(stats ? "removed" : commit ? "none" : "WOULD remove")} · reputation {(rep ? "removed" : commit ? "none" : "WOULD remove")} · notifications {notices}{(commit ? " cleared" : "")} · Discord link {(commit ? "removed" : "WOULD remove")}");
         }
 
-        // ---- helpers ----
 
         private static bool Bad(string user, string cmd, Action<string> reply)
         {

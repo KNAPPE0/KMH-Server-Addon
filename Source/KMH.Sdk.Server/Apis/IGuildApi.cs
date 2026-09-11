@@ -4,11 +4,8 @@ using KMH.Sdk.Server.Records;
 namespace KMH.Sdk.Server.Apis
 {
     /// <summary>
-    /// Read AND mutate the KMH guild registry. Mutations here are
-    /// server-authoritative and SYSTEM-level - they are not gated by an
-    /// acting member's in-guild rank (your extension is trusted server
-    /// code). For player-driven, rank-gated changes, players use the
-    /// in-game GuildHall dialog and /kmh guild chat commands.
+    /// Read and mutate the guild registry. Mutations are system-level: they are not gated by an acting
+    /// member's in-guild rank, so an extension can do what no player could.
     /// </summary>
     public interface IGuildApi
     {
@@ -21,18 +18,14 @@ namespace KMH.Sdk.Server.Apis
         /// <summary>True if two guild names are mutually allied.</summary>
         bool AreAllied(string guildA, string guildB);
 
-        // -- system-level mutations --
-
         /// <summary>Create an empty guild. Returns false if the name is blank or already taken.</summary>
         bool CreateGuild(string name);
 
-        /// <summary>Add a player to a guild at the given rank ("member"/"officer"/"moderator"/"admin"). Returns false if the guild is missing or the player is already in a guild.</summary>
+        /// <summary>Add a player at the given rank ("member"/"officer"/"moderator"/"admin"). False if the guild is missing or the player is already in one.</summary>
         bool AddMember(string username, string guildName, string rank = "member");
 
         /// <summary>Set a guild's MOTD. Returns false if the guild doesn't exist.</summary>
         bool SetMotd(string guildName, string motd);
-
-        // -- guild treasury (the shared guild vault, keyed by guild name) --
 
         /// <summary>Current silver in a guild's vault. 0 if the guild has no vault yet.</summary>
         long GetGuildSilver(string guildName);

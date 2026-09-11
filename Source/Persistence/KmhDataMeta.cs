@@ -5,7 +5,6 @@ using KMHServerAddon.Diagnostics;
 
 namespace KMHServerAddon.Persistence
 {
-    // Data-format guard for KMH-Data: additive releases stay format 1, future reshapes backup first, downgrades refuse.
     internal sealed class KmhDataMeta
     {
         // Bump only for incompatible data rewrites, and add the matching RunMigrations() step.
@@ -14,26 +13,27 @@ namespace KMHServerAddon.Persistence
         public int    DataFormatVersion { get; set; } = CurrentFormat;
         public string LastBuildVersion  { get; set; } = "";
         public string LastRunUtc        { get; set; } = "";
-        // Stable per-install id, minted once and kept, so external tooling can tell KMH instances apart on one host.
+        // Minted once and never reissued, so external tooling can tell two KMH instances on one host apart.
         public string ServerId          { get; set; } = "";
-        // Highest recommended-defaults revision applied (see KmhDefaultsUpgrade). 0 = pre-1.2.0 file.
-        public int    DefaultsRevision  { get; set; } = 0;
+        public int    DefaultsRevision  { get; set; } = 0;   // 0 = pre-1.2.0 file
+        // Separate from DataFormatVersion: config can migrate without rewriting stored data.
+        public int    ConfigSchema      { get; set; } = 0;
 
-        // Build that last ran, captured before the stamp is refreshed so boot can detect an upgrade. Blank on a fresh server.
+        // Captured before the stamp is refreshed, or boot cannot tell that this build is an upgrade.
         public static string PreviousBuildVersion { get; private set; } = "";
 
-        // This install's stable server id (set during ReconcileOnBoot).
         public static string InstanceId { get; private set; } = "";
 
-        // Defaults revision loaded from disk; StampDefaultsRevision raises it after an upgrade pass.
+        // The offline suite never runs ReconcileOnBoot, so identity-keyed code would otherwise run under a blank namespace production never has.
+        internal static void SetInstanceIdForTest(string id) => InstanceId = id ?? "";
+
         public static int  AppliedDefaultsRevision { get; private set; }
 
-        // True when this boot found neither a meta stamp nor any irreplaceable data (brand-new server).
         public static bool IsFreshInstall { get; private set; }
 
         private static string _bootBuild = "";
 
-        // Called once on boot, before stores load. Returns a human summary line for the log. Never throws.
+        // Runs before any store loads, and never throws: a boot must not be blocked by its own version stamp.
         public static string ReconcileOnBoot()
         {
             try
@@ -43,13 +43,13 @@ namespace KMHServerAddon.Persistence
                 bool   had   = JsonFileStore.TryLoad(KmhDataPaths.MetaFile, out KmhDataMeta meta) && meta != null;
                 if (had) PreviousBuildVersion = meta.LastBuildVersion ?? "";
                 AppliedDefaultsRevision = had ? meta.DefaultsRevision : 0;
+                AppliedConfigSchema     = had ? meta.ConfigSchema : 0;
 
-                // Keep the existing server id, or mint one now and preserve it on every future write.
                 InstanceId = (had && !string.IsNullOrEmpty(meta.ServerId)) ? meta.ServerId : Guid.NewGuid().ToString("N");
 
                 if (!had)
                 {
-                    // No stamp means new server or pre-stamp data; adopt it as current since earlier builds were additive-compatible.
+                    // No stamp means a new server or pre-stamp data, and every earlier build was additive-compatible.
                     bool hasData = HasExistingData();
                     IsFreshInstall = !hasData;
                     Write(build);
@@ -60,7 +60,7 @@ namespace KMHServerAddon.Persistence
 
                 if (meta.DataFormatVersion > CurrentFormat)
                 {
-                    // Newer KMH data detected; refuse downgrade to avoid corrupting data and allow re-upgrade recovery.
+                    // A one-way door: an older binary writing this data would silently drop what it cannot represent.
                     ServerLog.Error(
                         $"Data format: KMH-Data is format v{meta.DataFormatVersion} but this build only understands v{CurrentFormat}. " +
                         "You are running an OLDER KMH than the one that wrote this data. KMH will NOT modify it - " +
@@ -82,7 +82,6 @@ namespace KMHServerAddon.Persistence
                     return $"Data format: migrated v{from} -> v{CurrentFormat} (backed up first).";
                 }
 
-                // Same format - just refresh the run markers.
                 Write(build);
                 return $"Data format: v{CurrentFormat}, last run by build {(string.IsNullOrEmpty(meta.LastBuildVersion) ? "?" : meta.LastBuildVersion)}.";
             }
@@ -92,17 +91,26 @@ namespace KMHServerAddon.Persistence
             }
         }
 
-        // Step data forward by format; empty for now until an incompatible migration ships.
+        // Empty until an incompatible migration ships; every change so far has been additive.
         private static void RunMigrations(int from, int to)
         {
-            // if (from < 2) { ...reshape...; from = 2; }
         }
 
-        // Raise the applied-defaults marker (never lowers) so the one-shot upgrade doesn't re-run every boot.
+        // Never lowers, or the one-shot upgrade re-runs every boot and overwrites what the owner changed since.
         public static void StampDefaultsRevision(int revision)
         {
             if (revision <= AppliedDefaultsRevision) return;
             AppliedDefaultsRevision = revision;
+            Write(_bootBuild);
+        }
+
+        // Raised only once KmhConfigMigration's steps succeed, so a failed run repeats rather than being skipped.
+        public static int AppliedConfigSchema { get; private set; }
+
+        public static void StampConfigSchema(int schema)
+        {
+            if (schema <= AppliedConfigSchema) return;
+            AppliedConfigSchema = schema;
             Write(_bootBuild);
         }
 
@@ -117,6 +125,7 @@ namespace KMHServerAddon.Persistence
                     LastRunUtc        = DateTime.UtcNow.ToString("o"),
                     ServerId          = InstanceId,
                     DefaultsRevision  = AppliedDefaultsRevision,
+                    ConfigSchema      = AppliedConfigSchema,
                 });
             }
             catch { /* stamp is advisory; a failed write just re-adopts next boot */ }

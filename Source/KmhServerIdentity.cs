@@ -1,18 +1,20 @@
-namespace KMHServerAddon
+﻿namespace KMHServerAddon
 {
-    // Single source of truth for this instance's identity: a stable Id (from KmhDataMeta) + a friendly Name
-    // (Config/Maintenance.json ServerName). Surfaced in status.json, the boot log, Discord, and the handshake so
-    // multiple KMH servers on one host are easy to tell apart.
     internal static class KmhServerIdentity
     {
         public static string Id => Persistence.KmhDataMeta.InstanceId ?? "";
 
+        // The owner's KMH name when set, otherwise RWT's own. An explicit value always wins and is never rewritten.
         public static string Name
         {
             get
             {
                 string n = Maintenance.MaintenanceConfig.Current?.ServerName;
-                return string.IsNullOrWhiteSpace(n) ? "KMH Server" : n.Trim();
+                if (!string.IsNullOrWhiteSpace(n)) return n.Trim();
+
+                string rwt = null;
+                try { rwt = Master.ServerConfig?.Name; } catch { }
+                return string.IsNullOrWhiteSpace(rwt) ? "KMH Server" : rwt.Trim();
             }
         }
     }

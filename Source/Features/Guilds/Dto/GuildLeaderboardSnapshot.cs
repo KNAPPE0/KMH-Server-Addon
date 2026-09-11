@@ -3,8 +3,7 @@ using Newtonsoft.Json;
 
 namespace KMHServerAddon.Features.Guilds.Dto
 {
-    // Cross-guild leaderboard wire DTO; JSON property names must mirror the patch mod's copy exactly or the dialog
-    // renders broken data. Adding fields is backward-compatible (old clients default unknown properties).
+    // JsonProperty names must mirror the patch mod's copy exactly, or the dialog renders broken data.
     public class GuildLeaderboardSnapshot
     {
         [JsonProperty("guilds")]

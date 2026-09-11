@@ -1,14 +1,9 @@
-using KMHServerAddon.Diagnostics;
+﻿using KMHServerAddon.Diagnostics;
 using KMHServerAddon.SubProtocol;
 
 namespace KMHServerAddon.Features.LinkedAccounts
 {
-    // Server-side handler for kmh.linked_accounts.* - counterpart to
-    // KMHPatch.Features.LinkedAccounts.LinkedAccountsHandler
-    //
-    // Only the request kind is wire-driven in v1. Future link/unlink mutations (driven by a Discord bot bridge or
-    // admin commands) call LinkedAccountsStore.SetLink/Unlink directly, then invoke BroadcastSnapshot to push the
-    // change to every connected patch-mod client
+    // Link and unlink are deliberately not wire-driven - only the Discord bridge and admin commands mutate the store.
     internal static class LinkedAccountsHandler
     {
         public static void Register()
@@ -22,7 +17,6 @@ namespace KMHServerAddon.Features.LinkedAccounts
             SendSnapshotTo(client);
         }
 
-        // Mint a one-time Discord link code and return it, so the client can show a button instead of /kmh link.
         private static void OnLinkRequest(ServerClient client, KmhEnvelope env)
         {
             string username = client?.GetData<UserFile>()?.Username;
@@ -37,8 +31,6 @@ namespace KMHServerAddon.Features.LinkedAccounts
             KmhRouter.SendTo(client, KmhProtocol.Kind.LinkCode, new { code = code, ttl_minutes = mins });
         }
 
-        // Send the snapshot to a specific client. Used on request + when a freshly-handshaken client first
-        // connects
         public static void SendSnapshotTo(ServerClient client)
         {
             if (client == null) return;
@@ -46,7 +38,6 @@ namespace KMHServerAddon.Features.LinkedAccounts
             KmhRouter.SendTo(client, KmhProtocol.Kind.LinkedAccountsSnapshot, snapshot);
         }
 
-        // Push to every verified client. Call from SetLink / Unlink wrappers in future link-management features
         public static void BroadcastSnapshot()
         {
             Dto.LinkedAccountsSnapshot snapshot = LinkedAccountsStore.BuildSnapshot();

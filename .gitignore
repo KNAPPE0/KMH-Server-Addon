@@ -45,5 +45,8 @@ KMH-Data-Backups/
 kmh-extensions/
 .rwt-runtime/
 
+# get-media-tools downloads beside itself by default, so running it in place drops ~270 MB of ffmpeg here.
+Templates/media-tools/Tools/
+
 Thumbs.db
 .DS_Store

@@ -9,13 +9,11 @@ using KMHServerAddon.Features.LinkedAccounts;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // !kmh-wtb command family - a linked player's Want-To-Buy board. Entries are hard-capped per user (anti-bloat).
     internal static class DiscordWtbCommands
     {
-        // Max WTB entries per user. 25 = Discord embed field cap, so we never have to truncate when rendering.
+        // 25 is Discord's embed field cap, so a full board never has to be truncated when rendered.
         private const int MaxEntriesPerUser = 25;
-        // Sanity bounds for input - anything beyond these is almost certainly a fat-finger and we'd rather reject
-        // than carry bad data through the persistence layer
+
         private const int MaxQty            = 10_000;
         private const int MaxUnitPrice      = 1_000_000;
 
@@ -97,12 +95,9 @@ namespace KMHServerAddon.Features.Discord
             }
         }
 
-        // -- add --
-
+        // The indexes below follow the shape: !kmh-wtb add <item words...> <qty> <price>
         private static async Task HandleAdd(SocketMessage raw, string caller, string[] parts)
         {
-            // Need at least: !kmh-wtb add <item-word(s)> <qty> <price> = parts[0] cmd, parts[1] "add",
-            // parts[2..n-2] item, parts[n-2] qty, parts[n-1] price
             if (parts.Length < 5
              || !int.TryParse(parts[parts.Length - 2], out int qty)   || qty   <= 0
              || !int.TryParse(parts[parts.Length - 1], out int price) || price <= 0)
@@ -126,8 +121,6 @@ namespace KMHServerAddon.Features.Discord
             }
             string itemRaw = nameSb.ToString().Replace('_', ' ').Trim();
 
-            // Friendly-name resolution via the cache. Same ambiguous- candidate-list pattern !kmh-sell uses so the
-            // WTB UX matches
             string defName = ItemLabelCache.ResolveDefNameByQuery(itemRaw, out List<string> candidates);
             if (defName == null)
             {
@@ -161,8 +154,6 @@ namespace KMHServerAddon.Features.Discord
                 .ConfigureAwait(false);
         }
 
-        // -- remove --
-
         private static async Task HandleRemove(SocketMessage raw, string caller, string[] parts)
         {
             if (parts.Length < 3)
@@ -188,16 +179,12 @@ namespace KMHServerAddon.Features.Discord
                 .ConfigureAwait(false);
         }
 
-        // -- list --
-
         private static async Task HandleList(SocketMessage raw, string caller)
         {
             DiscordUserState.GetWtb(caller, out _, out _, out string tagline, out List<DiscordUserState.WtbEntry> entries);
             Embed eb = DiscordWtbBuilder.Build(caller, tagline, entries);
             await raw.Channel.SendMessageAsync(embed: eb).ConfigureAwait(false);
         }
-
-        // -- clear --
 
         private static async Task HandleClear(SocketMessage raw, string caller)
         {
@@ -209,13 +196,11 @@ namespace KMHServerAddon.Features.Discord
                 .ConfigureAwait(false);
         }
 
-        // -- update (post/refresh published embed) --
-
         private static async Task HandleUpdate(SocketMessage raw, string caller, ulong channel)
         {
             DiscordUserState.GetWtb(caller, out ulong prevChannel, out ulong prevMessage, out string tagline, out List<DiscordUserState.WtbEntry> entries);
 
-            // Channel changed (admin reconfigured) - drop old id so we post fresh in the new channel
+            // The old id belongs to a channel we can no longer edit, so it has to be dropped rather than reused.
             if (prevChannel != 0 && prevChannel != channel) prevMessage = 0;
 
             Embed embed = DiscordWtbBuilder.Build(caller, tagline, entries);
@@ -239,8 +224,6 @@ namespace KMHServerAddon.Features.Discord
                 .ConfigureAwait(false);
         }
 
-        // -- delete --
-
         private static async Task HandleDelete(SocketMessage raw, string caller)
         {
             DiscordUserState.GetWtb(caller, out ulong prevChannel, out ulong prevMessage, out _, out _);
@@ -257,8 +240,6 @@ namespace KMHServerAddon.Features.Discord
                 ok ? "WTB board removed." : "Couldn't find the message - state cleared regardless.")
                 .ConfigureAwait(false);
         }
-
-        // -- tagline --
 
         private static async Task HandleTagline(SocketMessage raw, string caller, string[] parts)
         {
@@ -294,26 +275,11 @@ namespace KMHServerAddon.Features.Discord
                 .ConfigureAwait(false);
         }
 
-        // -- helpers --
-
+        // Id only: a display-name fallback would let someone act as any player whose name they copy.
         private static string ResolveLinkedUsername(SocketMessage raw)
         {
             if (raw?.Author == null) return null;
-            ulong  id      = raw.Author.Id;
-            string display = ResolveDiscordDisplay(raw.Author);
-            string byId    = LinkedAccountsStore.FindUsernameByDiscordId(id);
-            if (!string.IsNullOrEmpty(byId)) return byId;
-            return string.IsNullOrEmpty(display) ? null : LinkedAccountsStore.FindUsernameByDiscord(display);
-        }
-
-        private static string ResolveDiscordDisplay(IUser user)
-        {
-            string g = user?.GlobalName;
-            if (!string.IsNullOrEmpty(g)) return g;
-            string u = user?.Username;
-            string d = user?.Discriminator;
-            if (!string.IsNullOrEmpty(d) && d != "0" && d != "0000") return $"{u}#{d}";
-            return u ?? "";
+            return LinkedAccountsStore.FindUsernameByDiscordId(raw.Author.Id);
         }
     }
 }

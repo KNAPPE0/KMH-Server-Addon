@@ -10,7 +10,7 @@ using KMHServerAddon.Features.Marketplace.Dto;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // !kmh-showcase command family - a linked player's marketplace embed, refreshed in place (not re-posted).
+    // The embed is edited in place rather than re-posted, so a showcase does not spam the channel.
     internal static class DiscordShowcaseCommands
     {
         public static async Task<bool> TryHandleAsync(SocketMessage raw, string cmd, string[] parts)
@@ -77,8 +77,7 @@ namespace KMHServerAddon.Features.Discord
 
         private static async Task HandleUpdate(SocketMessage raw, string caller, ulong showcaseChannel)
         {
-            // Gather caller's listings (caller-scoped snapshot already includes their own posts regardless of
-            // visibility flag)
+            // Caller-scoped, so their own non-public listings are already included.
             MarketplaceSnapshot snap = MarketplaceStore.BuildSnapshot(caller);
             List<MarketplaceListing> mine = new List<MarketplaceListing>();
             if (snap?.Listings != null)
@@ -92,8 +91,7 @@ namespace KMHServerAddon.Features.Discord
 
             DiscordUserState.GetShowcase(caller, out ulong prevChannel, out ulong prevMessage, out string tagline);
 
-            // Channel changed since last post (admin reconfigured) - drop the old message id so we post fresh in
-            // the new channel instead of editing a message we can't see.
+            // The old id belongs to a channel we can no longer edit, so it has to be dropped rather than reused.
             if (prevChannel != 0 && prevChannel != showcaseChannel)
             {
                 prevMessage = 0;
@@ -170,8 +168,6 @@ namespace KMHServerAddon.Features.Discord
                 .ConfigureAwait(false);
         }
 
-        // -- helpers --
-
         private static string JoinFrom(string[] parts, int startIndex)
         {
             if (parts == null || startIndex >= parts.Length) return "";
@@ -184,26 +180,11 @@ namespace KMHServerAddon.Features.Discord
             return sb.ToString();
         }
 
-        // Same id-preferred lookup the other command files use - survives Discord rename, falls back to display
-        // lookup for legacy links
+        // Id only: a display-name fallback would let someone act as any player whose name they copy.
         private static string ResolveLinkedUsername(SocketMessage raw)
         {
             if (raw?.Author == null) return null;
-            ulong  id      = raw.Author.Id;
-            string display = ResolveDiscordDisplay(raw.Author);
-            string byId    = LinkedAccountsStore.FindUsernameByDiscordId(id);
-            if (!string.IsNullOrEmpty(byId)) return byId;
-            return string.IsNullOrEmpty(display) ? null : LinkedAccountsStore.FindUsernameByDiscord(display);
-        }
-
-        private static string ResolveDiscordDisplay(IUser user)
-        {
-            string g = user?.GlobalName;
-            if (!string.IsNullOrEmpty(g)) return g;
-            string u = user?.Username;
-            string d = user?.Discriminator;
-            if (!string.IsNullOrEmpty(d) && d != "0" && d != "0000") return $"{u}#{d}";
-            return u ?? "";
+            return LinkedAccountsStore.FindUsernameByDiscordId(raw.Author.Id);
         }
     }
 }

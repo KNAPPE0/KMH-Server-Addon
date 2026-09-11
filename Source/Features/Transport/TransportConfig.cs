@@ -3,44 +3,41 @@ using KMHServerAddon.Persistence;
 
 namespace KMHServerAddon.Features.Transport
 {
-    // KMH API transport config: on by default since v1.2.0 - public bind is only OK because auth/caps/throttle are required.
+    // A public bind is only safe because auth, the caps and the throttle are all required alongside it.
     internal sealed class TransportConfig
     {
         public int    SchemaVersion           { get; set; } = 1;
 
-        // Master switch for the KMH API listener. Off = chat transport only (no port opened).
+        // Off opens no port at all and leaves KMH on the chat transport.
         public bool   EnableKmhApiTransport   { get; set; } = true;
 
-        // Port the KMH API listens on when enabled. Distinct from RWT's own port. Forward this for remote KMH.
+        // Distinct from RWT's own port, and the one to forward for remote KMH.
         public int    KmhApiPort              { get; set; } = 5099;
 
-        // Public host clients should dial for the API when it differs from the RWT address (NAT/proxy/split hosts).
-        // Empty = clients dial the RWT server IP they already connected to.
+        // Empty means clients dial the RWT server IP they already connected to.
         public string PublicApiHost           { get; set; } = "";
 
-        // Interface to bind. "0.0.0.0" = accept remote players (auth still required); "127.0.0.1" = local only.
+        // "0.0.0.0" accepts remote players and auth is still required; "127.0.0.1" is local only.
         public string BindAddress             { get; set; } = "0.0.0.0";
 
-        // Require handshake tokens / verified-session auth. Keep ON - off lets any socket claim any player.
+        // Off lets any socket claim any player.
         public bool   RequireKmhApiAuth       { get; set; } = true;
 
-        // If the KMH API is unreachable, let clients fall back to the RWT-chat transport so KMH still works.
+        // Keeps KMH working when the API port is unreachable.
         public bool   AllowChatTransportFallback { get; set; } = true;
 
-        // Verbose KMH logging (ServerLog.Debug / ServerLog.Protocol), incl. IPs in transport diagnostics. Off by default.
+        // Off by default because transport diagnostics include client IPs.
         public bool   DebugLogging            { get; set; } = false;
 
-        // --- limits / DoS guards (tunable; sane defaults) ---
-        public int    MaxConnections          { get; set; } = 200;   // total in-flight sockets
-        public int    MaxConnectionsPerIp     { get; set; } = 6;     // concurrent sockets per source IP
-        public int    AuthTimeoutSeconds      { get; set; } = 10;    // drop a socket that doesn't finish the hello in time
-        public int    IdleTimeoutSeconds      { get; set; } = 45;    // drop a socket silent this long (3x the 15s heartbeat)
-        public int    MaxFrameKb              { get; set; } = 64;    // reject frames larger than this
-        public int    FailedAuthPerIp         { get; set; } = 10;    // failed auths from one IP in the window before a block
+        public int    MaxConnections          { get; set; } = 200;
+        public int    MaxConnectionsPerIp     { get; set; } = 6;
+        public int    AuthTimeoutSeconds      { get; set; } = 10;    // a socket that never finishes the hello
+        public int    IdleTimeoutSeconds      { get; set; } = 45;    // 3x the 15s heartbeat
+        public int    MaxFrameKb              { get; set; } = 64;
+        public int    FailedAuthPerIp         { get; set; } = 10;
         public int    FailedAuthWindowSeconds { get; set; } = 60;
-        public int    FailedAuthBlockSeconds  { get; set; } = 300;   // how long a tripped IP stays blocked
+        public int    FailedAuthBlockSeconds  { get; set; } = 300;
 
-        // True if the bind reaches beyond this machine (anything not loopback) - used for the public-facing warning.
         [Newtonsoft.Json.JsonIgnore]
         public bool IsPublicBind
             => !(IPAddress.TryParse(BindAddress, out IPAddress a) && IPAddress.IsLoopback(a));
@@ -64,8 +61,11 @@ namespace KMHServerAddon.Features.Transport
 
         public static void Reload() => _current = LoadOrDefault();
 
-        // Test seam: runs the loader's clamping so the security harness can check it.
+        // Seam for the security harness, which has to prove a hand-edited file really is clamped.
         internal static TransportConfig ClampForTest(TransportConfig cfg) { cfg.Clamp(); return cfg; }
+
+        // Owner policy decides what a transport may carry, so proving the rule needs the setting flipped in memory.
+        internal static TransportConfig ApplyForTest(TransportConfig cfg) { TransportConfig prev = _current; _current = cfg; return prev; }
 
         private void Clamp()
         {

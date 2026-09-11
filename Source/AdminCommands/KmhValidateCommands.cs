@@ -2,12 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using KMHServerAddon.Persistence;
-using Newtonsoft.Json.Linq;
 
 namespace KMHServerAddon.AdminCommands
 {
-    // `kmh validate [configs|items|treasury|sites|recovery|all]` - read-only pre-flight so an owner can vet configs and
-    // item pools before players use them. Never mutates or deletes; only reports.
+    // Read-only throughout: an owner runs this on a live server, so nothing here may mutate or delete.
     internal static class KmhValidateCommands
     {
         public static void Run(string[] args, Action<string> reply)
@@ -28,18 +26,13 @@ namespace KMHServerAddon.AdminCommands
 
         private static void Configs(Action<string> reply)
         {
-            reply("=== Config validation ===");
-            foreach ((string name, string path) in ConfigFiles())
-            {
-                if (!File.Exists(path)) { reply($"  {name}: (not generated yet - will be created with safe defaults on boot)"); continue; }
-                try
-                {
-                    JObject o = JObject.Parse(File.ReadAllText(path));
-                    string ver = o["SchemaVersion"]?.ToString();
-                    reply($"  {name}: OK{(string.IsNullOrEmpty(ver) ? "" : $" (SchemaVersion {ver})")}");
-                }
-                catch (Exception ex) { reply($"  {name}: [WARN] parse failed - {ex.Message} (boot loads safe defaults instead)"); }
-            }
+            reply("=== Config validation (load-test) ===");
+            // Loaded into the real class rather than parsed, so a type mismatch that would fall back to defaults shows up.
+            Maintenance.KmhConfigValidation.ValidateAll(reply);
+
+            var issues = Maintenance.KmhConfigValidator.ValidateFiles();
+            if (issues.Count == 0) reply("  semantics: OK (no range or coherence issues)");
+            else foreach (var i in issues) reply($"  {i}");
             Features.Economy.EconomyConfig ec = Features.Economy.EconomyConfig.Current;
             if (string.Equals(ec.EconomyMode ?? "Standard", "Standard", StringComparison.OrdinalIgnoreCase))
                 reply("  [REVIEW] EconomyMode=Standard - remote off-map wealth; Balanced/Localized/Hardcore are safer for public servers.");
@@ -54,9 +47,9 @@ namespace KMHServerAddon.AdminCommands
             List<(string defName, string label, long value)> cat = Features.ItemLabels.ItemLabelCache.AllForCatalog();
             int total = cat.Count, allowed = 0, blocked = 0, unknown = 0;
             int[] tier = new int[5];   // allowed-by-tier, index 1..4
-            foreach ((string defName, string label, long value) in cat)
+            foreach ((string defName, string label, long _) in cat)
             {
-                Features.Sites.SiteOutputClass c = Features.Sites.SiteOutputRules.Classify(defName, label, value);
+                Features.Sites.SiteOutputClass c = Features.Sites.SiteOutputRules.Classify(defName, label);
                 if (c.IsUnknownOrSuspicious) unknown++;
                 if (c.IsAllowed) { allowed++; if (c.TierNumber >= 1 && c.TierNumber <= 4) tier[c.TierNumber]++; } else blocked++;
             }
@@ -96,7 +89,6 @@ namespace KMHServerAddon.AdminCommands
             reply($"Treasury payloads: {full} full-fidelity, {partial} partial/metadata, {legacy} legacy (pre-payload; exact state unproven).");
         }
 
-        // Guild health: vault/perks/hall are always valid data; this flags membership/orphan problems across all guilds.
         private static void Guilds(Action<string> reply)
         {
             System.Collections.Generic.List<(string Name, int MemberCount)> gs = Features.Guilds.GuildStore.ListGuilds();
@@ -117,8 +109,7 @@ namespace KMHServerAddon.AdminCommands
             reply($"Recovery queue: {held} held item/silver record(s)" + (held > 0 ? " - review with 'kmh recover list'." : "."));
         }
 
-        // Review-only skill sanity pass over the standings rosters. Skills are display-only vanity data - flagged
-        // colonists are never auto-punished or deleted; legit maxing exists (neurotrainers, books, long play, genes).
+        // Review-only: maxed skills have legitimate sources, so a flag here must never drive an automatic punishment.
         private static void Colonists(Action<string> reply)
         {
             List<Features.PlayerStats.Dto.ColonistEntry> all =
@@ -142,20 +133,6 @@ namespace KMHServerAddon.AdminCommands
             reply(flagged == 0
                 ? $"  {all.Count} colonist(s) across all colonies look normal."
                 : $"  {flagged} of {all.Count} colonist(s) flagged for review only (display-only data, never auto-punished or deleted).");
-        }
-
-        private static IEnumerable<(string, string)> ConfigFiles()
-        {
-            yield return ("Economy",     KmhDataPaths.EconomyConfigFile);
-            yield return ("Sites",       KmhDataPaths.SitesConfigFile);
-            yield return ("World",       KmhDataPaths.WorldConfigFile);
-            yield return ("Quests",      KmhDataPaths.QuestsConfigFile);
-            yield return ("Enforcement", KmhDataPaths.EnforcementConfigFile);
-            yield return ("Reputation",  KmhDataPaths.ReputationConfigFile);
-            yield return ("Transport",   KmhDataPaths.TransportConfigFile);
-            yield return ("Maintenance", KmhDataPaths.MaintenanceConfigFile);
-            yield return ("Features",    KmhDataPaths.FeaturesConfigFile);
-            yield return ("Discord",     KmhDataPaths.DiscordConfigFile);
         }
     }
 }

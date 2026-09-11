@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -18,15 +18,11 @@ namespace KMHServerAddon.Features.Discord
 
         public static bool IsEnabled => _config?.IsEnabled == true;
 
-        // Internal accessor - lets sibling Discord features (player announcer, leaderboard poster, etc.) read
-        // channel ids and command prefix without each one re-loading the config file
         internal static DiscordConfig Config => _config;
 
-        // The live socket client (guild-role sync needs it for REST user + role calls). Null until the bot connects.
+        // Null until the bot connects.
         internal static DiscordSocketClient Client => _client;
 
-        // Short human-readable status line for /kmh server status. Cheap - just reads in-memory state, no Discord
-        // round-trip
         public static string DescribeStatus()
         {
             if (_config == null || !_config.IsEnabled)
@@ -42,10 +38,10 @@ namespace KMHServerAddon.Features.Discord
             return $"configured, state: {_client.ConnectionState}";
         }
 
-        // Refresh bot status every 30s: feels live without brushing Discord's rate limits.
+        // Short enough to feel live without brushing Discord's rate limits.
         private static readonly TimeSpan PresenceRefreshInterval = TimeSpan.FromSeconds(30);
 
-        // Restart Discord bridge and reload DiscordConfig.json; safe even if the bot was never started.
+        // Safe even if the bot was never started.
         public static void Reload()
         {
             try { _presenceCts?.Cancel(); } catch { /* ignore */ }
@@ -74,13 +70,14 @@ namespace KMHServerAddon.Features.Discord
                 _config = DiscordConfig.LoadOrDefault();
                 if (!_config.IsEnabled)
                 {
-                    ServerLog.Info("Discord: bridge disabled (no Bot.Token in Config/Discord/DiscordConfig.json)");
+                    ServerLog.Info($"Discord: bridge disabled (no token - set Bot.Token in Config/Discord/DiscordConfig.json "
+                                 + $"or the {DiscordTokenSource.EnvVar} environment variable)");
                     return;
                 }
 
                 DiscordSocketConfig socketConfig = new DiscordSocketConfig
                 {
-                    // Requires Discord MessageContent intent, or message.Content is empty and text commands won't be seen.
+                    // MessageContent is required, or message.Content arrives empty and text commands never match.
                     GatewayIntents = GatewayIntents.Guilds
                                           | GatewayIntents.GuildMessages
                                           | GatewayIntents.DirectMessages
@@ -94,14 +91,17 @@ namespace KMHServerAddon.Features.Discord
                 _client.Log             += OnDiscordLog;
                 _client.Ready           += OnReady;
                 _client.MessageReceived    += OnMessage;
+                _client.MessageDeleted     += OnMessageDeleted;
+                _client.MessageUpdated     += OnMessageUpdated;
                 _client.ButtonExecuted     += DiscordBuyButton.OnInteraction;
                 _client.SlashCommandExecuted += DiscordSlashCommands.Handle;
 
-                // Fire-and-forget Discord login; startup failures log and KMH keeps running without the bridge.
+                // Fire-and-forget, so a Discord outage never stops the server from starting.
                 Task.Run(async () =>
                 {
                     try
                     {
+                        ServerLog.Info($"Discord: token source: {DiscordTokenSource.Describe(_config.Bot?.Token)}");
                         await _client.LoginAsync(TokenType.Bot, _config.BotToken).ConfigureAwait(false);
                         await _client.StartAsync().ConfigureAwait(false);
                     }
@@ -146,26 +146,33 @@ namespace KMHServerAddon.Features.Discord
             ulong  id  = _client?.CurrentUser?.Id ?? 0;
             ServerLog.Info($"Discord: connected as {who} (id {id})");
 
-            // Restart the presence updater on every Ready - Discord may re-fire Ready after reconnects, and we want
-            // a single live updater per connected session
+            // Ready re-fires on reconnect, so the previous updater is cancelled to keep one per session.
             try { _presenceCts?.Cancel(); } catch { /* ignore */ }
             _presenceCts = new CancellationTokenSource();
             Task.Run(() => PresenceLoop(_presenceCts.Token));
 
-            // (Re-)register the /kmh slash command tree now that the guild cache is populated. Fire-and-forget -
-            // failure logs and the legacy !kmh-* commands still work
+            // Registered here because the guild cache is only populated once Ready fires.
             if (_config?.Bot?.UseSlashCommands == true)
                 _ = DiscordSlashCommands.RegisterAsync(_client, _config);
 
-            // One-time "server online" announcement (guards against Ready re-firing on reconnects)
             DiscordEventPublisher.OnBridgeReady();
             DiscordGuildRoleSync.OnBridgeReady();
+
+            // Stated at boot because a shared channel is legal but looks like a misconfiguration.
+            ulong rwtCh = _config?.ChatBridgeChannelId ?? 0;
+            ulong kmhCh = _config?.KmhChatChannelId ?? 0;
+            ServerLog.Info($"Discord: chat wiring - RWT bridge channel {(rwtCh == 0 ? "unset" : rwtCh.ToString())}, "
+                         + $"KMH chat channel {(kmhCh == 0 ? "unset" : kmhCh.ToString())}, "
+                         + $"KMH inbound {(KmhChatDiscordBridge.InboundEnabled ? "ON" : "OFF")}, "
+                         + $"KMH outbound {(KmhChatDiscordBridge.OutboundEnabled ? "ON" : "OFF")}.");
+            if (rwtCh != 0 && rwtCh == kmhCh)
+                ServerLog.Info("Discord: the RWT chat bridge and KMH chat share one channel - both relays receive each message.");
+            if (kmhCh == 0)
+                ServerLog.Warn("Discord: KmhChat.Channel is unset - Discord messages will NOT reach KMH chat.");
 
             return Task.CompletedTask;
         }
 
-        // Bot status updater. Reads the verified-client count out of RWT's Network.ServerClients and pushes it as a
-        // Discord activity. The cancellation token gets tripped on every Ready so we never leak overlapping loops across reconnects
         private static async Task PresenceLoop(CancellationToken ct)
         {
             try
@@ -180,7 +187,7 @@ namespace KMHServerAddon.Features.Discord
                             if (c?.IsVerified == true) count++;
                         }
                         string players = count == 1 ? "1 player online" : $"{count} players online";
-                        // Prefix the server name so multiple bots on one host are distinguishable in Discord.
+                        // Name-prefixed so several bots on one host stay distinguishable.
                         string status = $"{KmhServerIdentity.Name} · {players}";
                         await _client.SetActivityAsync(new Game(status, ActivityType.Watching))
                             .ConfigureAwait(false);
@@ -196,7 +203,6 @@ namespace KMHServerAddon.Features.Discord
             catch (Exception ex) { ServerLog.Warn($"Discord: presence loop ended: {ex.Message}"); }
         }
 
-        // Posts link/unlink announcements when configured; safely no-ops if Discord or the channel is disabled.
         public static void AnnounceLink(string username, string display, string kind)
         {
             if (_config == null || _config.LinkAnnounceChannelId == 0) return;
@@ -211,15 +217,12 @@ namespace KMHServerAddon.Features.Discord
             PostToChannel(_config.LinkAnnounceChannelId, text);
         }
 
-        // Shared Discord post helper with gating, fire-and-forget sends, and host-sensitive text scrubbing.
-
-        // Scrub IPs and absolute paths before Discord posts, while preserving version-like IPv4 strings.
+        // Strips player IPs and host paths, while leaving version-like strings such as 26.6.9.1 intact.
         internal static string Redact(string text)
         {
             if (string.IsNullOrEmpty(text)) return text;
-            // Handshake logs quote IPs, including ::ffff: mapped forms, so scrub the whole quoted value.
+            // Handshake logs quote the IP, so the whole quoted value goes rather than just an IPv4 shape.
             text = Regex.Replace(text, @"(Handshake with ')[^']*(')", "$1<ip>$2");
-            // Scrub other IPv4s, but leave version-like strings such as 26.6.9.1 intact.
             string src = text;
             text = Regex.Replace(src, @"(?:::ffff:)?\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}", m =>
             {
@@ -228,7 +231,6 @@ namespace KMHServerAddon.Features.Discord
                 if (i >= 8 && src.Substring(i - 8, 8).Equals("version ", StringComparison.OrdinalIgnoreCase)) return m.Value;
                 return "<ip>";
             });
-            // Absolute paths -> keep only the leaf name (handles spaces in folder names; stops at line end or '|').
             text = Regex.Replace(text, @"[A-Za-z]:\\[^\r\n|]*",
                 m => "…\\" + System.IO.Path.GetFileName(m.Value.Trim().TrimEnd('\\')));
             text = Regex.Replace(text, @"/(?:home|root|Users)/[^\r\n|]*",
@@ -237,36 +239,61 @@ namespace KMHServerAddon.Features.Discord
         }
 
         internal static void PostToChannel(ulong channelId, string text)
-        {
-            if (_client == null || _config == null || !_config.IsEnabled) return;
-            if (channelId == 0 || string.IsNullOrEmpty(text))             return;
-            text = Redact(text); // scrub player IPs + host file paths before anything leaves for Discord
+            => Task.Run(() => PostToChannelAsync(channelId, text));
 
-            Task.Run(async () =>
+        // An ordered stream must await this from one drain loop, or the posts arrive out of order.
+        internal static async Task PostToChannelAsync(ulong channelId, string text)
+            => await SendToChannelAsync(channelId, text).ConfigureAwait(false);
+
+        // Returns the posted message id, or 0, so a caller can edit or delete it later.
+        internal static async Task<ulong> SendToChannelAsync(ulong channelId, string text)
+        {
+            if (_client == null || _config == null || !_config.IsEnabled) return 0;
+            if (channelId == 0 || string.IsNullOrEmpty(text))             return 0;
+            text = Redact(text);
+
+            try
             {
-                try
+                if (!(_client.GetChannel(channelId) is IMessageChannel channel))
                 {
-                    if (!(_client.GetChannel(channelId) is IMessageChannel channel))
-                    {
-                        ServerLog.Warn(
-                            $"Discord: channel {channelId} not found / not a text channel");
-                        return;
-                    }
-                    await channel.SendMessageAsync(text).ConfigureAwait(false);
+                    ServerLog.Warn($"Discord: channel {channelId} not found / not a text channel");
+                    return 0;
                 }
-                catch (Exception ex)
-                {
-                    ServerLog.Warn($"Discord: channel send failed: {ex.Message}");
-                }
-            });
+                var sent = await channel.SendMessageAsync(text).ConfigureAwait(false);
+                return sent?.Id ?? 0;
+            }
+            catch (Exception ex)
+            {
+                ServerLog.Warn($"Discord: channel send failed: {ex.Message}");
+                return 0;
+            }
         }
 
-        // Post or edit a single live embed, returning the message id for caller persistence or 0 on failure.
+        // Editing rather than deleting, so striking one relayed line does not take the batch with it.
+        internal static async Task<bool> EditOwnMessageAsync(ulong channelId, ulong messageId, string newText)
+        {
+            if (_client == null || _config == null || !_config.IsEnabled) return false;
+            if (channelId == 0 || messageId == 0 || newText == null)      return false;
+            newText = Redact(newText);
+
+            try
+            {
+                if (!(_client.GetChannel(channelId) is IMessageChannel channel)) return false;
+                var msg = await channel.GetMessageAsync(messageId).ConfigureAwait(false);
+                if (!(msg is IUserMessage own) || own.Author?.Id != _client.CurrentUser?.Id) return false;
+                await own.ModifyAsync(m => m.Content = newText).ConfigureAwait(false);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ServerLog.Warn($"Discord: message edit failed: {ex.Message}");
+                return false;
+            }
+        }
+
         internal static Task<ulong> PostOrEditEmbedAsync(ulong channelId, ulong prevMessageId, Embed embed)
             => PostOrEditEmbedsAsync(channelId, prevMessageId, embed == null ? null : new[] { embed });
 
-        // Same contract for multiple embeds in one message (Discord allows 10) - the leaderboard live post carries
-        // the player + guild boards together
         internal static async Task<ulong> PostOrEditEmbedsAsync(ulong channelId, ulong prevMessageId, Embed[] embeds)
         {
             if (_client == null || _config == null || !_config.IsEnabled) return 0;
@@ -281,8 +308,6 @@ namespace KMHServerAddon.Features.Discord
                     return 0;
                 }
 
-                // Try edit-in-place first when we have a prior id. Missing / deleted message returns null from
-                // GetMessageAsync - fall through to fresh post in that case
                 if (prevMessageId != 0)
                 {
                     try
@@ -296,8 +321,7 @@ namespace KMHServerAddon.Features.Discord
                     }
                     catch (Exception ex)
                     {
-                        // Most common: message was deleted manually. Fall through to fresh post so the user gets a
-                        // working showcase rather than a silent failure
+                        // A manually deleted message lands here, so it falls through to a fresh post.
                         ServerLog.Verbose($"Discord: edit fell back to post: {ex.Message}");
                     }
                 }
@@ -312,7 +336,6 @@ namespace KMHServerAddon.Features.Discord
             }
         }
 
-        // Delete a posted message; success or already-missing both let the caller clear state.
         internal static async Task<bool> DeleteMessageAsync(ulong channelId, ulong messageId)
         {
             if (_client == null || _config == null || !_config.IsEnabled) return false;
@@ -331,8 +354,6 @@ namespace KMHServerAddon.Features.Discord
             }
         }
 
-        // Embed variant of PostToChannel. Same gating, same fire-and-forget semantics. Used by
-        // DiscordLeaderboardPoster - anything richer than a plain status line goes through here
         internal static void PostEmbedToChannel(ulong channelId, Embed embed)
         {
             if (_client == null || _config == null || !_config.IsEnabled) return;
@@ -357,7 +378,6 @@ namespace KMHServerAddon.Features.Discord
             });
         }
 
-        // Send embed with bundled thumbnail when available; otherwise fall back to a plain fire-and-forget embed.
         internal static void PostEmbedToChannel(ulong channelId, EmbedBuilder builder, string iconFileName)
         {
             if (_client == null || _config == null || !_config.IsEnabled) return;
@@ -389,20 +409,169 @@ namespace KMHServerAddon.Features.Discord
             });
         }
 
+        // The relay index acts as the whitelist, so a deletion elsewhere can never remove a KMH chat line.
+        private static Task OnMessageDeleted(Cacheable<IMessage, ulong> message, Cacheable<IMessageChannel, ulong> channel)
+        {
+            try
+            {
+                if (!KmhChatRelayIndex.TryTakeInbound(message.Id, out long kmhId)) return Task.CompletedTask;
+                if (Features.Chat.ChatHandler.RemoveRelayed(kmhId, "a moderator on Discord"))
+                    ServerLog.Info($"Discord->KMH: message #{kmhId} removed in-game because its Discord original was deleted.");
+            }
+            catch (Exception ex) { ServerLog.Warn($"Discord: delete sync failed: {ex.Message}"); }
+            return Task.CompletedTask;
+        }
+
+        // Size is judged here because Discord states the byte count up front; ChatImagePolicy still decides visibility.
+        private static string FirstImageAttachment(IMessage message)
+        {
+            try
+            {
+                var cfg = Features.Chat.ChatConfig.Current;
+                if (cfg == null || !cfg.AllowImagePreviews || message == null) return null;
+
+                if (message.Attachments != null)
+                    foreach (var a in message.Attachments)
+                    {
+                        if (a == null) continue;
+                        string name = a.Filename ?? "";
+                        // Only an image is ever fetched, so only an image has to fit under the cap.
+                        if (Features.Chat.ChatImagePolicy.LooksLikeVideo(cfg, name))
+                        {
+                            MediaLog(message, $"attachment '{name}' is a video, offered as a link ({a.Size} bytes)");
+                            return a.Url;
+                        }
+                        if (a.Size > cfg.MaxImageBytes)
+                        {
+                            MediaLog(message, $"attachment '{name}' skipped: {a.Size} bytes exceeds MaxImageBytes {cfg.MaxImageBytes}");
+                            continue;
+                        }
+                        if (!Features.Chat.ChatImagePolicy.LooksLikeImage(cfg, name))
+                        {
+                            MediaLog(message, $"attachment '{name}' skipped: not a known image extension");
+                            continue;
+                        }
+                        MediaLog(message, $"attachment '{name}' selected ({a.Size} bytes)");
+                        return a.Url;
+                    }
+
+                string sticker = FirstSticker(message);
+                if (!string.IsNullOrEmpty(sticker)) { MediaLog(message, $"sticker selected: {sticker}"); return sticker; }
+
+                string embed = FirstEmbedImage(message);
+                if (!string.IsNullOrEmpty(embed)) return embed;
+
+                // Last, because an attachment or embed always says more about a message than an emoji in its caption.
+                string emoji = Features.Chat.ChatDiscordEmoji.FirstEmojiUrl(message.Content);
+                if (!string.IsNullOrEmpty(emoji)) { MediaLog(message, $"custom emoji selected: {emoji}"); return emoji; }
+            }
+            catch { }
+            return null;
+        }
+
+        // A lottie sticker is JSON rather than a picture, so it yields nothing no decoder could read.
+        private static string FirstSticker(IMessage message)
+        {
+            if (message?.Stickers == null || message.Stickers.Count == 0) return null;
+            foreach (IStickerItem s in message.Stickers)
+            {
+                if (s == null) continue;
+                string url = Features.Chat.ChatDiscordEmoji.StickerUrl(s.Id, s.Format.ToString());
+                if (!string.IsNullOrEmpty(url)) return url;
+                MediaLog(message, $"sticker '{s.Name}' is {s.Format} - no raster form to draw");
+            }
+            return null;
+        }
+
+        // ProxyUrl is preferred over Url because it keeps the fetch on Discord rather than a third-party host.
+        private static string FirstEmbedImage(IMessage message)
+        {
+            if (message?.Embeds == null) return null;
+            var cfg = Features.Chat.ChatConfig.Current;
+
+            foreach (IEmbed e in message.Embeds)
+            {
+                if (e == null) continue;
+
+                MediaLog(message, $"embed type='{e.Type}' image={Present(e.Image?.Url, e.Image?.ProxyUrl)}"
+                                + $" thumb={Present(e.Thumbnail?.Url, e.Thumbnail?.ProxyUrl)}"
+                                + $" video={Present(e.Video?.Url, null)}");
+
+                string url = Pick(message, "image", e.Image?.ProxyUrl, e.Image?.Url)
+                          ?? Pick(message, "thumbnail", e.Thumbnail?.ProxyUrl, e.Thumbnail?.Url);
+                if (!string.IsNullOrEmpty(url)) return url;
+
+                // A gifv embed has no image slot at all, only a Video pointing at an mp4.
+                if (!string.IsNullOrEmpty(e.Video?.Url)
+                    && Features.Chat.ChatImagePolicy.LooksLikeVideo(cfg, e.Video.Value.Url))
+                {
+                    MediaLog(message, $"video slot selected: {Features.Chat.ChatMediaUrl.Describe(cfg, e.Video.Value.Url)}");
+                    return e.Video.Value.Url;
+                }
+            }
+            MediaLog(message, "no embed carried usable media");
+            return null;
+        }
+
+        private static string Present(string a, string b)
+            => string.IsNullOrEmpty(a) && string.IsNullOrEmpty(b) ? "-" : "y";
+
+        // The decision lives in ChatMediaSelection so it can be exercised without a Discord.Net message object.
+        private static string Pick(IMessage message, string slot, string proxy, string original)
+        {
+            string chosen = Features.Chat.ChatMediaSelection.Choose(
+                Features.Chat.ChatConfig.Current, proxy, original, out string why);
+            MediaLog(message, $"{slot}: {(string.IsNullOrEmpty(chosen) ? "nothing usable - " : "chose ")}{why}");
+            return string.IsNullOrEmpty(chosen) ? null : chosen;
+        }
+
+        // Carries the message id so a player's report can be matched to the decision that produced it.
+        private static void MediaLog(IMessage message, string what)
+            => ServerLog.Debug($"Discord media [msg {(message == null ? "?" : message.Id.ToString())}]: {what}");
+
+        // Discord attaches a link preview as a later edit, so the embed does not exist when the message arrives.
+        private static Task OnMessageUpdated(Cacheable<IMessage, ulong> before, SocketMessage after, ISocketMessageChannel channel)
+        {
+            try
+            {
+                if (after == null || _config == null) return Task.CompletedTask;
+                if (_config.KmhChatChannelId == 0 || (channel?.Id ?? 0) != _config.KmhChatChannelId) return Task.CompletedTask;
+
+                string image = FirstImageAttachment(after);
+                if (string.IsNullOrEmpty(image)) return Task.CompletedTask;
+
+                KmhChatDiscordBridge.AttachLateImage(after.Id, image);
+            }
+            catch (Exception ex) { ServerLog.Warn($"Discord: late embed update failed: {ex.Message}"); }
+            return Task.CompletedTask;
+        }
         private static async Task OnMessage(SocketMessage message)
         {
             try
             {
                 if (message == null)                 return;
                 if (message.Author == null)          return;
-                if (message.Author.IsBot)            return;
+                // Our own bot is always skipped; other bots are an owner's choice because their posts often matter.
+                ulong meId = _client?.CurrentUser?.Id ?? 0;
+                if (message.Author.IsBot || message.Author.IsWebhook)
+                {
+                    if (meId != 0 && message.Author.Id == meId) return;
+                    if (_config.KmhChat?.RelayBots != true)
+                    {
+                        MediaLog(message, $"bot '{message.Author.Username}' skipped - KmhChat.RelayBots is off");
+                        return;
+                    }
+                    if (Features.Chat.ChatDiscordText.LooksLikeRelayEcho(message.Content))
+                    {
+                        MediaLog(message, $"bot '{message.Author.Username}' skipped - the message is a relay echo");
+                        return;
+                    }
+                }
 
                 string prefix = _config.CommandPrefix ?? "!";
                 string text   = (message.Content ?? "").Trim();
 
-                // Multi-bot: when RequireMention is on, note whether THIS bot was @mentioned and strip its mention so
-                // "@Bot !kmh-x" parses like "!kmh-x". The gate below then ignores un-mentioned commands, so several
-                // bots in one channel don't all answer.
+                // The mention is stripped so "@Bot !kmh-x" parses like a plain command.
                 bool mentionedMe = false;
                 if (_config.RequireMentionForCommands)
                 {
@@ -418,24 +587,38 @@ namespace KMHServerAddon.Features.Discord
                     }
                 }
 
-                // Chat bridge relays normal messages in-game, while prefixed messages still fall through to commands.
-                if (_config.ChatBridgeChannelId != 0
-                    && message.Channel?.Id == _config.ChatBridgeChannelId
-                    && !text.StartsWith(prefix, StringComparison.Ordinal)
-                    && !string.IsNullOrEmpty(text))
+                // Both bridges see every message, or a shared channel would silently starve one of them.
+                bool notCommand = string.IsNullOrEmpty(text) || !text.StartsWith(prefix, StringComparison.Ordinal);
+                bool hasText    = !string.IsNullOrEmpty(text) && notCommand;
+                string image    = notCommand ? FirstImageAttachment(message) : null;
+
+                // An attachment with no caption is still a message, so relayability cannot test the body alone.
+                bool relayable  = hasText || !string.IsNullOrEmpty(image);
+                bool relayed    = false;
+                ulong chId      = message.Channel?.Id ?? 0;
+
+                // The RWT bridge relays a line of text and has nowhere to put a picture.
+                if (hasText && _config.ChatBridgeChannelId != 0 && chId == _config.ChatBridgeChannelId)
                 {
-                    string display = ResolveDisplay(message.Author);
-                    DiscordChatBridge.RelayDiscordToInGame(display, text);
-                    return;
+                    DiscordChatBridge.RelayDiscordToInGame(ResolveDisplay(message.Author), text);
+                    relayed = true;
                 }
+
+                if (relayable && _config.KmhChatChannelId != 0 && chId == _config.KmhChatChannelId)
+                {
+                    KmhChatDiscordBridge.Ingest(message.Author.Id, ResolveDisplay(message.Author), text, message.Id, image);
+                    relayed = true;
+                }
+
+                if (relayed) return;
+
 
                 if (!text.StartsWith(prefix, StringComparison.Ordinal)) return;
 
-                // Multi-bot gate: with RequireMention on, only the @mentioned bot acts. DMs are already per-bot, so a
-                // mention isn't needed there (and players link via DM).
+                // A DM is already per-bot, so it needs no mention.
                 if (_config.RequireMentionForCommands && !mentionedMe && message.Channel is SocketGuildChannel) return;
 
-                // Optional guild allowlist for commands; DMs always work so players can still link.
+                // DMs stay open so a player can always link.
                 if (message.Channel is SocketGuildChannel gc
                     && _config.AllowedGuildIds != null
                     && _config.AllowedGuildIds.Length > 0)
@@ -448,7 +631,6 @@ namespace KMHServerAddon.Features.Discord
                     if (!allowed) return;
                 }
 
-                // Commands only in their designated channels (DMs always allowed for linking) - never spam #general.
                 if (!_config.CommandsAllowedIn(message.Channel?.Id ?? 0, !(message.Channel is SocketGuildChannel)))
                     return;
 
@@ -513,7 +695,6 @@ namespace KMHServerAddon.Features.Discord
                             .ConfigureAwait(false);
                         break;
                     default:
-                        // Delegate command families in order so each feature owns its own surface without bloating this switch.
                         bool handled = await DiscordBrowseCommands.TryHandleAsync(message, cmd, parts).ConfigureAwait(false);
                         if (!handled)
                             handled = await DiscordTradeCommands.TryHandleAsync(message, cmd, parts).ConfigureAwait(false);
@@ -522,7 +703,7 @@ namespace KMHServerAddon.Features.Discord
                         if (!handled)
                             handled = await DiscordWtbCommands.TryHandleAsync(message, cmd, parts).ConfigureAwait(false);
                         if (!handled)
-                            // Extension commands run last; core commands win any name collision.
+                            // Last, so a core command wins any name collision.
                             DiscordExtensionCommands.TryDispatch(message, cmd, parts);
                         break;
                 }
@@ -535,13 +716,10 @@ namespace KMHServerAddon.Features.Discord
 
         private static async Task HandleLink(SocketMessage message, string[] parts)
         {
-            // !kmh-link status shows which KMH account this Discord user is linked to.
             if (parts.Length >= 2 && string.Equals(parts[1], "status", StringComparison.OrdinalIgnoreCase))
             {
                 ulong  authorIdStatus = message.Author?.Id ?? 0;
-                string display = ResolveDisplay(message.Author);
-                string bound   = LinkedAccountsStore.FindUsernameByDiscordId(authorIdStatus)
-                              ?? LinkedAccountsStore.FindUsernameByDiscord(display);
+                string bound   = LinkedAccountsStore.FindUsernameByDiscordId(authorIdStatus);   // id-only; display is impersonable
                 if (string.IsNullOrEmpty(bound))
                 {
                     await Reply(message, "Your Discord identity is not currently linked to any KMH account.")
@@ -573,7 +751,14 @@ namespace KMHServerAddon.Features.Discord
 
             string display2 = ResolveDisplay(message.Author);
             ulong  authorId = message.Author?.Id ?? 0;
-            LinkedAccountsStore.SetLink(username, display2, authorId);
+            if (!LinkedAccountsStore.SetLink(username, display2, authorId, out string linkRefusal))
+            {
+                ServerLog.Warn($"Discord: link refused for '{username}' <-> '{display2}': {linkRefusal}");
+                // The code was already spent getting here, so say plainly that a new one is needed.
+                await Reply(message, linkRefusal + " Then run `/kmh link` in-game for a fresh code.")
+                    .ConfigureAwait(false);
+                return;
+            }
             LinkedAccountsHandler.BroadcastSnapshot();
             AnnounceLink(username, display2, "link");
 
@@ -585,11 +770,10 @@ namespace KMHServerAddon.Features.Discord
 
         private static async Task HandleUnlink(SocketMessage message)
         {
-            // Prefer Discord ID unlink so renames can't dodge it; fall back to display name for legacy links.
             ulong authorId = message.Author?.Id ?? 0;
             string display  = ResolveDisplay(message.Author);
-            string victim   = LinkedAccountsStore.FindUsernameByDiscordId(authorId)
-                           ?? LinkedAccountsStore.FindUsernameByDiscord(display);
+            // Id only: a display fallback would let someone unlink another player by copying their display name.
+            string victim   = LinkedAccountsStore.FindUsernameByDiscordId(authorId);
             if (string.IsNullOrEmpty(victim))
             {
                 await Reply(message,
@@ -604,14 +788,13 @@ namespace KMHServerAddon.Features.Discord
             await Reply(message, $"Unlinked **{victim}**.").ConfigureAwait(false);
         }
 
-        // !kmh-leaderboard uses the same builder as the auto-poster, so on-demand output matches posted boards.
+        // Shares the auto-poster's builder, so an on-demand board matches a posted one.
         private static async Task HandleLeaderboard(SocketMessage message, string[] parts)
         {
             int topN = _config?.LeaderboardTopCount ?? 10;
             if (topN < 1)  topN = 10;
             if (topN > 25) topN = 25;
 
-            // Guild leaderboard branch.
             if (parts.Length >= 2
                 && (string.Equals(parts[1], "guilds", StringComparison.OrdinalIgnoreCase)
                  || string.Equals(parts[1], "guild",  StringComparison.OrdinalIgnoreCase)
@@ -632,7 +815,6 @@ namespace KMHServerAddon.Features.Discord
                 return;
             }
 
-            // Reputation board branch.
             if (parts.Length >= 2
                 && (string.Equals(parts[1], "rep",        StringComparison.OrdinalIgnoreCase)
                  || string.Equals(parts[1], "reputation", StringComparison.OrdinalIgnoreCase)))
@@ -649,7 +831,6 @@ namespace KMHServerAddon.Features.Discord
                 return;
             }
 
-            // Default: player leaderboard.
             string sort = parts.Length >= 2
                 ? DiscordLeaderboardBuilder.NormalizeSort(parts[1])
                 : DiscordLeaderboardBuilder.DefaultSort;
@@ -670,14 +851,13 @@ namespace KMHServerAddon.Features.Discord
             }
         }
 
-        // !kmh-rank [player] - per-player stat card with per-metric ranks. No name = the caller's own linked account
+        // With no name, the caller's own linked account is used.
         private static async Task HandleRank(SocketMessage message, string[] parts)
         {
             string query = parts.Length >= 2 ? string.Join(" ", parts, 1, parts.Length - 1).Trim() : "";
             if (query.Length == 0)
             {
-                query = LinkedAccounts.LinkedAccountsStore.FindUsernameByDiscordId(message.Author.Id)
-                     ?? LinkedAccounts.LinkedAccountsStore.FindUsernameByDiscord(message.Author.Username);
+                query = LinkedAccounts.LinkedAccountsStore.FindUsernameByDiscordId(message.Author.Id);   // id-only; no impersonable display fallback
                 if (string.IsNullOrEmpty(query))
                 {
                     await Reply(message, "Usage: `!kmh-rank <player>` (or link your account with `!kmh-link` to use it bare).")
@@ -699,7 +879,7 @@ namespace KMHServerAddon.Features.Discord
             catch (Exception ex) { ServerLog.Warn($"Discord: rank reply failed: {ex.Message}"); }
         }
 
-        // !kmh-whois shows the linked Discord identity for a player, staying quiet when unknown or unlinked.
+        // Stays quiet for an unknown or unlinked player rather than confirming the name exists.
         private static async Task HandleWhois(SocketMessage message, string[] parts)
         {
             if (parts.Length < 2)
@@ -718,7 +898,6 @@ namespace KMHServerAddon.Features.Discord
             }
         }
 
-        // !kmh-rep <player> - quest reputation score + tier.
         private static async Task HandleReputation(SocketMessage message, string[] parts)
         {
             if (parts.Length < 2)
@@ -743,7 +922,7 @@ namespace KMHServerAddon.Features.Discord
             }
         }
 
-        // Prefer GlobalName, falling back to legacy Username#Discriminator; drop #0000 for migrated accounts.
+        // A migrated account carries #0000, which is dropped rather than shown.
         private static string ResolveDisplay(IUser user)
         {
             string g = user?.GlobalName;

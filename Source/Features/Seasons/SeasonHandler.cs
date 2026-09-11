@@ -2,8 +2,6 @@ using KMHServerAddon.SubProtocol;
 
 namespace KMHServerAddon.Features.Seasons
 {
-    // kmh.archive.season handler: serves the season archive snapshot on request, and broadcasts a fresh one after
-    // an admin rolls the season.
     internal static class SeasonHandler
     {
         public static void Register()

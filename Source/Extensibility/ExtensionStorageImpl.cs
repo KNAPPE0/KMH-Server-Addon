@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using KMH.Sdk.Server.Apis;
@@ -6,8 +6,7 @@ using KMHServerAddon.Persistence;
 
 namespace KMHServerAddon.Extensibility
 {
-    // Per-extension storage rooted at kmh-data/extensions/<name>/. Sanitises the extension name so a malformed Name
-    // property can't escape the storage scope (no slashes, no ..)
+    // The extension's own Name reaches the filesystem here, so it is sanitised before it can widen the storage scope.
     internal sealed class ExtensionStorageImpl : IExtensionStorage
     {
         public ExtensionStorageImpl(string extensionName)
@@ -25,15 +24,29 @@ namespace KMHServerAddon.Extensibility
 
         public bool Save<T>(string filename, T value) where T : class
         {
-            if (string.IsNullOrEmpty(filename) || value == null) return false;
-            return JsonFileStore.Save(Path.Combine(RootPath, filename), value);
+            if (value == null) return false;
+            string path = ResolveInScope(filename);
+            return path != null && JsonFileStore.Save(path, value);
+        }
+
+        // Tidiness rather than a security boundary, since an extension runs in-process and could write anywhere.
+        private string ResolveInScope(string filename)
+        {
+            if (string.IsNullOrEmpty(filename)) return null;
+            try
+            {
+                string root = Path.GetFullPath(RootPath).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+                string full = Path.GetFullPath(Path.Combine(RootPath, filename));
+                return full.StartsWith(root, StringComparison.OrdinalIgnoreCase) ? full : null;
+            }
+            catch { return null; }
         }
 
         public bool TryLoad<T>(string filename, out T value) where T : class
         {
             value = null;
-            if (string.IsNullOrEmpty(filename)) return false;
-            return JsonFileStore.TryLoad(Path.Combine(RootPath, filename), out value);
+            string path = ResolveInScope(filename);
+            return path != null && JsonFileStore.TryLoad(path, out value);
         }
 
         public IReadOnlyList<string> ListFiles()
@@ -53,7 +66,8 @@ namespace KMHServerAddon.Extensibility
         {
             try
             {
-                string path = Path.Combine(RootPath, filename);
+                string path = ResolveInScope(filename);
+                if (path == null) return false;
                 if (!File.Exists(path)) return true;
                 File.Delete(path);
                 return true;
@@ -72,10 +86,7 @@ namespace KMHServerAddon.Extensibility
             }
             string result = new string(buf);
 
-            // '.' is allowed inside a name (e.g. "com.author.ext") but a name that is ONLY dots ("." / ".." /
-            // "...") would resolve the storage root to kmh-data/ itself - one level above extensions/ - and let a
-            // malformed extension overwrite core files like treasury.json. Strip leading/trailing dots; if
-            // nothing's left, fall back
+            // Dots are legal inside a name, but an all-dots name would resolve the root a level up into kmh-data itself.
             result = result.Trim('.');
             return result.Length == 0 ? "unnamed" : result;
         }

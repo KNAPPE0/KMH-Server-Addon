@@ -12,7 +12,7 @@ using Newtonsoft.Json.Linq;
 
 namespace KMHServerAddon.Persistence
 {
-    // Append-only economy audit log for silver/item moves, flushed off-thread as daily JSONL for crash-safe dispute records.
+    // Append-only: a dispute record that can be edited in place is not evidence.
     internal static class TransactionLedger
     {
         private sealed class Entry
@@ -34,7 +34,6 @@ namespace KMHServerAddon.Persistence
         private static Task _flusher;
         private static CancellationTokenSource _cts;
 
-        // Treasury chokepoint hook: one value movement against one vault.
         public static void Record(string vault, string actor, string kind, long amount, string item, string note)
         {
             _queue.Enqueue(new Entry
@@ -62,6 +61,15 @@ namespace KMHServerAddon.Persistence
             ServerLog.Verbose("TransactionLedger flusher started");
         }
 
+        // Stopped after the ordered shutdown flush, so its own final flush cannot append behind that snapshot.
+        public static void Stop()
+        {
+            CancellationTokenSource cts = _cts;
+            _cts = null; _flusher = null;
+            try { cts?.Cancel(); } catch { /* already gone */ }
+            Flush();
+        }
+
         private static async Task RunLoop(CancellationToken ct)
         {
             while (!ct.IsCancellationRequested)
@@ -73,36 +81,54 @@ namespace KMHServerAddon.Persistence
             Flush();
         }
 
-        // Drain the queue to today's file. Safe to call from the flusher and from the shutdown path concurrently.
+        // Held between the queue and disk: dequeuing straight into the write let a throw lose the dispute evidence from memory and file at once.
+        private static readonly List<Entry> _pending = new List<Entry>();
+        private static Func<string> _failAppendForTest;
+
+        internal static int PendingCountForTest { get { lock (_fileLock) return _pending.Count; } }
+
+        internal static IDisposable FailAppendForTest(Func<string> reason)
+        {
+            _failAppendForTest = reason;
+            return new AppendFailureScope();
+        }
+
+        private sealed class AppendFailureScope : IDisposable
+        {
+            public void Dispose() => _failAppendForTest = null;
+        }
+
+        // Called by the flusher and the shutdown path at the same time, so it has to be safe concurrently.
         public static void Flush()
         {
-            if (_queue.IsEmpty) return;
-            StringBuilder sb = new StringBuilder();
-            int n = 0;
-            while (_queue.TryDequeue(out Entry e))
+            lock (_fileLock)
             {
-                sb.AppendLine(JsonConvert.SerializeObject(e, _compact));
-                n++;
-            }
-            if (n == 0) return;
-            try
-            {
-                lock (_fileLock)
+                while (_queue.TryDequeue(out Entry e)) _pending.Add(e);
+                if (_pending.Count == 0) return;
+
+                StringBuilder sb = new StringBuilder();
+                foreach (Entry e in _pending) sb.AppendLine(JsonConvert.SerializeObject(e, _compact));
+                try
                 {
+                    string injected = _failAppendForTest?.Invoke();
+                    if (injected != null) throw new IOException(injected);
                     Directory.CreateDirectory(KmhDataPaths.LedgerDir);
                     File.AppendAllText(TodayFile(), sb.ToString());
                 }
-            }
-            catch (Exception ex)
-            {
-                ServerLog.Warn($"TransactionLedger: could not write {n} entr(y/ies): {ex.Message}");
+                catch (Exception ex)
+                {
+                    ServerLog.Warn($"TransactionLedger: could not write {_pending.Count} entr(y/ies), " +
+                                   $"held for the next flush: {ex.Message}");
+                    return;
+                }
+                _pending.Clear();
             }
         }
 
         private static string TodayFile()
             => Path.Combine(KmhDataPaths.LedgerDir, $"ledger-{DateTime.UtcNow:yyyyMMdd}.jsonl");
 
-        // Reads newest ledger lines, optionally by user, flushing pending entries first so fresh transactions show.
+        // Flushes first, or a transaction still queued reads as though it never happened.
         public static List<string> ReadRecent(int count, string userFilter = null)
         {
             Flush();
@@ -129,7 +155,6 @@ namespace KMHServerAddon.Persistence
             return outLines;
         }
 
-        // Parse one JSONL row into a console line; returns null if it doesn't match the user filter.
         private static string Format(string json, string userFilter)
         {
             try

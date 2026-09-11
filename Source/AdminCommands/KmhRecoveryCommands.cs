@@ -5,8 +5,7 @@ using KMHServerAddon.Features.Recovery.Dto;
 
 namespace KMHServerAddon.AdminCommands
 {
-    // `kmh recover ...` - release value the economy couldn't deliver to its owner (invalid/deleted account, disbanded
-    // guild). Held instead of destroyed; this is where an admin retries/refunds/hands it off.
+    // Undeliverable value is held rather than destroyed, and this is the only thing that ever releases it.
     internal static class KmhRecoveryCommands
     {
         public static void Run(string[] args, Action<string> reply)
@@ -20,6 +19,7 @@ namespace KMHServerAddon.AdminCommands
                     if (held.Count == 0) reply("  (empty - no items/silver are stuck)");
                     else { foreach (RecoveryRecord r in held) reply("  " + RecoveryStore.Describe(r));
                            reply("  Resolve: kmh recover retry <id> | refund <id> | drop <id> <player>"); }
+                    ListStuckTransactions(reply);
                     break;
                 }
                 case "player":
@@ -51,5 +51,26 @@ namespace KMHServerAddon.AdminCommands
         }
 
         private static string Arg(string[] a, int i) => a != null && a.Length > i ? a[i] : "";
+
+        // A different store from the recovery queue, and the boot notice points owners here, so they must be visible.
+        private static void ListStuckTransactions(Action<string> reply)
+        {
+            List<Transactions.KmhTransaction> pending;
+            try { pending = Transactions.KmhTransactionRepository.Pending(); }
+            catch (Exception ex) { reply($"  (could not read the transaction ledger: {ex.Message})"); return; }
+            if (pending == null || pending.Count == 0) return;
+
+            reply($"=== Transactions holding value ({pending.Count}) ===");
+            foreach (Transactions.KmhTransaction t in pending)
+            {
+                string what = string.IsNullOrEmpty(t.Validated) ? t.Requested : t.Validated;
+                string esc  = t.EscrowSilver > 0 ? $"{t.EscrowSilver}s" : "";
+                if (t.EscrowItems != null && t.EscrowItems.Count > 0) esc += (esc.Length > 0 ? " + " : "") + $"{t.EscrowItems.Count} item kind(s)";
+                if (t.EscrowPayloads != null && t.EscrowPayloads.Count > 0) esc += (esc.Length > 0 ? " + " : "") + $"{t.EscrowPayloads.Count} full-state item(s)";
+                reply($"  {t.Id}  {t.State}  {t.Player}  {t.Source}->{t.Destination}  {what}" + (esc.Length > 0 ? $"  [holds {esc}]" : ""));
+            }
+            reply("  A Delivered row means the goods were sent but the player's client has not confirmed receiving them.");
+            reply("  These settle themselves: the delivery is re-sent on their next join, and their confirmation closes the row.");
+        }
     }
 }

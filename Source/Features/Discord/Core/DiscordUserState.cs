@@ -5,8 +5,7 @@ using KMHServerAddon.Persistence;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // Per-username Discord decorations (showcase message ids, tagline). Persisted so a restart keeps the message ids
-    // that drive edit-in-place; LinkedAccountsStore stays the canonical identity map.
+    // Decoration only: LinkedAccountsStore remains the canonical identity map.
     internal static class DiscordUserState
     {
         private static readonly object _lock = new object();
@@ -20,8 +19,6 @@ namespace KMHServerAddon.Features.Discord
             public string ShowcaseTagline          { get; set; } = "";
             public long   ShowcaseLastUpdatedTicks { get; set; } = 0;
 
-            // WTB board - parallel shape to showcase: a live message that edits in place + a list of "I'm looking
-            // for X" entries
             public ulong  WtbChannelId             { get; set; } = 0;
             public ulong  WtbMessageId             { get; set; } = 0;
             public string WtbTagline               { get; set; } = "";
@@ -36,8 +33,6 @@ namespace KMHServerAddon.Features.Discord
             public int    MaxUnitPriceSilver { get; set; } = 0;
             public long   AddedUtcTicks      { get; set; } = 0;
         }
-
-        // -- showcase accessors --
 
         public static void GetShowcase(string username,
                                        out ulong channelId,
@@ -94,13 +89,11 @@ namespace KMHServerAddon.Features.Discord
                     s.ShowcaseChannelId        = 0;
                     s.ShowcaseMessageId        = 0;
                     s.ShowcaseLastUpdatedTicks = 0;
-                    // Keep tagline - player may want it for next showcase.
+                    // The tagline survives on purpose, so it is still there for the next showcase.
                 }
             }
             SaveToDisk();
         }
-
-        // -- WTB accessors --
 
         public static void GetWtb(string username,
                                   out ulong channelId,
@@ -148,8 +141,7 @@ namespace KMHServerAddon.Features.Discord
             SaveToDisk();
         }
 
-        // Add or update (idempotent - re-adding the same defName updates qty + price in place, doesn't create a
-        // duplicate row)
+        // Idempotent: re-adding a defName updates that row rather than adding a second one.
         public static bool AddOrUpdateWtb(string username, string defName, int maxQty, int maxUnitPrice, int maxEntries)
         {
             if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(defName)) return false;
@@ -234,8 +226,6 @@ namespace KMHServerAddon.Features.Discord
             SaveToDisk();
         }
 
-        // Enumerate all users with an active showcase (channel + message both non-zero). Used by future sweep
-        // features to refresh stale posts
         public static List<string> ListUsersWithShowcase()
         {
             List<string> result = new List<string>();
@@ -259,8 +249,6 @@ namespace KMHServerAddon.Features.Discord
             }
             return s;
         }
-
-        // -- persistence --
 
         public static void LoadFromDisk()
         {

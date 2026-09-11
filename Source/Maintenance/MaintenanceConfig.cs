@@ -1,18 +1,18 @@
-using KMHServerAddon.Persistence;
+﻿using KMHServerAddon.Persistence;
 
 namespace KMHServerAddon.Maintenance
 {
+    internal enum KmhConsoleLevel { Info, Warn, Error }
+
     // Release-safety knobs for auto backups and boot scans; migration backups are always forced.
     internal sealed class MaintenanceConfig
     {
         public int SchemaVersion { get; set; } = 1;
 
-        // Friendly name for THIS server instance, shown to players + external tooling + Discord. Give each server on a
-        // shared host a distinct name (e.g. "MoW S6 - 25554") so they're easy to tell apart. Blank -> "KMH Server".
-        public string ServerName      { get; set; } = "KMH Server";
+        // Blank means use the RWT server's own name, so a fresh install does not report a generic one beside it.
+        public string ServerName      { get; set; } = "";
 
-        // Snapshot all of KMH-Data into KMH-Data-Backups/ once per boot, then prune to BackupRetention copies. JSON
-        // data is small and servers don't restart often, so this is cheap insurance against a bad save/wipe.
+        // JSON data is small and restarts are rare, so a per-boot snapshot is cheap insurance against a bad wipe.
         public bool BackupOnBoot      { get; set; } = true;
 
         // How many timestamped backup folders to keep (oldest pruned first). 0 disables pruning (keep everything).
@@ -26,6 +26,23 @@ namespace KMHServerAddon.Maintenance
 
         // Cap snapshots kept per player (and per _server), newest first (0 = no count cap).
         public int  SnapshotMaxPerPlayer  { get; set; } = 200;
+
+        // A refusal is recoverable; a deposit the player was told succeeded and that vanishes on restart is not.
+        public bool FreezeEconomyOnPersistenceFailure { get; set; } = true;
+
+        // Terminal only - all | warn | error | quiet. The diagnostic file always gets every line regardless.
+        public string ConsoleLogLevel { get; set; } = "all";
+
+        public bool ConsoleAllows(KmhConsoleLevel level)
+        {
+            switch ((ConsoleLogLevel ?? "all").Trim().ToLowerInvariant())
+            {
+                case "quiet": return false;
+                case "error": return level == KmhConsoleLevel.Error;
+                case "warn":  return level != KmhConsoleLevel.Info;
+                default:      return true;
+            }
+        }
 
         private static MaintenanceConfig _current;
         public static MaintenanceConfig Current => _current ?? (_current = LoadOrDefault());

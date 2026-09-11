@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -8,7 +8,6 @@ using KMHServerAddon.Diagnostics;
 
 namespace KMHServerAddon.Persistence
 {
-    // Copies KMH-Data into timestamped backup folders for boot, migrations, and kmh backup; restore is plain folder copy.
     internal static class KmhDataBackup
     {
         public static bool TryCreate(string reason, out string destDir, out string error)
@@ -18,6 +17,33 @@ namespace KMHServerAddon.Persistence
 
             string source = KmhDataPaths.Folder;
             if (!Directory.Exists(source)) { error = "KMH-Data does not exist yet (nothing to back up)"; return false; }
+
+            // Mutations are held and every store flushed FIRST, or the copy is Treasury at one instant and Auctions at another - a state the server was never in.
+            Maintenance.KmhMaintenanceGate.Enter(Maintenance.KmhMaintenanceReason.Backup);
+            try
+            {
+                // Before Ready the stores are EMPTY (the pre-restore backup runs at boot), so flushing then would write nothing over everything.
+                if (Maintenance.KmhReadiness.IsReady)
+                {
+                    // FlushAll counts what it managed to write, so the refusals are counted here as reported.
+                    int unflushed = 0;
+                    Maintenance.KmhDataFlush.FlushAll(e => { unflushed++; Diagnostics.ServerLog.Warn($"Backup: {e}"); });
+                    if (unflushed > 0)
+                    {
+                        error = $"{unflushed} store(s) could not be written before the copy - the backup would not be " +
+                                "a coherent point in time. Fix the persistence problem and try again.";
+                        return false;
+                    }
+                }
+                return CopyLocked(source, reason, out destDir, out error);
+            }
+            finally { Maintenance.KmhMaintenanceGate.Release(); }
+        }
+
+        private static bool CopyLocked(string source, string reason, out string destDir, out string error)
+        {
+            destDir = null;
+            error   = null;
 
             string[] sourceFiles;
             try { sourceFiles = Directory.GetFiles(source, "*", SearchOption.AllDirectories).Where(KeepInBackup).ToArray(); }
@@ -41,15 +67,29 @@ namespace KMHServerAddon.Persistence
                     File.Copy(file, to, overwrite: true);
                     long len = SafeLen(file);
                     total += len; count++;
-                    manifest.AppendLine($"{rel}\t{len}");
+                    // Hashed from the COPY, so a read error during it surfaces as a mismatch at restore instead of a file with merely the right length.
+                    manifest.AppendLine($"{rel}\t{len}\t{Sha256(to)}");
                 }
 
                 string header =
-                    $"KMH-Data backup\nutc: {DateTime.UtcNow:o}\nreason: {reason}\nbuild: " +
-                    $"{typeof(KmhDataBackup).Assembly.GetName().Version}\nfiles: {count}\nbytes: {total}\n\n";
+                    $"KMH-Data backup\nutc: {DateTime.UtcNow:o}\nreason: {reason}\n" +
+                    $"backup-id: {Guid.NewGuid():N}\n" +
+                    $"assembly: {typeof(KmhDataBackup).Assembly.GetName().Version}\n" +
+                    $"build: {KmhVersion.Build} ({KmhVersion.BuildTag})\n" +
+                    $"protocol: {KmhVersion.Protocol}\nconfig-schema: {KmhVersion.ConfigSchema}\n" +
+                    $"data-schema: {KmhVersion.DataSchema}\n" +
+                    $"data-generation: {Features.Economy.KmhEconomyReset.Generation}\n" +
+                    $"files: {count}\nbytes: {total}\nhash: sha256\n\n";
                 File.WriteAllText(Path.Combine(dest, "manifest.txt"), header + manifest);
 
                 destDir = dest;
+
+                // Not only at boot: the anti-cheat backs up on player action, so copies accrue between restarts.
+                int retention = Maintenance.MaintenanceConfig.Current.BackupRetention;
+                int pruned = Prune(retention);
+                if (pruned > 0)
+                    Diagnostics.ServerLog.Verbose($"Backups: pruned {pruned} old backup(s) to the retention of {retention}.");
+
                 Extensibility.KmhEventBus.Instance.RaiseBackupCreated(new KMH.Sdk.Server.Events.BackupCreatedEvent
                 {
                     Name = Path.GetFileName(dest), Utc = StampUtcIso(Path.GetFileName(dest)), Reason = reason ?? "",
@@ -65,8 +105,7 @@ namespace KMHServerAddon.Persistence
             }
         }
 
-        // Keep the newest `keep` backups, delete older ones (oldest first). keep <= 0 disables pruning. Returns the
-        // number of folders removed. Timestamp-prefixed names sort chronologically, so ordering by name is enough.
+        // Names are timestamp-prefixed, so sorting by name is chronological. keep <= 0 disables pruning.
         public static int Prune(int keep)
         {
             if (keep <= 0) return 0;
@@ -86,8 +125,7 @@ namespace KMHServerAddon.Persistence
             catch (Exception ex) { ServerLog.Warn($"Backup prune failed: {ex.Message}"); return 0; }
         }
 
-        // Resolve a restore spec to a backup folder path: an exact folder name, "latest", or
-        // "before:<iso|yyyyMMdd-HHmmss>" (newest backup at or before that time). Returns null if nothing matches.
+        // "before:" resolves to the newest backup at or before that time.
         public static string ResolvePath(string spec)
         {
             if (string.IsNullOrWhiteSpace(spec)) return null;
@@ -110,14 +148,19 @@ namespace KMHServerAddon.Persistence
             return Directory.Exists(exact) ? exact : null;
         }
 
-        // Roll KMH-Data back to match backup `spec`. Safety-backs up current data first, then makes KMH-Data an exact
-        // copy of the backup (files created since are removed - a true rollback). Boot-time only, before any store loads.
-        public static bool Restore(string spec, out string safetyBackup, out string error)
+        // Set by a restore that landed this boot (restores run before any store loads), and consumed once the generation store has been read.
+        public static string RestoredThisBoot { get; private set; }
+
+        internal static void ClearRestoredThisBoot() => RestoredThisBoot = null;
+
+        // force skips only the pre-restore safety backup, and only when an admin asked for that in so many words.
+        public static bool Restore(string spec, out string safetyBackup, out string error, bool force = false)
         {
             safetyBackup = null; error = null;
             string src = ResolvePath(spec);
             if (src == null) { error = $"no backup matches '{spec}'"; return false; }
-            if (!File.Exists(Path.Combine(src, "manifest.txt")))
+            string manifestPath = Path.Combine(src, "manifest.txt");
+            if (!File.Exists(manifestPath))
             { error = $"'{Path.GetFileName(src)}' has no manifest - refusing to restore from it"; return false; }
 
             string[] backupFiles;
@@ -125,29 +168,50 @@ namespace KMHServerAddon.Persistence
             catch (Exception ex) { error = $"could not read backup: {ex.Message}"; return false; }
             if (backupFiles.Length <= 1) { error = "backup has no data files - refusing to wipe live data"; return false; }
 
-            // Safety net so a bad restore stays reversible.
-            if (TryCreate("pre-restore", out string safeDir, out string safeErr)) safetyBackup = Path.GetFileName(safeDir);
-            else ServerLog.Warn($"Restore: pre-restore safety backup failed ({safeErr}) - continuing anyway.");
+            // Checked BEFORE anything live is touched, while the current data is still the only copy that matters.
+            if (!Verify(src, out string verifyError)) { error = verifyError; return false; }
 
+            // Without this backup a restore from the wrong one is unrecoverable, so normal restores fail closed.
+            if (TryCreate("pre-restore", out string safeDir, out string safeErr)) safetyBackup = Path.GetFileName(safeDir);
+            else if (!force)
+            {
+                error = $"the pre-restore safety backup failed ({safeErr}), so restoring would destroy the current " +
+                        "data with no way back. Fix that first, or re-run with 'force' to accept the loss.";
+                return false;
+            }
+            else ServerLog.Warn($"Restore: pre-restore safety backup failed ({safeErr}) - continuing because force was given.");
+
+            string dataRoot = KmhDataPaths.Folder;
+            string staging  = dataRoot + ".restoring";
+            string previous = dataRoot + ".previous";
             try
             {
-                string dataRoot = KmhDataPaths.Folder;
-                Directory.CreateDirectory(dataRoot);
-                // Clear current KMH-Data (folder kept; backups are a sibling; Snapshots/ survives the wipe).
-                foreach (string entry in Directory.GetFileSystemEntries(dataRoot))
-                {
-                    if (IsSnapshotArtifact(entry)) continue;
-                    if (Directory.Exists(entry)) Directory.Delete(entry, recursive: true);
-                    else File.Delete(entry);
-                }
+                // Built off to one side: a crash before the swap leaves live data untouched, a crash during it is finished by FinishInterruptedRestore.
+                SafeDeleteDir(staging);
+                Directory.CreateDirectory(staging);
                 foreach (string file in backupFiles)
                 {
                     string rel = GetRelative(src, file);
                     if (rel.Equals("manifest.txt", StringComparison.OrdinalIgnoreCase)) continue; // backup metadata, not data
-                    string to = Path.Combine(dataRoot, rel);
+                    string to = Path.Combine(staging, rel);
                     Directory.CreateDirectory(Path.GetDirectoryName(to));
                     File.Copy(file, to, overwrite: true);
                 }
+
+                // A backup makes no claim about what it leaves out - the Debug log recording this restore included - so a restore must not destroy it.
+                if (Directory.Exists(dataRoot))
+                    foreach (string entry in Directory.GetFileSystemEntries(dataRoot))
+                        if (SurvivesRestore(entry))
+                            MoveInto(entry, staging, dataRoot);
+
+                SafeDeleteDir(previous);
+                if (Directory.Exists(dataRoot)) Directory.Move(dataRoot, previous);
+                Directory.Move(staging, dataRoot);
+                SafeDeleteDir(previous);
+
+                // The generation bump belongs to KmhDataRestore: bumping before EconomyReset.json is read would write 1 over the value just restored.
+                RestoredThisBoot = Path.GetFileName(src);
+
                 ServerLog.Warn($"KMH-Data RESTORED from '{Path.GetFileName(src)}'" +
                                (safetyBackup != null ? $" (previous data saved as '{safetyBackup}')" : ""));
                 Extensibility.KmhEventBus.Instance.RaiseRestoreApplied(new KMH.Sdk.Server.Events.RestoreAppliedEvent
@@ -156,10 +220,113 @@ namespace KMHServerAddon.Persistence
                 });
                 return true;
             }
-            catch (Exception ex) { error = ex.Message; return false; }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                SafeDeleteDir(staging);
+                // The old data is still the only authority there is - put it back rather than leaving the server with nothing.
+                try { if (!Directory.Exists(dataRoot) && Directory.Exists(previous)) Directory.Move(previous, dataRoot); }
+                catch (Exception put) { ServerLog.Error($"Restore: could not put the previous KMH-Data back: {put.Message}"); }
+                return false;
+            }
         }
 
-        // ISO-8601 UTC parsed from a backup's yyyyMMdd-HHmmss name prefix, or "" if it doesn't parse.
+        // A crash between the two moves leaves the old data authoritative: the restore never completed, so nothing may act as though it had.
+        public static void FinishInterruptedRestore()
+        {
+            string dataRoot = KmhDataPaths.Folder;
+            string staging  = dataRoot + ".restoring";
+            string previous = dataRoot + ".previous";
+            try
+            {
+                if (!Directory.Exists(dataRoot) && Directory.Exists(previous))
+                {
+                    Directory.Move(previous, dataRoot);
+                    ServerLog.Warn("Restore: a previous restore was interrupted mid-swap - the data from before it " +
+                                   "has been put back. Nothing was mixed; run the restore again if you still want it.");
+                }
+                SafeDeleteDir(staging);
+                SafeDeleteDir(previous);
+            }
+            catch (Exception ex) { ServerLog.Error($"Restore: could not finish an interrupted restore: {ex.Message}"); }
+        }
+
+        // Byte-for-byte against the manifest; older manifests carry no hash column and can only be size-checked.
+        public static bool Verify(string backupDir, out string error)
+        {
+            error = null;
+            string manifestPath = Path.Combine(backupDir, "manifest.txt");
+            string[] lines;
+            try { lines = File.ReadAllLines(manifestPath); }
+            catch (Exception ex) { error = $"could not read the manifest: {ex.Message}"; return false; }
+
+            var problems = new List<string>();
+            int checkedFiles = 0, hashed = 0;
+            foreach (string line in lines)
+            {
+                if (line.Length == 0 || line.IndexOf('\t') < 0) continue;   // header block
+                string[] parts = line.Split('\t');
+                string rel = parts[0];
+                string full = Path.Combine(backupDir, rel);
+                if (!File.Exists(full)) { problems.Add($"{rel} (missing)"); continue; }
+                checkedFiles++;
+
+                if (parts.Length >= 2 && long.TryParse(parts[1], out long len) && SafeLen(full) != len)
+                { problems.Add($"{rel} (size {SafeLen(full)}, manifest says {len})"); continue; }
+
+                if (parts.Length >= 3 && parts[2].Length > 0)
+                {
+                    hashed++;
+                    if (!string.Equals(Sha256(full), parts[2], StringComparison.OrdinalIgnoreCase))
+                        problems.Add($"{rel} (contents changed)");
+                }
+                if (problems.Count >= 8) break;   // enough to act on; the rest would just scroll
+            }
+
+            if (problems.Count > 0)
+            {
+                error = $"'{Path.GetFileName(backupDir)}' does not match its manifest and was NOT restored: "
+                      + string.Join(", ", problems);
+                return false;
+            }
+            ServerLog.Verbose($"Restore: verified {checkedFiles} file(s) against the manifest ({hashed} by hash).");
+            return true;
+        }
+
+        private static string Sha256(string path)
+        {
+            try
+            {
+                using (var sha = System.Security.Cryptography.SHA256.Create())
+                using (FileStream fs = File.OpenRead(path))
+                {
+                    byte[] hash = sha.ComputeHash(fs);
+                    var sb = new StringBuilder(hash.Length * 2);
+                    foreach (byte b in hash) sb.Append(b.ToString("x2"));
+                    return sb.ToString();
+                }
+            }
+            catch { return ""; }
+        }
+
+        private static void SafeDeleteDir(string dir)
+        {
+            try { if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true); } catch { }
+        }
+
+        private static void MoveInto(string entry, string staging, string dataRoot)
+        {
+            try
+            {
+                string rel = GetRelative(dataRoot, entry);
+                string to  = Path.Combine(staging, rel);
+                Directory.CreateDirectory(Path.GetDirectoryName(to));
+                if (Directory.Exists(entry)) Directory.Move(entry, to);
+                else File.Move(entry, to);
+            }
+            catch (Exception ex) { ServerLog.Warn($"Restore: could not carry '{entry}' across the swap: {ex.Message}"); }
+        }
+
         public static string StampUtcIso(string backupName)
             => TryParseStamp(backupName, out DateTime t) ? t.ToString("o") : "";
 
@@ -211,6 +378,9 @@ namespace KMHServerAddon.Persistence
             return result;
         }
 
+        // The same rule the copy uses, exposed so a test can ask about a path without writing a backup.
+        internal static bool WouldBackUp(string path) => KeepInBackup(path);
+
         private static bool KeepInBackup(string path)
         {
             string name = Path.GetFileName(path);
@@ -219,11 +389,19 @@ namespace KMHServerAddon.Persistence
             if (name.Equals(".kmh-snapshot-request", StringComparison.OrdinalIgnoreCase)) return false;   // transient marker
             if (IsSnapshotArtifact(path)) return false;   // Snapshots/ is an archive, not live state - keep backups lean
             if (IsUnder(path, "Debug")) return false;     // client debug logs are transient diagnostics
+            // Regenerable and wiped at boot anyway, so copying it adds up to CacheMaxMegabytes to every backup.
+            if (IsUnder(path, "MediaCache")) return false;
+            if (IsUnder(path, "Support")) return false;   // a redacted copy of what this backup already holds
             return true;
         }
 
         // Snapshots/ is a recovery archive: never backed up (bloat), never deleted by a rollback.
         private static bool IsSnapshotArtifact(string path) => IsUnder(path, "Snapshots");
+
+        // Omitted from backups on purpose, so a rollback carries them across untouched - losing the Debug log destroys the record of the rollback.
+        internal static bool SurvivesRestore(string path)
+            => IsSnapshotArtifact(path) || IsUnder(path, "Debug")
+            || IsUnder(path, "Support") || IsUnder(path, "MediaCache");
 
         private static bool IsUnder(string path, string folder)
         {

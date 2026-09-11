@@ -8,22 +8,17 @@ using Newtonsoft.Json;
 
 namespace KMHServerAddon.Features.Enforcement
 {
-    // Owner-tunable enforcement (KMH-Data/Config/Enforcement.json). When Enabled, clients lock Mod Options except
-    // SafeMods (matched by packageId or name) and,
-    // if AdminBypass is on, connected admins.
     internal class EnforcementConfig
     {
-        // Schema version for forward-compatible migrations (absent = 1). Changes so far are additive.
         public int      SchemaVersion { get; set; } = 1;
 
         public bool     Enabled     { get; set; } = false;
         public bool     AdminBypass { get; set; } = true;
-        // On: the client merges each config so the server's gameplay fields win
-        // while the player keeps personal values (window/colour/audio). UI stays locked.
+
+        // The client merges rather than replaces, so a player keeps window and audio values the server does not set.
         public bool     PreservePersonalFields { get; set; } = false;
         public string[] SafeMods    { get; set; } = Array.Empty<string>();
 
-        // Set one of the boolean flags by name (used by the in-game admin dialog).
         public bool SetFlag(string flag, bool value)
         {
             switch ((flag ?? "").Trim().ToLowerInvariant())
@@ -69,7 +64,6 @@ namespace KMHServerAddon.Features.Enforcement
             return false;
         }
 
-        // Add a mod to the safe list (no-op if already present). Persists.
         public bool AddSafe(string modId)
         {
             if (string.IsNullOrWhiteSpace(modId)) return false;

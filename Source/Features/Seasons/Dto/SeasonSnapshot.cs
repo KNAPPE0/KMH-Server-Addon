@@ -3,9 +3,7 @@ using Newtonsoft.Json;
 
 namespace KMHServerAddon.Features.Seasons.Dto
 {
-    // Season archive wire shapes. Byte-identical to the patch-side DTO. A "season roll" snapshots the current
-    // leaders into a SeasonArchiveDto and folds the bests into the all-time server records. Lifetime stats are
-    // never wiped - the archive just preserves each season's highlights.
+    // Mirrors the patch-side DTO - a field changed here has to change there too.
     public class SeasonArchiveSnapshot
     {
         [JsonProperty("current_season")]            public int  CurrentSeason          { get; set; } = 1;
@@ -23,13 +21,12 @@ namespace KMHServerAddon.Features.Seasons.Dto
         [JsonProperty("records")]           public List<SeasonRecordDto> Records { get; set; } = new List<SeasonRecordDto>();
     }
 
-    // One record holder for a category, e.g. ("Richest Colony", "Taz", "$15.4M", 15400000).
     public class SeasonRecordDto
     {
         [JsonProperty("category")] public string Category { get; set; } = "";
         [JsonProperty("holder")]   public string Holder   { get; set; } = "";
         [JsonProperty("detail")]   public string Detail   { get; set; } = "";
         [JsonProperty("value")]    public long   Value    { get; set; } = 0;
-        [JsonProperty("season")]   public int    Season   { get; set; } = 0;   // which season set the record (server records)
+        [JsonProperty("season")]   public int    Season   { get; set; } = 0;   // in server records, which season set it
     }
 }

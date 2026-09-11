@@ -14,9 +14,9 @@
     <Nullable>disable</Nullable>
     <LangVersion>latest</LangVersion>
     <ImplicitUsings>enable</ImplicitUsings>
-    <Version>1.2.2</Version>
-    <AssemblyVersion>1.2.2.0</AssemblyVersion>
-    <FileVersion>1.2.2.0</FileVersion>
+    <Version>1.3.0</Version>
+    <AssemblyVersion>1.3.0.0</AssemblyVersion>
+    <FileVersion>1.3.0.0</FileVersion>
     <IntermediateOutputPath>obj\$(RwtFlavor)\$(Configuration)\</IntermediateOutputPath>
 
     <!-- Same RID set the RWT server uses so the addon publishes across
@@ -68,34 +68,27 @@
 
   <!-- New-generation servers run an EMBEDDED payload. If source changed since a payload was last built, the
        launcher ships stale code (missing handlers/features - e.g. a "No handler for kind" flood). Warn loudly. -->
-  <Target Name="WarnStalePayload" BeforeTargets="Build"
-          Condition="'$(RwtFlavor)' == 'Old' and Exists('bin\payload\KMHAddon.RTShared.dll')"
-          Inputs="@(KmhPayloadSource)" Outputs="bin\payload\KMHAddon.RTShared.dll">
+  <Target Name="WarnStalePayload" BeforeTargets="Build" Condition="'$(RwtFlavor)' == 'Old' and Exists('bin\payload\KMHAddon.RTShared.dll')" Inputs="@(KmhPayloadSource)" Outputs="bin\payload\KMHAddon.RTShared.dll">
     <Warning Text="KMHAddon.RTShared.dll (the 26.6.x payload) is OLDER than source - rebuild it before releasing: dotnet build -p:RwtFlavor=New. A stale payload ships old code to new-generation servers (e.g. missing message handlers)." />
   </Target>
-  <Target Name="WarnStaleRtPayload" BeforeTargets="Build"
-          Condition="'$(RwtFlavor)' == 'Old' and Exists('bin\payload\KMHAddon.RTServer.dll')"
-          Inputs="@(KmhPayloadSource)" Outputs="bin\payload\KMHAddon.RTServer.dll">
+  <Target Name="WarnStaleRtPayload" BeforeTargets="Build" Condition="'$(RwtFlavor)' == 'Old' and Exists('bin\payload\KMHAddon.RTServer.dll')" Inputs="@(KmhPayloadSource)" Outputs="bin\payload\KMHAddon.RTServer.dll">
     <Warning Text="KMHAddon.RTServer.dll (the renamed-assembly payload) is OLDER than source - rebuild it before releasing: dotnet build -p:RwtFlavor=RT. A stale payload ships old code to RTServer-generation servers." />
   </Target>
-  <!-- BuildVersion is a const (the file stays byte-comparable with the client's copy) and has shipped stale
-       before, so fail the build rather than let the handshake report a version that wasn't built. -->
+  <!-- KmhVersion.Build feeds the handshake (via KmhProtocol.BuildVersion) and has shipped stale before, so fail
+       the build rather than let the handshake report a version that wasn't built. -->
   <Target Name="VerifyBuildVersion" BeforeTargets="CoreCompile">
     <PropertyGroup>
-      <_ProtocolFile>SubProtocol\KmhProtocol.cs</_ProtocolFile>
-      <_ProtocolText>$([System.IO.File]::ReadAllText('$(MSBuildProjectDirectory)\$(_ProtocolFile)'))</_ProtocolText>
-      <_DeclaredBuildVersion>$([System.Text.RegularExpressions.Regex]::Match($(_ProtocolText), 'BuildVersion\s*=\s*"([^"]*)"').Groups[1].Value)</_DeclaredBuildVersion>
+      <_VersionFile>KmhVersion.cs</_VersionFile>
+      <_VersionText>$([System.IO.File]::ReadAllText('$(MSBuildProjectDirectory)\$(_VersionFile)'))</_VersionText>
+      <_DeclaredBuildVersion>$([System.Text.RegularExpressions.Regex]::Match($(_VersionText), 'Build\s*=\s*"([^"]*)"').Groups[1].Value)</_DeclaredBuildVersion>
     </PropertyGroup>
-    <Error Condition="'$(_DeclaredBuildVersion)' != '$(Version)'"
-           Text="KmhProtocol.BuildVersion is &quot;$(_DeclaredBuildVersion)&quot; but the project version is &quot;$(Version)&quot;. Update $(_ProtocolFile) so the handshake reports the version actually shipped." />
+    <Error Condition="'$(_DeclaredBuildVersion)' != '$(Version)'" Text="KmhVersion.Build is &quot;$(_DeclaredBuildVersion)&quot; but the project version is &quot;$(Version)&quot;. Update $(_VersionFile) so the handshake reports the version actually shipped." />
   </Target>
 
   <!-- A launcher built without a payload silently loses support for that generation, so say so at build time. -->
   <Target Name="WarnMissingPayloads" BeforeTargets="Build" Condition="'$(RwtFlavor)' == 'Old'">
-    <Warning Condition="!Exists('bin\payload\KMHAddon.RTShared.dll')"
-             Text="No KMHAddon.RTShared.dll payload - this launcher will NOT support 26.6.x servers. Build it first: dotnet build -p:RwtFlavor=New." />
-    <Warning Condition="!Exists('bin\payload\KMHAddon.RTServer.dll')"
-             Text="No KMHAddon.RTServer.dll payload - this launcher will NOT support RTServer-generation servers. Build it first: dotnet build -p:RwtFlavor=RT." />
+    <Warning Condition="!Exists('bin\payload\KMHAddon.RTShared.dll')" Text="No KMHAddon.RTShared.dll payload - this launcher will NOT support 26.6.x servers. Build it first: dotnet build -p:RwtFlavor=New." />
+    <Warning Condition="!Exists('bin\payload\KMHAddon.RTServer.dll')" Text="No KMHAddon.RTServer.dll payload - this launcher will NOT support RTServer-generation servers. Build it first: dotnet build -p:RwtFlavor=RT." />
   </Target>
 
   <!-- Harmony bundled with our addon - RWT server doesn't ship it.
@@ -109,6 +102,7 @@
          dependency is loaded but the bot never starts, so cold-start cost
          is minimal. -->
     <PackageReference Include="Discord.Net" Version="3.16.0" />
+    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.11" />
   </ItemGroup>
 
   <!-- Public SDK project for extension authors. Built alongside the
@@ -132,21 +126,16 @@
     <KmhDataIcon Include="Assets\Icons\**\*" />
   </ItemGroup>
   <Target Name="StageKmhDataIconsBuild" AfterTargets="Build" Condition="'$(RwtFlavor)' == 'Old'">
-    <Copy SourceFiles="@(KmhDataIcon)"
-          DestinationFiles="@(KmhDataIcon->'$(OutDir)KMH-Data\Icons\%(RecursiveDir)%(Filename)%(Extension)')"
-          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(KmhDataIcon)" DestinationFiles="@(KmhDataIcon->'$(OutDir)KMH-Data\Icons\%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" />
   </Target>
   <Target Name="StageKmhDataIconsPublish" AfterTargets="Publish" Condition="'$(RwtFlavor)' == 'Old'">
-    <Copy SourceFiles="@(KmhDataIcon)"
-          DestinationFiles="@(KmhDataIcon->'$(PublishDir)KMH-Data\Icons\%(RecursiveDir)%(Filename)%(Extension)')"
-          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(KmhDataIcon)" DestinationFiles="@(KmhDataIcon->'$(PublishDir)KMH-Data\Icons\%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" />
   </Target>
 
   <!-- Newtonsoft.Json is referenced Private=False (framework-dependent builds get it from RWT's own folder).
        A self-contained folder build has no RWT beside it at publish time, so stage Newtonsoft here or it starts
        up missing that dependency. Same DLL RWT ships, so no version drift. -->
-  <Target Name="StageNewtonsoftForSelfContained" AfterTargets="Publish"
-          Condition="'$(RwtFlavor)' == 'Old' and '$(SelfContained)' == 'true' and Exists('$(RwtServerBuildPath)\Newtonsoft.Json.dll')">
+  <Target Name="StageNewtonsoftForSelfContained" AfterTargets="Publish" Condition="'$(RwtFlavor)' == 'Old' and '$(SelfContained)' == 'true' and Exists('$(RwtServerBuildPath)\Newtonsoft.Json.dll')">
     <Copy SourceFiles="$(RwtServerBuildPath)\Newtonsoft.Json.dll" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" />
   </Target>
 
@@ -157,10 +146,10 @@
        addon build, producing duplicate-attribute errors. Exclude
        the SDK folder explicitly. -->
   <ItemGroup>
-    <Compile          Remove="KMH.Sdk.Server\**\*.cs" />
-    <Content          Remove="KMH.Sdk.Server\**" />
+    <Compile Remove="KMH.Sdk.Server\**\*.cs" />
+    <Content Remove="KMH.Sdk.Server\**" />
     <EmbeddedResource Remove="KMH.Sdk.Server\**" />
-    <None             Remove="KMH.Sdk.Server\**" />
+    <None Remove="KMH.Sdk.Server\**" />
   </ItemGroup>
 
   <!--

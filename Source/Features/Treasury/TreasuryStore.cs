@@ -1,35 +1,34 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using KMHServerAddon.Features.Treasury.Dto;
 using KMHServerAddon.Persistence;
 
 namespace KMHServerAddon.Features.Treasury
 {
-    // Authoritative treasury, persisted to KMH-Data/Treasury/Treasury.json. OwnerKey is "_personal:<user_lower>" or
-    // "<guild_name>". All access is under _lock (RWT's chat thread + the sweeper hit it concurrently). Deposit amounts
-    // are client-claimed - the server can't see caravan inventory, so that trust is inherent to the design.
+    // Deposit amounts are client-claimed, because the server cannot see caravan inventory.
     internal static class TreasuryStore
     {
         private static readonly object _lock = new object();
         private static readonly Dictionary<string, TreasurySnapshot> _vaults
             = new Dictionary<string, TreasurySnapshot>(StringComparer.OrdinalIgnoreCase);
 
-        // Same constant the patch mod uses to identify personal vaults.
         public const int MaxTransactionLogEntries = 100;
 
         public static string PersonalKeyFor(string username)
             => "_personal:" + (username ?? "").ToLowerInvariant();
 
-        // Which treasury a caller's own actions operate on - always their personal vault. Guild vaults are addressed
-        // directly by guild name (DepositGuildSilver / WithdrawGuildSilver), not routed through here.
+        // The inverse, for a listener that only has the key a change was announced under.
+        public static string UsernameOfOwnerKey(string ownerKey)
+            => string.IsNullOrEmpty(ownerKey) || !ownerKey.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase)
+             ? "" : ownerKey.Substring("_personal:".Length);
+
+        // Always the personal vault; guild vaults are addressed directly by name instead.
         public static string ResolveOwnerKeyFor(string username)
         {
             return PersonalKeyFor(username);
         }
 
-        // Read-only silver lookup keyed by guild name. Returns 0 when no vault has been created for that guild yet
-        // (treasury is created lazily on first deposit / quest-bounty escrow). Used by the Discord guild
-        // leaderboard for the "treasury silver" sort
+        // 0 when the guild has no vault yet, since vaults are created lazily on first deposit.
         public static long GetGuildSilver(string guildName)
         {
             if (string.IsNullOrEmpty(guildName)) return 0;
@@ -39,16 +38,71 @@ namespace KMHServerAddon.Features.Treasury
             }
         }
 
-        // Spendable personal-vault silver for a user (0 if no vault yet). Used by the P7 treasury-cap check.
+        // Saturates rather than wrapping, and the deposit cap is not a backstop here: 0 means unlimited.
+        private static int AddSilver(TreasurySnapshot v, long add, string what)
+        {
+            int result = Util.KmhSafe.AddSaturating(v.SilverBalance, add, out bool clamped);
+            if (clamped)
+                Diagnostics.ServerLog.Error($"Treasury: {v.OwnerKey} silver hit the {int.MaxValue:N0} ceiling on {what} - "
+                    + "the excess could not be stored. Raise the silver sinks or split the vault.");
+            return result;
+        }
+
+        // Item counts take client-claimed quantities, so they wrap even more easily than silver.
+        private static int AddQty(TreasurySnapshot v, int current, long add, string itemKey, string what)
+        {
+            int result = Util.KmhSafe.AddSaturating(current, add, out bool clamped);
+            if (clamped)
+                Diagnostics.ServerLog.Error($"Treasury: {v.OwnerKey} stack of '{itemKey}' hit the {int.MaxValue:N0} "
+                    + $"ceiling on {what} - the excess could not be stored.");
+            return result;
+        }
+
+        // Deserialization yields the ordinal comparer, so keys differing only in case are summed rather than dropped.
+        private static Dictionary<string, int> NormalizeItemKeys(Dictionary<string, int> src)
+        {
+            Dictionary<string, int> items = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            if (src == null) return items;
+            foreach (KeyValuePair<string, int> kv in src)
+            {
+                if (string.IsNullOrEmpty(kv.Key) || kv.Value <= 0) continue;
+                items.TryGetValue(kv.Key, out int cur);
+                items[kv.Key] = Util.KmhSafe.AddSaturating(cur, kv.Value, out _);
+            }
+            return items;
+        }
+
         public static long GetPersonalSilver(string username)
         {
             string key = PersonalKeyFor(username);
             lock (_lock) { return _vaults.TryGetValue(key, out TreasurySnapshot v) ? v.SilverBalance : 0; }
         }
 
-        // Confirmed (spendable) personal off-map value: silver + item value (via the trusted catalog). Excludes pending
-        // deposits (unconfirmed). For the "KMH Effective Wealth" audit - this value is NOT yet in raid/threat scaling.
+        // Storyteller threat, Standings and `kmh audit-player` all read this one list, so it cannot drift between them.
+        internal static System.Collections.Generic.IEnumerable<System.Func<string, long>> OffMapValueSources()
+        {
+            yield return Roadworks.RoadworksStore.ReservedSilverFor;
+            yield return Sites.SiteStore.StoredValueFor;
+            yield return Marketplace.MarketplaceStore.EscrowValueFor;
+            yield return Auctions.AuctionStore.EscrowValueFor;
+            yield return WantBoard.WantStore.EscrowValueFor;
+            yield return Quests.QuestStore.EscrowValueFor;
+            yield return Mail.MailStore.EscrowValueFor;
+            yield return Guilds.GuildStore.VaultShareFor;
+            yield return PersonalVaultValue;
+        }
+
+        // Confirmed value only, so an unconfirmed pending deposit cannot inflate it.
         public static long PersonalOffMapValue(string username)
+        {
+            long total = 0;
+            // Every source holds its own lock, so none is called while ours is held.
+            foreach (System.Func<string, long> src in OffMapValueSources()) total += src(username);
+            return total;
+        }
+
+        // This player's own vault: silver plus the trusted value of both item shapes.
+        public static long PersonalVaultValue(string username)
         {
             string key = PersonalKeyFor(username);
             lock (_lock)
@@ -65,7 +119,6 @@ namespace KMHServerAddon.Features.Treasury
             }
         }
 
-        // Dry-run summary for admin cleanup: (silver, item stacks, pending deposits) in a user's personal vault.
         public static (long silver, int itemStacks, int pending) PersonalSummary(string username)
         {
             string key = PersonalKeyFor(username);
@@ -76,21 +129,41 @@ namespace KMHServerAddon.Features.Treasury
             }
         }
 
-        // --- guild-vault mutations ---
-        // Guild vaults are keyed by raw guild name (distinct from the "_personal:" namespace) so guild silver can be
-        // pooled + spent. The contributor/actor is recorded in the log, but the vault belongs to the guild.
-
+        // The contributor is recorded in the log, but the vault itself belongs to the guild.
         public static bool DepositGuildSilver(string guildName, int amount, string contributorUsername, string note = "")
         {
             if (string.IsNullOrEmpty(guildName) || amount <= 0) return false;
             lock (_lock)
             {
+                TreasurySnapshot before = RollbackPointLocked(guildName);
                 TreasurySnapshot v = GetOrCreateLocked(guildName, isGuildOwned: true);
-                v.SilverBalance    += amount;
+                v.SilverBalance     = AddSilver(v, amount, "guild deposit");
                 v.LifetimeSilverIn += amount;
                 RecordTransactionLocked(v, contributorUsername, TreasuryTransaction.KindDeposit, amount, "", note);
+                if (!CommitLocked(guildName, before)) return false;
             }
-            SaveToDisk();
+            Extensibility.KmhEventBus.Instance.RaiseTreasuryChanged(new KMH.Sdk.Server.Events.TreasuryChangedEvent { OwnerKey = guildName, IsGuildOwned = true, Reason = note ?? "" });
+            return true;
+        }
+
+        // Marker written in the SAME commit as the balance, so a settlement replayed after a crash cannot pay the guild twice.
+        public static bool DepositGuildSilverOnce(string guildName, string marker, int amount,
+                                                  string contributorUsername, string note = "")
+        {
+            if (string.IsNullOrEmpty(marker)) return DepositGuildSilver(guildName, amount, contributorUsername, note);
+            if (string.IsNullOrEmpty(guildName) || amount <= 0) return false;
+            lock (_lock)
+            {
+                TreasurySnapshot before = RollbackPointLocked(guildName);
+                TreasurySnapshot v = GetOrCreateLocked(guildName, isGuildOwned: true);
+                if (IsKnownTxnLocked(v, marker)) return true;
+                v.SilverBalance     = AddSilver(v, amount, "guild deposit");
+                v.LifetimeSilverIn += amount;
+                RecordTransactionLocked(v, contributorUsername, TreasuryTransaction.KindDeposit, amount, "", note);
+                v.RecentCommittedTxns.Add(marker);
+                while (v.RecentCommittedTxns.Count > MaxRecentCommittedTxns) v.RecentCommittedTxns.RemoveAt(0);
+                if (!CommitLocked(guildName, before)) return false;
+            }
             Extensibility.KmhEventBus.Instance.RaiseTreasuryChanged(new KMH.Sdk.Server.Events.TreasuryChangedEvent { OwnerKey = guildName, IsGuildOwned = true, Reason = note ?? "" });
             return true;
         }
@@ -101,17 +174,16 @@ namespace KMHServerAddon.Features.Treasury
             lock (_lock)
             {
                 if (!_vaults.TryGetValue(guildName, out TreasurySnapshot v) || v.SilverBalance < amount) return false;
+                TreasurySnapshot before = RollbackPointLocked(guildName);
                 v.SilverBalance     -= amount;
                 v.LifetimeSilverOut += amount;
                 RecordTransactionLocked(v, actorUsername, TreasuryTransaction.KindWithdraw, amount, "", note);
+                if (!CommitLocked(guildName, before)) return false;
             }
-            SaveToDisk();
             Extensibility.KmhEventBus.Instance.RaiseTreasuryChanged(new KMH.Sdk.Server.Events.TreasuryChangedEvent { OwnerKey = guildName, IsGuildOwned = true, Reason = note ?? "" });
             return true;
         }
 
-        // Get or create the vault. Always returns a non-null snapshot. Internal - handlers should use
-        // GetSnapshotFor (which also fills per-caller permission flags)
         private static TreasurySnapshot GetOrCreateLocked(string ownerKey, bool isGuildOwned)
         {
             if (!_vaults.TryGetValue(ownerKey, out TreasurySnapshot v))
@@ -120,14 +192,14 @@ namespace KMHServerAddon.Features.Treasury
                 {
                     OwnerKey     = ownerKey,
                     IsGuildOwned = isGuildOwned,
+                    Items        = NormalizeItemKeys(null),
                 };
                 _vaults[ownerKey] = v;
             }
             return v;
         }
 
-        // Build a per-caller snapshot copy (so mutation by other threads mid-send can't corrupt what we serialize).
-        // Sets CanDeposit / CanWithdraw based on who's asking
+        // A copy, so another thread mutating mid-send cannot corrupt what is serialized.
         public static TreasurySnapshot GetSnapshotFor(string username)
         {
             string ownerKey   = ResolveOwnerKeyFor(username);
@@ -135,7 +207,9 @@ namespace KMHServerAddon.Features.Treasury
 
             lock (_lock)
             {
-                TreasurySnapshot live = GetOrCreateLocked(ownerKey, isGuild);
+                // Reading must not create a vault, or every lookup of an unknown name would persist an empty row.
+                if (!_vaults.TryGetValue(ownerKey, out TreasurySnapshot live))
+                    live = new TreasurySnapshot { OwnerKey = ownerKey, IsGuildOwned = isGuild };
 
                 TreasurySnapshot copy = new TreasurySnapshot
                 {
@@ -146,25 +220,20 @@ namespace KMHServerAddon.Features.Treasury
                     LifetimeSilverOut  = live.LifetimeSilverOut,
                     Items              = new Dictionary<string, int>(live.Items, StringComparer.OrdinalIgnoreCase),
                     RecentTransactions = new List<TreasuryTransaction>(live.RecentTransactions),
-                    // Payload metadata for display; ScribeXml stripped so the snapshot stays under the frame cap (the
-                    // blob rides the grant on withdraw instead).
-                    ItemPayloads       = StripBlobs(live.ItemPayloads),
-                    // Pending (not-yet-spendable) deposits for the client's "pending until saved" display; blobs
-                    // stripped. RecentCommittedTxns is intentionally NOT copied - it stays server-side only.
+                    // Blobs are stripped so the snapshot stays under the frame cap; they ride the grant on withdraw.
+                    ItemPayloads       = GroupForDisplay(live.ItemPayloads),
                     PendingDeposits    = StripPendingBlobs(live.PendingDeposits),
                 };
 
-                // Permissions: personal vault owner can always deposit + withdraw. Guild-rank checks land with the
-                // Guild handler
                 bool isOwner = string.Equals(ownerKey, PersonalKeyFor(username), StringComparison.OrdinalIgnoreCase);
                 copy.CanDeposit  = isOwner;
                 copy.CanWithdraw = isOwner;
+                copy.Revision    = Util.KmhSnapshotRevision.Next();
 
                 return copy;
             }
         }
 
-        // --- mutations ---
 
         public static bool DepositSilver(string username, int amount, string note = "")
         {
@@ -172,12 +241,13 @@ namespace KMHServerAddon.Features.Treasury
             string ownerKey = ResolveOwnerKeyFor(username);
             lock (_lock)
             {
+                TreasurySnapshot before = RollbackPointLocked(ownerKey);
                 TreasurySnapshot v = GetOrCreateLocked(ownerKey, ownerKey.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase) == false);
-                v.SilverBalance     += amount;
+                v.SilverBalance     = AddSilver(v, amount, "deposit");
                 v.LifetimeSilverIn  += amount;
                 RecordTransactionLocked(v, username, TreasuryTransaction.KindDeposit, amount, "", note);
+                if (!CommitLocked(ownerKey, before)) return false;
             }
-            SaveToDisk();
             Extensibility.KmhEventBus.Instance.RaiseTreasuryChanged(new KMH.Sdk.Server.Events.TreasuryChangedEvent { OwnerKey = ownerKey, IsGuildOwned = !ownerKey.StartsWith("_personal:", System.StringComparison.OrdinalIgnoreCase), Reason = note ?? "" });
             return true;
         }
@@ -188,13 +258,14 @@ namespace KMHServerAddon.Features.Treasury
             string ownerKey = ResolveOwnerKeyFor(username);
             lock (_lock)
             {
+                TreasurySnapshot before = RollbackPointLocked(ownerKey);
                 TreasurySnapshot v = GetOrCreateLocked(ownerKey, ownerKey.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase) == false);
                 if (v.SilverBalance < amount) return false;
                 v.SilverBalance     -= amount;
                 v.LifetimeSilverOut += amount;
                 RecordTransactionLocked(v, username, TreasuryTransaction.KindWithdraw, amount, "", note);
+                if (!CommitLocked(ownerKey, before)) return false;
             }
-            SaveToDisk();
             Extensibility.KmhEventBus.Instance.RaiseTreasuryChanged(new KMH.Sdk.Server.Events.TreasuryChangedEvent { OwnerKey = ownerKey, IsGuildOwned = !ownerKey.StartsWith("_personal:", System.StringComparison.OrdinalIgnoreCase), Reason = note ?? "" });
             return true;
         }
@@ -205,13 +276,39 @@ namespace KMHServerAddon.Features.Treasury
             string ownerKey = ResolveOwnerKeyFor(username);
             lock (_lock)
             {
+                TreasurySnapshot before = RollbackPointLocked(ownerKey);
                 TreasurySnapshot v = GetOrCreateLocked(ownerKey, ownerKey.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase) == false);
                 if (!v.Items.TryGetValue(itemDefName, out int cur)) cur = 0;
-                v.Items[itemDefName] = cur + qty;
+                v.Items[itemDefName] = AddQty(v, cur, qty, itemDefName, "item deposit");
                 RecordTransactionLocked(v, username, TreasuryTransaction.KindDeposit, qty, itemDefName, note);
+                if (!CommitLocked(ownerKey, before)) return false;
             }
-            SaveToDisk();
+            // Recorded only after the deposit commits, so a failed deposit cannot credit a contribution.
+            if (!ownerKey.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase))
+            {
+                long contributed = Math.Max(0, Features.ItemLabels.ItemLabelCache.BaseValue(itemDefName)) * qty;
+                Guilds.GuildStore.AddItemsContributed(ownerKey, username, qty);
+                Guilds.Contributions.KmhGuildContributionLedger.RecordItem(ownerKey, username, contributed, $"{qty}x {itemDefName}");
+            }
             Extensibility.KmhEventBus.Instance.RaiseTreasuryChanged(new KMH.Sdk.Server.Events.TreasuryChangedEvent { OwnerKey = ownerKey, IsGuildOwned = !ownerKey.StartsWith("_personal:", System.StringComparison.OrdinalIgnoreCase), Reason = note ?? "" });
+            return true;
+        }
+
+        // Records no contribution, or a member could farm standing simply by owning a productive guild site.
+        public static bool DepositGuildItem(string guildName, string itemDefName, int qty, string note = "")
+        {
+            if (string.IsNullOrEmpty(guildName) || string.IsNullOrEmpty(itemDefName) || qty <= 0) return false;
+            lock (_lock)
+            {
+                TreasurySnapshot before = RollbackPointLocked(guildName);
+                TreasurySnapshot v = GetOrCreateLocked(guildName, isGuildOwned: true);
+                if (!v.Items.TryGetValue(itemDefName, out int cur)) cur = 0;
+                v.Items[itemDefName] = AddQty(v, cur, qty, itemDefName, "guild income");
+                RecordTransactionLocked(v, guildName, TreasuryTransaction.KindDeposit, qty, itemDefName, note);
+                if (!CommitLocked(guildName, before)) return false;
+            }
+            Extensibility.KmhEventBus.Instance.RaiseTreasuryChanged(new KMH.Sdk.Server.Events.TreasuryChangedEvent
+            { OwnerKey = guildName, IsGuildOwned = true, Reason = note ?? "" });
             return true;
         }
 
@@ -221,22 +318,133 @@ namespace KMHServerAddon.Features.Treasury
             string ownerKey = ResolveOwnerKeyFor(username);
             lock (_lock)
             {
+                TreasurySnapshot before = RollbackPointLocked(ownerKey);
                 TreasurySnapshot v = GetOrCreateLocked(ownerKey, ownerKey.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase) == false);
                 if (!v.Items.TryGetValue(itemDefName, out int cur) || cur < qty) return false;
                 int next = cur - qty;
                 if (next <= 0) v.Items.Remove(itemDefName);
                 else           v.Items[itemDefName] = next;
                 RecordTransactionLocked(v, username, TreasuryTransaction.KindWithdraw, qty, itemDefName, note);
+                if (!CommitLocked(ownerKey, before)) return false;
             }
-            SaveToDisk();
             Extensibility.KmhEventBus.Instance.RaiseTreasuryChanged(new KMH.Sdk.Server.Events.TreasuryChangedEvent { OwnerKey = ownerKey, IsGuildOwned = !ownerKey.StartsWith("_personal:", System.StringComparison.OrdinalIgnoreCase), Reason = note ?? "" });
             return true;
         }
 
-        // --- state-preserving payload items (complex Things) ---
+        // Item form of WithdrawSilverForTxn: the marker lands in the same commit as the stack, so recovery never refunds goods still in the vault.
+        public static bool WithdrawItemForTxn(string username, string itemDefName, int qty, string marker, string note = "")
+        {
+            if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(itemDefName) || qty <= 0
+                || string.IsNullOrEmpty(marker)) return false;
+            string ownerKey = ResolveOwnerKeyFor(username);
+            lock (_lock)
+            {
+                TreasurySnapshot before = RollbackPointLocked(ownerKey);
+                TreasurySnapshot v = GetOrCreateLocked(ownerKey, !ownerKey.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase));
+                if (IsKnownTxnLocked(v, marker)) return true;
+                if (!v.Items.TryGetValue(itemDefName, out int cur) || cur < qty) return false;
+                int next = cur - qty;
+                if (next <= 0) v.Items.Remove(itemDefName);
+                else           v.Items[itemDefName] = next;
+                RecordTransactionLocked(v, username, TreasuryTransaction.KindWithdraw, qty, itemDefName, note);
+                v.RecentCommittedTxns.Add(marker);
+                while (v.RecentCommittedTxns.Count > MaxRecentCommittedTxns) v.RecentCommittedTxns.RemoveAt(0);
+                if (!CommitLocked(ownerKey, before)) return false;
+            }
+            RaiseChanged(ownerKey, note);
+            return true;
+        }
 
-        // Store a captured item payload. Merges into an existing stack only when RimWorld itself could (metadata-only,
-        // identical state); blob-carrying instances are always kept separate so nothing merges unsafely.
+        // Payload form; the marker is what lets recovery distinguish "taken, row not written yet" from "never taken".
+        public static List<Items.KmhThingPayload> WithdrawPayloadsForTxn(string username, string fingerprint, int qty,
+                                                                        string marker, string note = "",
+                                                                        string refundMarker = null)
+        {
+            if (string.IsNullOrEmpty(marker)) return null;
+            string ownerKey = ResolveOwnerKeyFor(username);
+            lock (_lock)
+                if (_vaults.TryGetValue(ownerKey, out TreasurySnapshot known) && IsKnownTxnLocked(known, marker))
+                    return null;
+            return WithdrawPayloadsInternal(username, fingerprint, qty, marker, note, refundMarker);
+        }
+
+        // Recovery reads the marker, not the ledger's intent, so a crash before the ledger write cannot mint or lose a refund.
+        public static bool WithdrawSilverForTxn(string username, int amount, string marker, string note = "")
+        {
+            if (string.IsNullOrEmpty(username) || amount <= 0 || string.IsNullOrEmpty(marker)) return false;
+            string ownerKey = ResolveOwnerKeyFor(username);
+            lock (_lock)
+            {
+                TreasurySnapshot before = RollbackPointLocked(ownerKey);
+                TreasurySnapshot v = GetOrCreateLocked(ownerKey, !ownerKey.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase));
+                if (IsKnownTxnLocked(v, marker)) return true;
+                if (v.SilverBalance < amount) return false;
+                v.SilverBalance     -= amount;
+                v.LifetimeSilverOut += amount;
+                RecordTransactionLocked(v, username, TreasuryTransaction.KindWithdraw, amount, "", note);
+                v.RecentCommittedTxns.Add(marker);
+                while (v.RecentCommittedTxns.Count > MaxRecentCommittedTxns) v.RecentCommittedTxns.RemoveAt(0);
+                if (!CommitLocked(ownerKey, before)) return false;
+            }
+            RaiseChanged(ownerKey, note);
+            return true;
+        }
+
+        // Markers are capped, so a very old one reads as unknown: valid inside the recovery window only, never as permanent history.
+        public static bool KnowsTxnMarker(string username, string marker)
+        {
+            if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(marker)) return false;
+            string ownerKey = ResolveOwnerKeyFor(username);
+            lock (_lock)
+                return _vaults.TryGetValue(ownerKey, out TreasurySnapshot v) && IsKnownTxnLocked(v, marker);
+        }
+
+        // Dedup marker written in the SAME commit as the balance, so a replayed compensation cannot pay twice or half-apply.
+        public static bool DepositEscrowOnce(string username, string txnId, long silver,
+                                             IDictionary<string, int> items,
+                                             IEnumerable<Items.KmhThingPayload> payloads, string note = "")
+        {
+            if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(txnId)) return false;
+            string ownerKey = ResolveOwnerKeyFor(username);
+            lock (_lock)
+            {
+                TreasurySnapshot before = RollbackPointLocked(ownerKey);
+                TreasurySnapshot v = GetOrCreateLocked(ownerKey, !ownerKey.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase));
+                if (IsKnownTxnLocked(v, txnId)) return true;
+
+                if (silver > 0)
+                {
+                    int chunk = (int)Math.Min(silver, int.MaxValue);
+                    v.SilverBalance     = AddSilver(v, chunk, "escrow return");
+                    v.LifetimeSilverIn += chunk;
+                    RecordTransactionLocked(v, username, TreasuryTransaction.KindDeposit, chunk, "", note);
+                }
+                if (items != null)
+                    foreach (KeyValuePair<string, int> kv in items)
+                    {
+                        if (string.IsNullOrEmpty(kv.Key) || kv.Value <= 0) continue;
+                        if (!v.Items.TryGetValue(kv.Key, out int cur)) cur = 0;
+                        v.Items[kv.Key] = AddQty(v, cur, kv.Value, kv.Key, "escrow return");
+                        RecordTransactionLocked(v, username, TreasuryTransaction.KindDeposit, kv.Value, kv.Key, note);
+                    }
+                if (payloads != null)
+                    foreach (Items.KmhThingPayload p in payloads)
+                    {
+                        if (p == null || !Items.KmhItemSafety.ValidatePayload(p)) continue;
+                        AddPayloadLocked(v, p);
+                        RecordTransactionLocked(v, username, TreasuryTransaction.KindDeposit, p.StackCount,
+                            Items.KmhItemSafety.DescribeStateForLedger(p), note);
+                    }
+
+                v.RecentCommittedTxns.Add(txnId);
+                while (v.RecentCommittedTxns.Count > MaxRecentCommittedTxns) v.RecentCommittedTxns.RemoveAt(0);
+                if (!CommitLocked(ownerKey, before)) return false;
+            }
+            RaiseChanged(ownerKey, note);
+            return true;
+        }
+
+        // Merges only where RimWorld itself could; a blob-carrying instance is always kept separate.
         public static bool DepositPayload(string username, Items.KmhThingPayload payload, string note = "")
         {
             if (string.IsNullOrEmpty(username) || payload == null) return false;
@@ -244,66 +452,160 @@ namespace KMHServerAddon.Features.Treasury
             string ownerKey = ResolveOwnerKeyFor(username);
             lock (_lock)
             {
+                TreasurySnapshot before = RollbackPointLocked(ownerKey);
                 TreasurySnapshot v = GetOrCreateLocked(ownerKey, !ownerKey.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase));
                 AddPayloadLocked(v, payload);
                 RecordTransactionLocked(v, username, TreasuryTransaction.KindDeposit, payload.StackCount,
                     Items.KmhItemSafety.DescribeStateForLedger(payload), note);
+                if (!CommitLocked(ownerKey, before)) return false;
             }
-            SaveToDisk();
             RaiseChanged(ownerKey, note);
             return true;
         }
 
-        // Withdraw up to `qty` units of a fingerprint. Returns the payloads to materialize (with their blobs), or null
-        // if none match. Blob instances are atomic (whole entry); metadata stacks split by count.
+        // Null when nothing matches; a blob instance is atomic while a metadata stack can split.
         public static List<Items.KmhThingPayload> WithdrawPayloads(string username, string fingerprint, int qty, string note = "")
+            => WithdrawPayloadsInternal(username, fingerprint, qty, null, note);
+
+        private static List<Items.KmhThingPayload> WithdrawPayloadsInternal(string username, string fingerprint, int qty,
+                                                                           string marker, string note,
+                                                                           string refundMarker = null)
         {
             if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(fingerprint) || qty <= 0) return null;
             string ownerKey = ResolveOwnerKeyFor(username);
             List<Items.KmhThingPayload> granted = new List<Items.KmhThingPayload>();
             lock (_lock)
             {
+                TreasurySnapshot before = RollbackPointLocked(ownerKey);
                 TreasurySnapshot v = GetOrCreateLocked(ownerKey, !ownerKey.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase));
                 int remaining = qty;
+
+                // One displayed row represents every stack that looks alike, so the withdraw drains the whole group.
+                string wantGroup = null;
+                foreach (Items.KmhThingPayload e in v.ItemPayloads)
+                    if (string.Equals(e.Fingerprint, fingerprint, StringComparison.Ordinal))
+                    { wantGroup = Items.KmhItemSafety.DisplayKey(e); break; }
+
                 foreach (Items.KmhThingPayload e in new List<Items.KmhThingPayload>(v.ItemPayloads))
                 {
                     if (remaining <= 0) break;
-                    if (!string.Equals(e.Fingerprint, fingerprint, StringComparison.Ordinal)) continue;
-                    if (e.StackCount <= remaining)
+                    bool sameRow   = string.Equals(e.Fingerprint, fingerprint, StringComparison.Ordinal);
+                    bool sameGroup = wantGroup != null && Items.KmhItemSafety.DisplayKey(e) == wantGroup;
+                    if (!sameRow && !sameGroup) continue;
+
+                    switch (Items.KmhItemService.PlanTake(e.StackCount, remaining, Items.KmhPayloadEscrow.IsSplittable(e)))
                     {
-                        granted.Add(e); v.ItemPayloads.Remove(e); remaining -= e.StackCount;
+                        case Items.KmhItemService.TakeKind.Whole:
+                            granted.Add(e); v.ItemPayloads.Remove(e); remaining -= e.StackCount; break;
+                        case Items.KmhItemService.TakeKind.Split:
+                            granted.Add(Clone(e, remaining)); e.StackCount -= remaining; remaining = 0; break;
                     }
-                    else if (string.IsNullOrEmpty(e.ScribeXml) || e.Mergeable)   // metadata OR fungible: split (same blob, reduced count)
-                    {
-                        granted.Add(Clone(e, remaining)); e.StackCount -= remaining; remaining = 0;
-                    }
-                    // a unique blob entry (weapon/quality) larger than remaining is atomic - leave it (skip)
                 }
                 if (granted.Count == 0) return null;
                 int taken = 0; foreach (var g in granted) taken += g.StackCount;
                 RecordTransactionLocked(v, username, TreasuryTransaction.KindWithdraw, taken,
                     Items.KmhItemSafety.DescribeStateForLedger(granted[0]), note);
+                if (!string.IsNullOrEmpty(marker))
+                {
+                    v.RecentCommittedTxns.Add(marker);
+                    while (v.RecentCommittedTxns.Count > MaxRecentCommittedTxns) v.RecentCommittedTxns.RemoveAt(0);
+
+                    // Written in THIS commit: until the caller's transaction row lands, this entry is the only record of what left.
+                    if (!string.IsNullOrEmpty(refundMarker))
+                        v.PendingTakes.Add(new Dto.PendingTake
+                        {
+                            TakeMarker    = marker,
+                            RefundMarker  = refundMarker,
+                            Username      = username,
+                            TakenUtcTicks = DateTime.UtcNow.Ticks,
+                            Note          = note ?? "",
+                            Payloads      = new List<Items.KmhThingPayload>(granted),
+                        });
+                }
+                if (!CommitLocked(ownerKey, before)) return null;
             }
-            SaveToDisk();
             RaiseChanged(ownerKey, note);
             return granted;
         }
 
-        // Wire copy of payloads with the deep blob removed (metadata only). has_deep encoded via Fidelity stays.
+        // Safe to fail: a durable row now names the take, so recovery sees the value accounted for and drops the entry without paying.
+        public static bool ClearPendingTake(string username, string takeMarker)
+        {
+            if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(takeMarker)) return false;
+            string ownerKey = ResolveOwnerKeyFor(username);
+            lock (_lock)
+            {
+                if (!_vaults.TryGetValue(ownerKey, out TreasurySnapshot v)) return true;
+                TreasurySnapshot before = RollbackPointLocked(ownerKey);
+                int removed = v.PendingTakes.RemoveAll(
+                    p => p != null && string.Equals(p.TakeMarker, takeMarker, StringComparison.Ordinal));
+                if (removed == 0) return true;
+                return CommitLocked(ownerKey, before);
+            }
+        }
+
+        // Deduplicated on the refund marker, so the caller's failure path and boot recovery can both run it and the goods return once.
+        public static bool ReturnPendingTake(string username, string takeMarker, string refundMarker,
+                                             IEnumerable<Items.KmhThingPayload> payloads, string note)
+        {
+            if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(refundMarker)) return false;
+            if (!DepositEscrowOnce(username, refundMarker, 0, null, payloads, note)) return false;
+            return ClearPendingTake(username, takeMarker);
+        }
+
+        // Server-side only: GetSnapshotFor deliberately omits these, so recovery and its tests read them here.
+        internal static List<Dto.PendingTake> PendingTakesFor(string username)
+        {
+            string ownerKey = ResolveOwnerKeyFor(username);
+            lock (_lock)
+                return _vaults.TryGetValue(ownerKey, out TreasurySnapshot v) && v.PendingTakes != null
+                     ? new List<Dto.PendingTake>(v.PendingTakes)
+                     : new List<Dto.PendingTake>();
+        }
+
+        // Every take still waiting for its row, across every vault. Read at boot only.
+        public static List<Dto.PendingTake> AllPendingTakes()
+        {
+            var all = new List<Dto.PendingTake>();
+            lock (_lock)
+                foreach (TreasurySnapshot v in _vaults.Values)
+                    if (v?.PendingTakes != null)
+                        foreach (Dto.PendingTake p in v.PendingTakes)
+                            if (p != null && !string.IsNullOrEmpty(p.TakeMarker)) all.Add(p);
+            return all;
+        }
+
         private static List<Items.KmhThingPayload> StripBlobs(List<Items.KmhThingPayload> src)
         {
             List<Items.KmhThingPayload> outList = new List<Items.KmhThingPayload>();
             if (src == null) return outList;
             foreach (Items.KmhThingPayload p in src)
+                outList.Add(Items.KmhItemService.CloneWithoutBlob(p));
+            return outList;
+        }
+
+        // Display only: a modded stack's fingerprint includes its blob, so identical-looking stacks would each be a row.
+        internal static List<Items.KmhThingPayload> GroupForDisplay(List<Items.KmhThingPayload> src)
+        {
+            var outList = new List<Items.KmhThingPayload>();
+            if (src == null) return outList;
+            var byKey = new Dictionary<string, Items.KmhThingPayload>(StringComparer.Ordinal);
+            foreach (Items.KmhThingPayload p in src)
             {
-                Items.KmhThingPayload c = Clone(p, p.StackCount);
-                c.ScribeXml = "";   // never send the blob in a snapshot
-                outList.Add(c);
+                if (p == null) continue;
+                string key = Items.KmhItemSafety.DisplayKey(p);
+                if (byKey.TryGetValue(key, out Items.KmhThingPayload row))
+                {
+                    row.StackCount = Util.KmhSafe.AddSaturating(row.StackCount, p.StackCount);
+                    continue;
+                }
+                Items.KmhThingPayload copy = Items.KmhItemService.CloneWithoutBlob(p);
+                byKey[key] = copy;
+                outList.Add(copy);   // the first row of a group represents it and carries its fingerprint
             }
             return outList;
         }
 
-        // Wire copy of pending deposits with any payload blobs removed (metadata only, for display).
         private static List<Dto.PendingDeposit> StripPendingBlobs(List<Dto.PendingDeposit> src)
         {
             List<Dto.PendingDeposit> outList = new List<Dto.PendingDeposit>();
@@ -320,18 +622,10 @@ namespace KMHServerAddon.Features.Treasury
             return outList;
         }
 
-        private static Items.KmhThingPayload Clone(Items.KmhThingPayload p, int stackCount) => new Items.KmhThingPayload
-        {
-            SchemaVersion = p.SchemaVersion, DefName = p.DefName, StuffDefName = p.StuffDefName, StackCount = stackCount,
-            HitPoints = p.HitPoints, MaxHitPoints = p.MaxHitPoints, Quality = p.Quality, Tainted = p.Tainted,
-            ScribeXml = p.ScribeXml, Fidelity = p.Fidelity, DisplayLabel = p.DisplayLabel, MarketValue = p.MarketValue,
-            Fingerprint = p.Fingerprint, Legacy = p.Legacy, Warnings = new List<string>(p.Warnings ?? new List<string>()),
-            Mergeable = p.Mergeable, RotProgressTicks = p.RotProgressTicks,
-        };
+        private static Items.KmhThingPayload Clone(Items.KmhThingPayload p, int stackCount)
+            => Items.KmhItemService.ClonePayload(p, stackCount);
 
-        // Add a payload to a vault's ItemPayloads, stacking into an existing entry when it may merge: a fungible
-        // food/resource stacks with an equal-identity one (wear weight-averaged so nothing is refreshed), else the
-        // legacy blob-less rule applies; otherwise it's appended as its own entry. Caller holds _lock.
+        // Wear is weight-averaged on merge, so stacking never refreshes a worn item. Caller holds _lock.
         private static void AddPayloadLocked(TreasurySnapshot v, Items.KmhThingPayload payload)
         {
             if (payload.Mergeable)
@@ -341,14 +635,12 @@ namespace KMHServerAddon.Features.Treasury
 
             if (string.IsNullOrEmpty(payload.ScribeXml))
                 foreach (Items.KmhThingPayload e in v.ItemPayloads)
-                    if (Items.KmhItemSafety.CanSafelyMerge(e, payload)) { e.StackCount += payload.StackCount; return; }
+                    if (Items.KmhItemSafety.CanSafelyMerge(e, payload)) { e.StackCount = Util.KmhSafe.AddSaturating(e.StackCount, payload.StackCount); return; }
 
             v.ItemPayloads.Add(payload);
         }
 
-        // Consolidate legacy fungible payloads: entries stored before the per-payload mergeable flag carry
-        // mergeable=false and never stack. Using the client-vouched fungible set, backfill the flag on matching entries
-        // and merge equal-identity ones (wear weight-averaged, as a live deposit). Idempotent; skips save when nothing merges.
+        // Idempotent, and skips the save entirely when nothing merged.
         public static int CompactFungiblePayloads()
         {
             List<string> changedKeys = new List<string>();
@@ -364,7 +656,7 @@ namespace KMHServerAddon.Features.Treasury
                     foreach (Items.KmhThingPayload p in v.ItemPayloads)
                     {
                         if (p == null) continue;
-                        if (!p.Mergeable && Features.ItemLabels.ItemLabelCache.IsFungibleDef(p.DefName)) p.Mergeable = true;
+                        // Only a per-instance vouch is trusted: a def-level one would merge away a stored blob's state.
                         bool merged = false;
                         if (p.Mergeable)
                             foreach (Items.KmhThingPayload e in outList)
@@ -384,8 +676,7 @@ namespace KMHServerAddon.Features.Treasury
             return totalMerged;
         }
 
-        // Withdraw up to `qty` units of payloads matching a want's constraints (def + optional stuff, min quality,
-        // taint/damage rules). Returns the popped payloads for delivery; empty when nothing qualifies.
+        // Empty when nothing qualifies.
         public static List<Items.KmhThingPayload> TryWithdrawMatchingPayloads(string username, string defName,
             string requiredStuff, int minQuality, bool allowTainted, bool allowDamaged, int qty, string note)
         {
@@ -394,6 +685,7 @@ namespace KMHServerAddon.Features.Treasury
             string ownerKey = ResolveOwnerKeyFor(username);
             lock (_lock)
             {
+                TreasurySnapshot before = RollbackPointLocked(ownerKey);
                 TreasurySnapshot v = GetOrCreateLocked(ownerKey, !ownerKey.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase));
                 int rem = qty;
                 foreach (Items.KmhThingPayload e in new List<Items.KmhThingPayload>(v.ItemPayloads))
@@ -404,17 +696,23 @@ namespace KMHServerAddon.Features.Treasury
                     if (minQuality > 0 && e.Quality < minQuality) continue;
                     if (!allowTainted && e.Tainted) continue;
                     if (!allowDamaged && e.HitPoints >= 0 && e.MaxHitPoints > 0 && e.HitPoints < e.MaxHitPoints) continue;
-                    if (e.StackCount <= rem) { granted.Add(e); v.ItemPayloads.Remove(e); rem -= e.StackCount; }
-                    else if (string.IsNullOrEmpty(e.ScribeXml) || e.Mergeable) { granted.Add(Clone(e, rem)); e.StackCount -= rem; rem = 0; }
+                    switch (Items.KmhItemService.PlanTake(e.StackCount, rem, Items.KmhPayloadEscrow.IsSplittable(e)))
+                    {
+                        case Items.KmhItemService.TakeKind.Whole:
+                            granted.Add(e); v.ItemPayloads.Remove(e); rem -= e.StackCount; break;
+                        case Items.KmhItemService.TakeKind.Split:
+                            granted.Add(Clone(e, rem)); e.StackCount -= rem; rem = 0; break;
+                    }
                 }
                 if (granted.Count > 0)
                 {
                     int taken = 0; foreach (var g in granted) taken += g.StackCount;
                     RecordTransactionLocked(v, username, TreasuryTransaction.KindWithdraw, taken,
                         Items.KmhItemSafety.DescribeStateForLedger(granted[0]), note);
+                    if (!CommitLocked(ownerKey, before)) return new List<Items.KmhThingPayload>();
                 }
             }
-            if (granted.Count > 0) { SaveToDisk(); RaiseChanged(ownerKey, note); }
+            if (granted.Count > 0) RaiseChanged(ownerKey, note);
             return granted;
         }
 
@@ -422,32 +720,59 @@ namespace KMHServerAddon.Features.Treasury
             => Extensibility.KmhEventBus.Instance.RaiseTreasuryChanged(new KMH.Sdk.Server.Events.TreasuryChangedEvent
             { OwnerKey = ownerKey, IsGuildOwned = !ownerKey.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase), Reason = note ?? "" });
 
-        // Durable pending deposits (disconnect/rollback dupe guard): a deposit stays PENDING until the client confirms
-        // its goods-removal is durably saved; an unconfirmed txn is reverted, so value can't be in colony AND treasury.
+        // A deposit stays pending until the client confirms its goods removal saved, so value is never in both places.
         private const int MaxRecentCommittedTxns = 256;
 
-        // Record a deposit as pending. Idempotent by txn id (a network resend won't double-book). Returns false when
-        // already known (pending or recently committed) or invalid.
+        // Unconfirmed deposits awaiting the player's own durable save.
+        public static int UnconfirmedDepositCount(string username)
+        {
+            if (string.IsNullOrEmpty(username)) return 0;
+            string ownerKey = ResolveOwnerKeyFor(username);
+            lock (_lock)
+            {
+                if (!_vaults.TryGetValue(ownerKey, out TreasurySnapshot v) || v.PendingDeposits == null) return 0;
+                int n = 0;
+                foreach (Dto.PendingDeposit d in v.PendingDeposits)
+                    if (d.State == Dto.PendingDeposit.StatePending) n++;
+                return n;
+            }
+        }
+
+        // Drops a self-test's own pending records so a suite run leaves no value state behind.
+        internal static void DiscardPendingForTest(string username)
+        {
+            if (string.IsNullOrEmpty(username)) return;
+            string ownerKey = ResolveOwnerKeyFor(username);
+            lock (_lock)
+            {
+                if (_vaults.TryGetValue(ownerKey, out TreasurySnapshot v) && v.PendingDeposits != null)
+                    v.PendingDeposits.RemoveAll(x => x.Username == username);
+                _vaults.Remove(ownerKey);
+            }
+        }
+
+        // Idempotent by txn id, so a network resend cannot double-book.
         public static bool BeginPendingDeposit(string username, Dto.PendingDeposit d)
         {
             if (string.IsNullOrEmpty(username) || d == null || string.IsNullOrEmpty(d.TxnId)) return false;
             string ownerKey = ResolveOwnerKeyFor(username);
             lock (_lock)
             {
+                TreasurySnapshot before = RollbackPointLocked(ownerKey);
                 TreasurySnapshot v = GetOrCreateLocked(ownerKey, !ownerKey.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase));
-                if (IsKnownTxnLocked(v, d.TxnId)) return false;   // dedup: already pending or committed
+                if (IsKnownTxnLocked(v, d.TxnId)) return false;
                 d.Username        = username;
                 d.State           = Dto.PendingDeposit.StatePending;
                 d.CreatedUtcTicks = DateTime.UtcNow.Ticks;
+                if (d.SaveGenAtOpen <= 0) d.SaveGenAtOpen = v.LastSaveGeneration;
                 v.PendingDeposits.Add(d);
+                // Approval tells the client to remove the goods; unsaved, the record dies on restart and the goods with it.
+                if (!CommitLocked(ownerKey, before)) return false;
             }
-            SaveToDisk();
             return true;
         }
 
-        // Guild donation: atomically dedup by txn id, debit the donor's spendable silver and book a pending
-        // 'guild_donate' entry that rides the same save-confirm pipeline as deposits. The guild vault is credited
-        // only at commit; revert/timeout refunds the donor, so the guild can never spend unconfirmed silver.
+        // The guild is credited only at commit, so it can never spend unconfirmed silver.
         public static bool BeginPendingGuildDonation(string username, string guildName, int amount, string txnId, out string reason)
         {
             reason = null;
@@ -456,10 +781,15 @@ namespace KMHServerAddon.Features.Treasury
             string ownerKey = ResolveOwnerKeyFor(username);
             lock (_lock)
             {
+                TreasurySnapshot before = RollbackPointLocked(ownerKey);
                 TreasurySnapshot v = GetOrCreateLocked(ownerKey, !ownerKey.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase));
                 if (IsKnownTxnLocked(v, txnId)) { reason = "That donation was already received."; return false; }
                 if (v.SilverBalance < amount)
                 { reason = "You don't have that much silver in your personal vault."; return false; }
+                // Re-checked under the booking lock, or two racing donors would both pass and overshoot the cap.
+                if (Economy.EconomyAccess.WouldExceedCap(true, GetGuildSilver(guildName) + PendingGuildDonationTotal(guildName),
+                                                        amount, out string capReason))
+                { reason = capReason; return false; }
                 v.SilverBalance     -= amount;
                 v.LifetimeSilverOut += amount;
                 RecordTransactionLocked(v, username, TreasuryTransaction.KindWithdraw, amount, "",
@@ -470,8 +800,8 @@ namespace KMHServerAddon.Features.Treasury
                     Silver = amount, GuildName = guildName, Note = $"donation to guild '{guildName}'",
                     State = Dto.PendingDeposit.StatePending, CreatedUtcTicks = DateTime.UtcNow.Ticks,
                 });
+                if (!CommitLocked(ownerKey, before)) { reason = "The server could not record that donation - nothing was taken. Try again shortly."; return false; }
             }
-            SaveToDisk();
             RaiseChanged(ownerKey, "donation_pending");
             return true;
         }
@@ -492,22 +822,67 @@ namespace KMHServerAddon.Features.Treasury
             return total;
         }
 
-        // One user's unconfirmed donation silver headed for a guild (for the "yours" line in the Guild Hall).
-        public static long PendingDonationTotalFor(string username, string guildName)
+
+        // Does a vault row exist for this user? Read-only - unlike the snapshot path, it never creates one.
+        public static bool HasVaultForUser(string username)
         {
-            if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(guildName)) return 0;
-            string ownerKey = ResolveOwnerKeyFor(username);
-            long total = 0;
+            if (string.IsNullOrEmpty(username)) return false;
+            string key = ResolveOwnerKeyFor(username);
+            lock (_lock) return _vaults.ContainsKey(key);
+        }
+
+        // Refuses unless the vault is completely unused, so it can never delete value.
+        public static bool TryRemoveEmptyVault(string ownerKey)
+        {
+            if (string.IsNullOrEmpty(ownerKey)) return false;
             lock (_lock)
             {
-                if (!_vaults.TryGetValue(ownerKey, out TreasurySnapshot v) || v.PendingDeposits == null) return 0;
-                foreach (Dto.PendingDeposit d in v.PendingDeposits)
-                    if (d.State == Dto.PendingDeposit.StatePending
-                        && d.Kind == Dto.PendingDeposit.KindGuildDonate
-                        && string.Equals(d.GuildName, guildName, StringComparison.OrdinalIgnoreCase))
-                        total += d.Silver;
+                if (!_vaults.TryGetValue(ownerKey, out TreasurySnapshot v)) return false;
+                if (!IsUnusedVault(v)) return false;
+                _vaults.Remove(ownerKey);
             }
-            return total;
+            return true;
+        }
+
+        // Never used, not merely empty now: a player who deposited and withdrew still owns an audit trail.
+        internal static bool IsUnusedVault(TreasurySnapshot v)
+        {
+            if (v == null) return false;
+            if (v.SilverBalance != 0) return false;
+            if (v.LifetimeSilverIn != 0 || v.LifetimeSilverOut != 0) return false;
+            if (v.Items != null && v.Items.Count > 0) return false;
+            if (v.ItemPayloads != null && v.ItemPayloads.Count > 0) return false;
+            if (v.PendingDeposits != null && v.PendingDeposits.Count > 0) return false;
+            if (v.CommittedDeposits != null && v.CommittedDeposits.Count > 0) return false;
+            if (v.RecentTransactions != null && v.RecentTransactions.Count > 0) return false;
+            return true;
+        }
+
+        // Test seam: durability checks seed a throwaway owner and must leave the shared store as they found it.
+        internal static void PurgeOwnerForTest(string owner)
+        {
+            lock (_lock)
+            {
+                _vaults.Remove(PersonalKeyFor(owner));
+                _vaults.Remove(owner);
+            }
+        }
+
+        public static int PruneUnusedVaults()
+        {
+            List<string> candidates = new List<string>();
+            lock (_lock)
+                foreach (KeyValuePair<string, TreasurySnapshot> kv in _vaults)
+                    if (IsUnusedVault(kv.Value)) candidates.Add(kv.Key);
+
+            int removed = 0;
+            foreach (string k in candidates) if (TryRemoveEmptyVault(k)) removed++;
+            if (removed > 0)
+            {
+                SaveToDisk();
+                Diagnostics.ServerLog.Info($"Treasury: removed {removed} vault(s) that were created but never used.");
+            }
+            return removed;
         }
 
         private static bool IsKnownTxnLocked(TreasurySnapshot v, string txnId)
@@ -519,8 +894,35 @@ namespace KMHServerAddon.Features.Treasury
             return false;
         }
 
-        // Client reports these txn ids are durably saved locally -> move them from pending into the spendable vault.
-        // Idempotent: unknown/already-committed ids are ignored. Returns how many were committed.
+        // A lower generation means the client loaded an older save, where confirmed deposits would duplicate.
+        internal static bool SaveGenerationWentBackwards(long seen, long incoming)
+            => incoming > 0 && seen > 0 && incoming < seen;
+
+        // Detection only: nothing is reverted or blocked on the strength of it.
+        public static long NoteSaveGeneration(string username, long generation)
+        {
+            if (string.IsNullOrEmpty(username) || generation <= 0) return 0;
+            string ownerKey = ResolveOwnerKeyFor(username);
+            long seen;
+            lock (_lock)
+            {
+                // No vault means no committed deposits, so there is nothing to protect and nothing to create.
+                if (!_vaults.TryGetValue(ownerKey, out TreasurySnapshot v)) return 0;
+                seen = v.LastSaveGeneration;
+                if (generation > seen) v.LastSaveGeneration = generation;
+            }
+            return seen;
+        }
+
+        // Highest save generation recorded for a player, for `kmh audit-player`.
+        public static long LastSaveGenerationOf(string username)
+        {
+            if (string.IsNullOrEmpty(username)) return 0;
+            string key = ResolveOwnerKeyFor(username);
+            lock (_lock) { return _vaults.TryGetValue(key, out TreasurySnapshot v) ? v.LastSaveGeneration : 0; }
+        }
+
+        // Idempotent: unknown or already-committed ids are ignored.
         public static int ConfirmDeposits(string username, IEnumerable<string> txnIds)
         {
             if (string.IsNullOrEmpty(username) || txnIds == null) return 0;
@@ -531,6 +933,7 @@ namespace KMHServerAddon.Features.Treasury
             List<Dto.PendingDeposit> donations = null;
             lock (_lock)
             {
+                TreasurySnapshot before = RollbackPointLocked(ownerKey);
                 TreasurySnapshot v = GetOrCreateLocked(ownerKey, !ownerKey.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase));
                 foreach (Dto.PendingDeposit d in new List<Dto.PendingDeposit>(v.PendingDeposits))
                 {
@@ -540,9 +943,11 @@ namespace KMHServerAddon.Features.Treasury
                     CommitPendingLocked(v, d, ref donations);
                     committed++;
                 }
+                // The fee follows the commit, so a deposit that stayed pending is never charged for.
+                if (committed > 0 && !CommitLocked(ownerKey, before)) return 0;
             }
-            if (committed > 0) { SaveToDisk(); RaiseChanged(ownerKey, "deposit_confirmed"); }
-            if (feeToHouse > 0) Marketplace.MarketplaceStore.CreditHousePool(feeToHouse, $"treasury deposit fee ({username})");
+            if (committed > 0) RaiseChanged(ownerKey, "deposit_confirmed");
+            if (feeToHouse > 0) Marketplace.MarketplaceStore.CreditFeeToHousePool(username, feeToHouse, $"treasury deposit fee ({username})");
             NotifyDonationsFinalized(donations);
             return committed;
         }
@@ -555,43 +960,53 @@ namespace KMHServerAddon.Features.Treasury
                 Guilds.GuildStore.FinalizeDonation(d.Username, d.GuildName, d.Silver);
         }
 
-        // Full reconcile on (re)connect: `committed` is the client's complete set of durably-saved deposit txns.
-        // Commit any pending in the set; revert any pending NOT in the set that's older than the grace window (a local
-        // rollback - the client no longer has that txn saved). Young unlisted pendings are left for the timeout sweep
-        // so a just-made-but-not-yet-saved deposit isn't wrongly reverted. Returns (committed, reverted).
-        public static (int committed, int reverted) ReconcileDeposits(string username, IEnumerable<string> committed, int graceSeconds)
+        // unsavedGoodsGone is left alone because reverting it would destroy goods the client has already removed.
+        public static (int committed, int reverted) ReconcileDeposits(string username, IEnumerable<string> committed, IEnumerable<string> unsavedGoodsGone, int graceSeconds)
         {
             int didCommit = 0, didRevert = 0; long feeToHouse = 0;
             if (string.IsNullOrEmpty(username)) return (0, 0);
             HashSet<string> have = new HashSet<string>(committed ?? new List<string>(), StringComparer.Ordinal);
+            HashSet<string> keep = new HashSet<string>(unsavedGoodsGone ?? new List<string>(), StringComparer.Ordinal);
             string ownerKey = ResolveOwnerKeyFor(username);
             long cutoff = DateTime.UtcNow.Ticks - TimeSpan.FromSeconds(Math.Max(0, graceSeconds)).Ticks;
             List<Dto.PendingDeposit> donations = null;
             lock (_lock)
             {
+                TreasurySnapshot before = RollbackPointLocked(ownerKey);
                 TreasurySnapshot v = GetOrCreateLocked(ownerKey, !ownerKey.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase));
                 foreach (Dto.PendingDeposit d in new List<Dto.PendingDeposit>(v.PendingDeposits))
                 {
                     if (d.State != Dto.PendingDeposit.StatePending) continue;
-                    if (have.Contains(d.TxnId)) { feeToHouse += d.Fee; CommitPendingLocked(v, d, ref donations); didCommit++; }
-                    else if (d.CreatedUtcTicks < cutoff)
+                    switch (ReconcileVerdictFor(d.TxnId, d.CreatedUtcTicks, have, keep, cutoff))
                     {
-                        RevertPendingLocked(v, d);
-                        didRevert++;
-                        Diagnostics.ServerLog.Warn($"Treasury: reverted pending deposit {d.TxnId} for {username} " +
-                            $"({DescribePending(d)}) - client reported it not durably saved (local rollback).");
+                        case ReconcileVerdict.Commit: feeToHouse += d.Fee; CommitPendingLocked(v, d, ref donations); didCommit++; break;
+                        case ReconcileVerdict.Revert:
+                            RevertPendingLocked(v, d);
+                            didRevert++;
+                            Diagnostics.ServerLog.Warn($"Treasury: reverted pending deposit {d.TxnId} for {username} " +
+                                $"({DescribePending(d)}) - client reported it not durably saved (local rollback).");
+                            break;
                     }
-                    // young + unlisted: leave for the timeout sweep
                 }
+                if ((didCommit > 0 || didRevert > 0) && !CommitLocked(ownerKey, before)) return (0, 0);
             }
-            if (didCommit > 0 || didRevert > 0) { SaveToDisk(); RaiseChanged(ownerKey, "deposit_reconciled"); }
-            if (feeToHouse > 0) Marketplace.MarketplaceStore.CreditHousePool(feeToHouse, $"treasury deposit fee ({username})");
+            if (didCommit > 0 || didRevert > 0) RaiseChanged(ownerKey, "deposit_reconciled");
+            if (feeToHouse > 0) Marketplace.MarketplaceStore.CreditFeeToHousePool(username, feeToHouse, $"treasury deposit fee ({username})");
             NotifyDonationsFinalized(donations);
             return (didCommit, didRevert);
         }
 
-        // Sweep every vault: revert pending deposits older than the timeout that were never confirmed. Runs off the
-        // periodic sweeper. Returns how many were reverted.
+        internal enum ReconcileVerdict { Commit, Keep, Revert }
+
+        // Pure so the item-loss invariant is testable; the clause order is what keeps unsaved goods from reverting.
+        internal static ReconcileVerdict ReconcileVerdictFor(string txnId, long createdTicks,
+            HashSet<string> committed, HashSet<string> unsavedGoodsGone, long cutoffTicks)
+        {
+            if (committed != null && committed.Contains(txnId)) return ReconcileVerdict.Commit;
+            if (unsavedGoodsGone != null && unsavedGoodsGone.Contains(txnId)) return ReconcileVerdict.Keep;
+            return createdTicks < cutoffTicks ? ReconcileVerdict.Revert : ReconcileVerdict.Keep;
+        }
+
         public static int SweepStalePendingDeposits(int timeoutMinutes, Func<string, bool> isOwnerOnline = null)
         {
             if (timeoutMinutes <= 0) return 0;
@@ -607,7 +1022,7 @@ namespace KMHServerAddon.Features.Treasury
                     {
                         if (d.State != Dto.PendingDeposit.StatePending) continue;
                         if (d.CreatedUtcTicks >= cutoff) continue;
-                        // Only expire abandoned deposits: an online player will still save + confirm, so a long unsaved session must not lose value
+                        // An online player will still save and confirm, so only abandoned deposits expire.
                         if (isOwnerOnline != null && isOwnerOnline(d.Username)) continue;
                         RevertPendingLocked(v, d);
                         reverted++;
@@ -620,13 +1035,12 @@ namespace KMHServerAddon.Features.Treasury
             return reverted;
         }
 
-        // Undo a pending entry and remove it. Deposits just disappear (the goods rolled back with the client save);
-        // a guild donation refunds the donor's spendable silver that was debited at begin. Caller holds _lock.
+        // A donation refunds the donor, who was debited at begin. Caller holds _lock.
         private static void RevertPendingLocked(TreasurySnapshot v, Dto.PendingDeposit d)
         {
             if (d.Kind == Dto.PendingDeposit.KindGuildDonate && d.Silver > 0)
             {
-                v.SilverBalance    += d.Silver;
+                v.SilverBalance     = AddSilver(v, d.Silver, "donation refund");
                 v.LifetimeSilverIn += d.Silver;
                 RecordTransactionLocked(v, d.Username, TreasuryTransaction.KindDeposit, d.Silver, "",
                     $"donation to guild '{d.GuildName}' reverted - refund");
@@ -634,30 +1048,27 @@ namespace KMHServerAddon.Features.Treasury
             v.PendingDeposits.Remove(d);
         }
 
-        // Apply a pending deposit to the live spendable vault and remove it from pending. Caller holds _lock.
-        // Committed guild donations are appended to `donations` so the caller can run the guild-side bookkeeping
-        // (member totals, metrics, existence check) outside this lock.
+        // Donations are collected into `donations` so guild bookkeeping runs outside this lock. Caller holds _lock.
         private static void CommitPendingLocked(TreasurySnapshot v, Dto.PendingDeposit d, ref List<Dto.PendingDeposit> donations)
         {
             switch (d.Kind)
             {
                 case Dto.PendingDeposit.KindGuildDonate:
-                    // Donor was debited at begin; credit the guild vault now (same lock - atomic with pending removal).
                     TreasurySnapshot gv = GetOrCreateLocked(d.GuildName, isGuildOwned: true);
-                    gv.SilverBalance    += d.Silver;
+                    gv.SilverBalance     = AddSilver(gv, d.Silver, "guild donation commit");
                     gv.LifetimeSilverIn += d.Silver;
                     RecordTransactionLocked(gv, d.Username, TreasuryTransaction.KindDeposit, d.Silver, "",
                         $"contribution from {d.Username} (save-confirmed)");
                     (donations = donations ?? new List<Dto.PendingDeposit>()).Add(d);
                     break;
                 case Dto.PendingDeposit.KindSilver:
-                    v.SilverBalance    += d.Silver;
+                    v.SilverBalance     = AddSilver(v, d.Silver, "pending deposit commit");
                     v.LifetimeSilverIn += d.Silver;
                     RecordTransactionLocked(v, d.Username, TreasuryTransaction.KindDeposit, d.Silver, "", d.Note);
                     break;
                 case Dto.PendingDeposit.KindItem:
                     if (!v.Items.TryGetValue(d.ItemDefName, out int cur)) cur = 0;
-                    v.Items[d.ItemDefName] = cur + d.Qty;
+                    v.Items[d.ItemDefName] = AddQty(v, cur, d.Qty, d.ItemDefName, "pending item commit");
                     RecordTransactionLocked(v, d.Username, TreasuryTransaction.KindDeposit, d.Qty, d.ItemDefName, d.Note);
                     break;
                 case Dto.PendingDeposit.KindPayload:
@@ -674,6 +1085,126 @@ namespace KMHServerAddon.Features.Treasury
             v.PendingDeposits.Remove(d);
             v.RecentCommittedTxns.Add(d.TxnId);
             while (v.RecentCommittedTxns.Count > MaxRecentCommittedTxns) v.RecentCommittedTxns.RemoveAt(0);
+
+            // Blob-stripped, since reversal removes vault payloads by fingerprint rather than by saved XML.
+            Dto.PendingDeposit rec = StripPendingBlobs(new List<Dto.PendingDeposit> { d })[0];
+            rec.State = Dto.PendingDeposit.StateCommitted;
+            rec.CommittedUtcTicks = DateTime.UtcNow.Ticks;
+            v.CommittedDeposits.Add(rec);
+            while (v.CommittedDeposits.Count > MaxRecentCommittedTxns) v.CommittedDeposits.RemoveAt(0);
+        }
+
+        // Guild donations are reported rather than reversed, because other members may already have spent them.
+        public static (int reversed, int flagged) ReverseRolledBackCommits(
+            string username, IEnumerable<string> clientHas, IEnumerable<string> unsavedGoodsGone, int graceSeconds)
+        {
+            if (string.IsNullOrEmpty(username)) return (0, 0);
+            HashSet<string> have = new HashSet<string>(clientHas ?? new List<string>(), StringComparer.Ordinal);
+            HashSet<string> keep = new HashSet<string>(unsavedGoodsGone ?? new List<string>(), StringComparer.Ordinal);
+            string ownerKey = ResolveOwnerKeyFor(username);
+            long cutoff = DateTime.UtcNow.Ticks - TimeSpan.FromSeconds(Math.Max(0, graceSeconds)).Ticks;
+            int reversed = 0, flagged = 0;
+            List<string> report = new List<string>();
+
+            lock (_lock)
+            {
+                // No vault means nothing was ever committed, so there is nothing to undo.
+                if (!_vaults.TryGetValue(ownerKey, out TreasurySnapshot v)) return (0, 0);
+                foreach (Dto.PendingDeposit c in new List<Dto.PendingDeposit>(v.CommittedDeposits))
+                {
+                    if (!ShouldUndoCommitted(c.TxnId, c.CommittedUtcTicks, have, keep, cutoff)) continue;
+                    if (c.Kind == Dto.PendingDeposit.KindGuildDonate)
+                    {
+                        flagged++;
+                        report.Add($"{c.TxnId} ({DescribePending(c)}) to guild '{c.GuildName}' - NOT auto-reversed");
+                        v.CommittedDeposits.Remove(c);
+                        continue;
+                    }
+                    string shortfall = ReverseCommittedLocked(v, c);
+                    v.CommittedDeposits.Remove(c);
+                    v.RecentCommittedTxns.Remove(c.TxnId);
+                    reversed++;
+                    report.Add($"{c.TxnId} ({DescribePending(c)}){shortfall}");
+                }
+            }
+
+            if (reversed > 0 || flagged > 0)
+            {
+                SaveToDisk();
+                RaiseChanged(ownerKey, "rollback_reversed");
+                Diagnostics.ServerLog.Error(
+                    $"Treasury: {username} loaded an OLDER save after confirming deposit(s). Reversed {reversed}, " +
+                    $"flagged {flagged} for manual settlement: {string.Join("; ", report)}. " +
+                    $"Review with 'kmh audit-player {username}'.");
+            }
+            return (reversed, flagged);
+        }
+
+        // Every clause is a reason NOT to act, so the default answer is to leave the deposit alone.
+        internal static bool ShouldUndoCommitted(string txnId, long committedUtcTicks,
+                                                 HashSet<string> clientHas, HashSet<string> unsavedGoodsGone, long cutoffTicks)
+        {
+            if (string.IsNullOrEmpty(txnId)) return false;
+            if (clientHas != null && clientHas.Contains(txnId)) return false;
+            if (unsavedGoodsGone != null && unsavedGoodsGone.Contains(txnId)) return false;
+            return committedUtcTicks <= cutoffTicks;
+        }
+
+        // Returns a note when part was already spent; the balance is never driven negative. Caller holds _lock.
+        private static string ReverseCommittedLocked(TreasurySnapshot v, Dto.PendingDeposit c)
+        {
+            switch (c.Kind)
+            {
+                case Dto.PendingDeposit.KindSilver:
+                {
+                    int take = Math.Min(v.SilverBalance, Math.Max(0, c.Silver));
+                    v.SilverBalance      = AddSilver(v, -take, "save-rollback reversal");
+                    v.LifetimeSilverIn  -= take;
+                    RecordTransactionLocked(v, c.Username, TreasuryTransaction.KindWithdraw, take, "",
+                        $"deposit {c.TxnId} reversed - client loaded an older save");
+                    return take < c.Silver ? $" - only {take} of {c.Silver} silver recovered, rest already spent" : "";
+                }
+                case Dto.PendingDeposit.KindItem:
+                {
+                    string key = Util.ItemKey.Compose(c.ItemDefName, "", 0);
+                    v.Items.TryGetValue(key, out int held);
+                    int take = Math.Min(held, Math.Max(0, c.Qty));
+                    if (take > 0)
+                    {
+                        if (held - take <= 0) v.Items.Remove(key); else v.Items[key] = held - take;
+                        RecordTransactionLocked(v, c.Username, TreasuryTransaction.KindWithdraw, take, c.ItemDefName,
+                            $"deposit {c.TxnId} reversed - client loaded an older save");
+                    }
+                    return take < c.Qty ? $" - only {take} of {c.Qty} {c.ItemDefName} recovered, rest already withdrawn" : "";
+                }
+                case Dto.PendingDeposit.KindPayload:
+                {
+                    int wanted = 0; foreach (Items.KmhThingPayload p in c.Payloads ?? new List<Items.KmhThingPayload>()) wanted += p?.StackCount ?? 0;
+                    int took = 0;
+                    foreach (Items.KmhThingPayload want in c.Payloads ?? new List<Items.KmhThingPayload>())
+                    {
+                        if (want == null) continue;
+                        int need = want.StackCount;
+                        foreach (Items.KmhThingPayload held in new List<Items.KmhThingPayload>(v.ItemPayloads))
+                        {
+                            if (need <= 0) break;
+                            if (!string.Equals(held.Fingerprint, want.Fingerprint, StringComparison.Ordinal)) continue;
+                            switch (Items.KmhItemService.PlanTake(held.StackCount, need, Items.KmhPayloadEscrow.IsSplittable(held)))
+                            {
+                                case Items.KmhItemService.TakeKind.Whole:
+                                    took += held.StackCount; need -= held.StackCount; v.ItemPayloads.Remove(held); break;
+                                case Items.KmhItemService.TakeKind.Split:
+                                    took += need; held.StackCount -= need; need = 0; break;
+                            }
+                        }
+                    }
+                    if (took > 0)
+                        RecordTransactionLocked(v, c.Username, TreasuryTransaction.KindWithdraw, took, c.ItemDefName,
+                            $"deposit {c.TxnId} reversed - client loaded an older save");
+                    return took < wanted ? $" - only {took} of {wanted} unit(s) recovered, rest already withdrawn" : "";
+                }
+            }
+            return "";
         }
 
         private static string DescribePending(Dto.PendingDeposit d)
@@ -707,28 +1238,23 @@ namespace KMHServerAddon.Features.Treasury
             }
         }
 
-        // Quality-aware withdraw for quest delivery: consume `qty` of any stack whose def matches and whose quality
-        // meets the requirement (any material). Lowest qualifying quality is taken first so claimers keep their
-        // best gear. Atomic - either the full qty is taken (consumed lists what, per key) or nothing changes
+        // Lowest qualifying quality goes first so a claimer keeps their best gear, and it takes the full qty or nothing.
         public static bool TryWithdrawMatching(string username, string targetDefName, int requiredQualityIndex,
-                                               int qty, string note, out List<KeyValuePair<string, int>> consumed)
+                                               int qty, string note, out List<KeyValuePair<string, int>> consumed,
+                                               string requiredStuff = "")
         {
             consumed = new List<KeyValuePair<string, int>>();
             if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(targetDefName) || qty <= 0) return false;
             string ownerKey = ResolveOwnerKeyFor(username);
             lock (_lock)
             {
+                TreasurySnapshot before = RollbackPointLocked(ownerKey);
                 TreasurySnapshot v = GetOrCreateLocked(ownerKey, ownerKey.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase) == false);
 
-                // gather qualifying stacks, lowest quality first
                 List<KeyValuePair<string, int>> candidates = new List<KeyValuePair<string, int>>();
                 foreach (KeyValuePair<string, int> kv in v.Items)
-                {
-                    Util.ItemKey.Split(kv.Key, out string def, out _, out int q);
-                    if (!string.Equals(def, targetDefName, StringComparison.OrdinalIgnoreCase)) continue;
-                    if (!Util.ItemKey.Meets(q, requiredQualityIndex)) continue;
-                    candidates.Add(kv);
-                }
+                    if (Util.ItemKey.Matches(kv.Key, targetDefName, requiredStuff, requiredQualityIndex))
+                        candidates.Add(kv);
                 candidates.Sort((a, b) =>
                 {
                     Util.ItemKey.Split(a.Key, out _, out _, out int qa);
@@ -752,21 +1278,22 @@ namespace KMHServerAddon.Features.Treasury
                     consumed.Add(new KeyValuePair<string, int>(kv.Key, take));
                     remaining -= take;
                 }
+                if (!CommitLocked(ownerKey, before)) { consumed.Clear(); return false; }
             }
-            SaveToDisk();
             Extensibility.KmhEventBus.Instance.RaiseTreasuryChanged(new KMH.Sdk.Server.Events.TreasuryChangedEvent { OwnerKey = ownerKey, IsGuildOwned = !ownerKey.StartsWith("_personal:", System.StringComparison.OrdinalIgnoreCase), Reason = note ?? "" });
             return true;
         }
 
+        // long amount: the display log's int wire field is clamped, but the durable ledger gets the exact figure.
         private static void RecordTransactionLocked(
-            TreasurySnapshot v, string username, string kind, int amount, string itemDefName, string note)
+            TreasurySnapshot v, string username, string kind, long amount, string itemDefName, string note)
         {
             v.RecentTransactions.Add(new TreasuryTransaction
             {
                 UtcTicks    = DateTime.UtcNow.Ticks,
                 Username    = username ?? "",
                 Kind        = kind,
-                Amount      = amount,
+                Amount      = (int)Math.Max(int.MinValue, Math.Min(int.MaxValue, amount)),
                 ItemDefName = itemDefName ?? "",
                 Note        = note ?? "",
             });
@@ -775,15 +1302,12 @@ namespace KMHServerAddon.Features.Treasury
                 v.RecentTransactions.RemoveAt(0);
             }
 
-            // Mirror to the durable, server-wide audit ledger. Enqueue is lock-free, so it's safe under _lock - the
-            // actual file write happens off-thread. This one hook captures every economy value movement.
+            // Safe under _lock because the enqueue is lock-free and the file write happens off-thread.
             Persistence.TransactionLedger.Record(v.OwnerKey, username, kind, amount, itemDefName, note);
         }
 
-        // --- persistence ---
 
-        // Admin anti-exploit reset: drop a player's personal vault. Returns the silver it held, or -1 if it had none.
-        // Guild vaults are untouched. Caller backs up + logs (see the treasury-reset admin command).
+        // Returns the silver it held, or -1 when there was no vault. Guild vaults are untouched.
         public static long ResetPersonal(string username)
         {
             string key = PersonalKeyFor(username);
@@ -814,8 +1338,7 @@ namespace KMHServerAddon.Features.Treasury
             return removed;
         }
 
-        // Fidelity census across every vault's stored items - for `kmh validate treasury`. full = exact-restorable,
-        // partial = metadata-only, legacy = pre-payload (state unproven).
+        // full is exact-restorable, partial is metadata-only, legacy is pre-payload with unproven state.
         public static (int full, int partial, int legacy) PayloadHealth()
         {
             int full = 0, partial = 0, legacy = 0;
@@ -844,18 +1367,43 @@ namespace KMHServerAddon.Features.Treasury
                     foreach (TreasurySnapshot v in state.Vaults)
                     {
                         if (v == null || string.IsNullOrEmpty(v.OwnerKey)) continue;
-                        // Snapshot's CanDeposit / CanWithdraw flags are per-caller - strip on load so the canonical
-                        // stored state doesn't carry stale permission booleans
+                        // Those flags are per-caller, so stored state must not carry them.
                         v.CanDeposit  = false;
                         v.CanWithdraw = false;
+                        v.Items       = NormalizeItemKeys(v.Items);   // JSON hands back an ordinal dictionary
                         _vaults[v.OwnerKey] = v;
                     }
                 }
                 Diagnostics.ServerLog.Info($"Treasury: loaded {state.Vaults.Count} vault(s) from disk");
+                WarnOnUnreconcilableDeposits();
             }
         }
 
-        // Read-only: the biggest vaults by silver (owner key, silver, guild flag), for the audit report.
+        // Reconcile only acts on Pending rows, so a row in any other state would hold its value invisibly forever.
+        private static void WarnOnUnreconcilableDeposits()
+        {
+            List<string> stuck = new List<string>();
+            lock (_lock)
+                foreach (TreasurySnapshot v in _vaults.Values)
+                    foreach (Dto.PendingDeposit d in v.PendingDeposits)
+                        if (d != null && !string.Equals(d.State, Dto.PendingDeposit.StatePending, StringComparison.OrdinalIgnoreCase))
+                            stuck.Add($"{d.TxnId} ({v.OwnerKey}, state '{d.State}')");
+            if (stuck.Count == 0) return;
+            Diagnostics.ServerLog.Error($"Treasury: {stuck.Count} pending deposit(s) are in a state reconcile cannot act on and " +
+                                        $"will never resolve: {string.Join(", ", stuck)}. Their value is held out of the spendable " +
+                                        "balance indefinitely - resolve them by hand in Treasury.json.");
+        }
+
+        // Server-owned, so it is safe to size a payout against - unlike the colony wealth players report about themselves.
+        public static long TotalSilverHeld()
+        {
+            long total = 0;
+            lock (_lock)
+                foreach (TreasurySnapshot v in _vaults.Values)
+                    if (v != null && v.SilverBalance > 0) total += v.SilverBalance;
+            return total;
+        }
+
         public static List<(string OwnerKey, long Silver, bool IsGuild)> TopVaults(int n)
         {
             List<(string, long, bool)> all = new List<(string, long, bool)>();
@@ -891,8 +1439,7 @@ namespace KMHServerAddon.Features.Treasury
             return had;
         }
 
-        // Guild disbanded: move its vault (silver + items) into a member's personal vault and remove it, so nothing is
-        // orphaned or resurrectable by re-creating the guild name. Returns the silver moved.
+        // Removes the guild vault too, so re-creating the guild name cannot resurrect it.
         public static long MoveGuildVaultToPersonal(string guildName, string toUsername)
         {
             if (string.IsNullOrEmpty(guildName) || string.IsNullOrEmpty(toUsername)) return 0;
@@ -902,19 +1449,24 @@ namespace KMHServerAddon.Features.Treasury
                 if (!_vaults.TryGetValue(guildName, out TreasurySnapshot gv)) return 0;
                 _vaults.Remove(guildName);
                 moved = gv.SilverBalance;
-                if (moved > 0 || (gv.Items != null && gv.Items.Count > 0))
+                bool hasPayloads = gv.ItemPayloads != null && gv.ItemPayloads.Count > 0;
+                if (moved > 0 || (gv.Items != null && gv.Items.Count > 0) || hasPayloads)
                 {
                     TreasurySnapshot pv = GetOrCreateLocked(PersonalKeyFor(toUsername), isGuildOwned: false);
-                    pv.SilverBalance    += gv.SilverBalance;
+                    pv.SilverBalance    = AddSilver(pv, gv.SilverBalance, "guild vault transfer");
                     pv.LifetimeSilverIn += gv.SilverBalance;
                     if (gv.Items != null)
                         foreach (KeyValuePair<string, int> kv in gv.Items)
                         {
                             pv.Items.TryGetValue(kv.Key, out int cur);
-                            pv.Items[kv.Key] = cur + kv.Value;
+                            pv.Items[kv.Key] = AddQty(pv, cur, kv.Value, kv.Key, "guild vault transfer");
                         }
+                    // Payloads move separately from Items, or gear with state would be lost on disband.
+                    if (hasPayloads)
+                        foreach (Items.KmhThingPayload p in gv.ItemPayloads)
+                            if (p != null) AddPayloadLocked(pv, p);
                     RecordTransactionLocked(pv, toUsername, TreasuryTransaction.KindDeposit,
-                        (int)Math.Min(moved, int.MaxValue), "", $"guild '{guildName}' vault returned on disband");
+                        moved, "", $"guild '{guildName}' vault returned on disband");
                 }
             }
             SaveToDisk();
@@ -924,7 +1476,8 @@ namespace KMHServerAddon.Features.Treasury
             return moved;
         }
 
-        public static void SaveToDisk()
+        // False means the change is in memory only; every value path treats that as a refusal rather than acknowledge a move that restart undoes.
+        public static bool SaveToDisk()
         {
             PersistedState state = new PersistedState();
             long seq;
@@ -933,7 +1486,23 @@ namespace KMHServerAddon.Features.Treasury
                 state.Vaults = new List<TreasurySnapshot>(_vaults.Values);
                 seq = JsonFileStore.NextSequence(); // ticket under the lock = snapshot order, so an older save can't clobber a newer
             }
-            JsonFileStore.Save(KmhDataPaths.TreasuryFile, state, seq);
+            return JsonFileStore.Save(KmhDataPaths.TreasuryFile, state, seq);
+        }
+
+        // The state to put back if the write fails; null means there was no vault, so a failed write must leave none behind either.
+        private static TreasurySnapshot RollbackPointLocked(string ownerKey)
+            => _vaults.TryGetValue(ownerKey, out TreasurySnapshot v)
+             ? JsonFileStore.FromJson<TreasurySnapshot>(JsonFileStore.ToJson(v))
+             : null;
+
+        // Called inside _lock once the mutation is applied; the rollback copy costs a fraction of the save it guards.
+        private static bool CommitLocked(string ownerKey, TreasurySnapshot before)
+        {
+            if (SaveToDisk()) return true;
+            if (before == null) _vaults.Remove(ownerKey);
+            else                _vaults[ownerKey] = before;
+            Diagnostics.ServerLog.Warn($"Treasury: rolled back an unsaved change to {ownerKey} - the request was refused rather than acknowledged.");
+            return false;
         }
 
         private class PersistedState

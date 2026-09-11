@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using KMHServerAddon.Features.PlayerStats.Dto;
 using KMHServerAddon.Persistence;
@@ -6,9 +6,7 @@ using static KMHServerAddon.Util.KmhSafe;
 
 namespace KMHServerAddon.Features.PlayerStats
 {
-    // Roster of every player ever seen, persisted to KMH-Data/Players/PlayerStats.json and saved after each mutation
-    // (cheap; the roster is small). Other features bump the stat fields (treasury -> SilverDonated, marketplace ->
-    // SalesEarned, quests -> QuestsCompleted, ...). All access is under _lock (RWT's chat + login are background threads).
+    // Every player ever seen. All access is under _lock - RWT's chat and login run on background threads.
     internal static class PlayerStatsStore
     {
         private static readonly object _lock = new object();
@@ -19,14 +17,14 @@ namespace KMHServerAddon.Features.PlayerStats
         private static readonly Dictionary<string, ColonistProfile> _colonists
             = new Dictionary<string, ColonistProfile>(StringComparer.OrdinalIgnoreCase);
 
-        // Each player's reported compact colonist roster, for the per-skill Colonist Records boards (in-memory;
-        // rebuilds from reports after a restart).
+        // In-memory only: rebuilds from client reports after a restart.
         private static readonly Dictionary<string, List<ColonistEntry>> _rosters
             = new Dictionary<string, List<ColonistEntry>>(StringComparer.OrdinalIgnoreCase);
 
-        // Server "wealth index": total reported colony wealth across every player. The World Engine scales quest
-        // rewards to this so a thriving server pays bigger pots than a quiet one - a live read of RimWorld's own
-        // economy, aggregated. Returns 0 before any colony report has landed.
+        // Separate from BuildSnapshot, which clones every row and joins the sites three times.
+        public static int PlayerCount { get { lock (_lock) return _entries.Count; } }
+
+        // The World Engine scales quest rewards to this, so a thriving server pays bigger pots than a quiet one.
         public static long TotalReportedWealth()
         {
             long total = 0;
@@ -36,8 +34,124 @@ namespace KMHServerAddon.Features.PlayerStats
             return total;
         }
 
-        // Add the player if not already present. Idempotent - repeated calls on every login are safe and cheap.
-        // first_seen_utc_ticks is set on first add and never overwritten so tenure stays correct across reconnects
+        public static bool HasPlayer(string username)
+        {
+            if (string.IsNullOrWhiteSpace(username)) return false;
+            lock (_lock) return _entries.ContainsKey(username);
+        }
+
+        // Most recently here first: whoever a player wants to @ was on last night, not named with an A.
+        public static List<string> UsernamesByLastSeen()
+        {
+            var rows = new List<KeyValuePair<string, long>>();
+            lock (_lock)
+                foreach (PlayerLeaderboardEntry e in _entries.Values)
+                    rows.Add(new KeyValuePair<string, long>(e.Username, e.LastSeenUtcTicks));
+
+            rows.Sort((a, b) =>
+            {
+                int byTime = b.Value.CompareTo(a.Value);
+                return byTime != 0 ? byTime : string.Compare(a.Key, b.Key, StringComparison.OrdinalIgnoreCase);
+            });
+
+            var names = new List<string>(rows.Count);
+            foreach (KeyValuePair<string, long> row in rows) names.Add(row.Key);
+            return names;
+        }
+
+        public static long LastSeenTicks(string username)
+        {
+            if (string.IsNullOrWhiteSpace(username)) return 0;
+            lock (_lock) return _entries.TryGetValue(username, out PlayerLeaderboardEntry e) ? e.LastSeenUtcTicks : 0;
+        }
+
+        public static long ActiveSecondsOf(string username)
+        {
+            if (string.IsNullOrWhiteSpace(username)) return 0;
+            lock (_lock) return _entries.TryGetValue(username, out PlayerLeaderboardEntry e) ? e.ActiveSeconds : 0;
+        }
+
+        // Never more than the wall clock allowed since this player's last report, so playtime cannot outrun real time.
+        public static long AddActiveSeconds(string username, int claimed, out long credited)
+        {
+            credited = 0;
+            if (string.IsNullOrWhiteSpace(username) || claimed <= 0) { TouchSeen(username); return 0; }
+
+            lock (_lock)
+            {
+                if (!_entries.TryGetValue(username, out PlayerLeaderboardEntry e)) return 0;
+                long now = DateTime.UtcNow.Ticks;
+                credited = Believable(claimed, e.LastSeenUtcTicks, now);
+                e.ActiveSeconds += credited;
+                e.LastSeenUtcTicks = now;
+                return e.ActiveSeconds;
+            }
+        }
+
+        // First report of a session has no elapsed window to measure against, so it is allowed one report's worth.
+        internal static long Believable(int claimed, long lastSeenTicks, long nowTicks)
+        {
+            if (claimed <= 0) return 0;
+            long elapsed = lastSeenTicks <= 0 || nowTicks <= lastSeenTicks
+                ? MaxReportSeconds
+                : (long)TimeSpan.FromTicks(nowTicks - lastSeenTicks).TotalSeconds + 1;
+            long allowed = Math.Min(elapsed, MaxReportSeconds);
+            return Math.Min(claimed, allowed);
+        }
+
+        // One report cannot carry more than this, whatever it claims or how long the client was away.
+        internal const long MaxReportSeconds = 300;
+
+        public static void TouchSeen(string username)
+        {
+            if (string.IsNullOrWhiteSpace(username)) return;
+            lock (_lock)
+                if (_entries.TryGetValue(username, out PlayerLeaderboardEntry e)) e.LastSeenUtcTicks = DateTime.UtcNow.Ticks;
+        }
+
+        // Open connections, so time on this server is measured here rather than taken from what a client reports.
+        private static readonly Dictionary<string, long> _sessions
+            = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+
+        // A clock jump, not a session. Nobody holds one connection for a week.
+        internal const long MaxSessionRollSeconds = 7 * 24 * 60 * 60;
+
+        public static void BeginSession(string username)
+        {
+            if (string.IsNullOrWhiteSpace(username)) return;
+            lock (_lock) _sessions[username] = DateTime.UtcNow.Ticks;
+        }
+
+        // Credit the connection so far and re-anchor. Rolled on every heartbeat so a crash loses a minute, not a night.
+        public static long RollSession(string username, bool ending)
+        {
+            if (string.IsNullOrWhiteSpace(username)) return 0;
+            lock (_lock)
+            {
+                if (!_sessions.TryGetValue(username, out long anchor)) return 0;
+                long now = DateTime.UtcNow.Ticks;
+                long credited = Rollable(anchor, now);
+                if (credited > 0 && _entries.TryGetValue(username, out PlayerLeaderboardEntry e))
+                    e.ConnectedSeconds += credited;
+                if (ending) _sessions.Remove(username); else _sessions[username] = now;
+                return credited;
+            }
+        }
+
+        internal static long Rollable(long anchorTicks, long nowTicks)
+        {
+            if (anchorTicks <= 0 || nowTicks <= anchorTicks) return 0;
+            long seconds = (long)TimeSpan.FromTicks(nowTicks - anchorTicks).TotalSeconds;
+            return seconds > MaxSessionRollSeconds ? MaxSessionRollSeconds : seconds;
+        }
+
+        public static long ConnectedSecondsOf(string username)
+        {
+            if (string.IsNullOrWhiteSpace(username)) return 0;
+            lock (_lock) return _entries.TryGetValue(username, out PlayerLeaderboardEntry e) ? e.ConnectedSeconds : 0;
+        }
+
+        // Idempotent: first_seen is set once and survives reconnects. Only a full season reset clears the row.
         public static void EnsurePlayer(string username)
         {
             if (string.IsNullOrWhiteSpace(username)) return;
@@ -57,7 +171,6 @@ namespace KMHServerAddon.Features.PlayerStats
             if (added) SaveToDisk();
         }
 
-        // Load at server bootstrap. Missing file = fresh roster (first run).
         public static void LoadFromDisk()
         {
             if (JsonFileStore.TryLoad(KmhDataPaths.PlayerStatsFile, out PersistedState state) && state?.Entries != null)
@@ -75,27 +188,34 @@ namespace KMHServerAddon.Features.PlayerStats
             }
         }
 
-        // Season reset: clear the leaderboard, colonist profiles, and rosters for a fresh season.
         public static void ClearForNewSeason()
         {
-            lock (_lock) { _entries.Clear(); _colonists.Clear(); _rosters.Clear(); }
+            lock (_lock)
+            {
+                _entries.Clear(); _colonists.Clear(); _rosters.Clear();
+                // Re-anchor rather than drop: whoever is connected keeps accruing, but only from the reset onward.
+                long now = DateTime.UtcNow.Ticks;
+                foreach (string u in new List<string>(_sessions.Keys)) _sessions[u] = now;
+            }
             SaveToDisk();
             SaveColonistsToDisk();
         }
 
-        // Admin player-cleanup: drop one player's standings/colonist/roster data. Returns true if anything was removed.
         public static bool RemoveUser(string username)
         {
             if (string.IsNullOrEmpty(username)) return false;
             bool removed;
             lock (_lock)
+            {
                 removed = _entries.Remove(username) | _colonists.Remove(username) | _rosters.Remove(username);
+                // Or their next heartbeat re-adds them and credits time from before the removal.
+                _sessions.Remove(username);
+            }
             if (removed) { SaveToDisk(); SaveColonistsToDisk(); }
             return removed;
         }
 
-        // Snapshot under lock, write outside lock (disk I/O can be slow;
-        // shouldn't block concurrent mutations).
+        // Snapshot under lock, write outside it - disk I/O must not block concurrent mutations.
         public static void SaveToDisk()
         {
             PersistedState state = new PersistedState();
@@ -106,16 +226,13 @@ namespace KMHServerAddon.Features.PlayerStats
             JsonFileStore.Save(KmhDataPaths.PlayerStatsFile, state);
         }
 
-        // Tiny on-disk wrapper - keeps the JSON file as a single object rather than a top-level array (room to add
-        // schema-version / last-saved-utc / etc. later without breaking compatibility)
+        // An object rather than a top-level array, so fields can be added later without breaking the file.
         private class PersistedState
         {
             public List<PlayerLeaderboardEntry> Entries { get; set; } = new List<PlayerLeaderboardEntry>();
         }
 
-        // Apply a client's colony report (display-only vanity stats). Updates the roster row's colony fields and
-        // stashes the full colonist profile for on-demand fetch. Values clamped non-negative so a bad client can't
-        // push negatives, but otherwise trusted - this is cosmetic, not reward-gating.
+        // Display-only vanity stats: clamped non-negative but otherwise trusted, because nothing here gates a reward.
         public static void ApplyColonyReport(string username, ColonyReport r)
         {
             if (string.IsNullOrWhiteSpace(username) || r == null) return;
@@ -140,6 +257,7 @@ namespace KMHServerAddon.Features.PlayerStats
                     e.TopColonistName    = Cap(r.TopColonistName, 64);
                     e.TopColonistTitle   = Cap(r.TopColonistTitle, 64);
                     e.TopColonistKills   = (int)Clamp(r.TopColonistKills, 0, 10_000_000);
+                    e.Settlements        = SanitizeSettlements(r.Settlements);
                     e.LastReportUtcTicks = DateTime.UtcNow.Ticks;
                 }
                 if (r.Colonist != null) _colonists[username] = Sanitize(r.Colonist);
@@ -152,6 +270,25 @@ namespace KMHServerAddon.Features.PlayerStats
             Diagnostics.ServerLog.Verbose(
                 $"PlayerStats: stored colony report from {username} - wealth {r.Wealth}, colony '{r.ColonyName}', " +
                 $"{(r.Roster?.Count ?? 0)} colonist(s), top '{r.TopColonistName}'");
+        }
+
+        // Bounded because the count comes from the client: a report claiming thousands of maps must not grow the stored file.
+        private static List<Dto.SettlementReport> SanitizeSettlements(List<Dto.SettlementReport> src)
+        {
+            List<Dto.SettlementReport> outList = new List<Dto.SettlementReport>();
+            if (src == null) return outList;
+            foreach (Dto.SettlementReport s in src)
+            {
+                if (s == null) continue;
+                if (outList.Count >= 32) break;
+                outList.Add(new Dto.SettlementReport
+                {
+                    Name       = Cap(s.Name, 64),
+                    Wealth     = Clamp(s.Wealth, 0, 1_000_000_000_000L),
+                    Population = (int)Clamp(s.Population, 0, 100_000),
+                });
+            }
+            return outList;
         }
 
         // One-line health summary of the standings pipeline for the `kmh diag` admin command.
@@ -172,14 +309,12 @@ namespace KMHServerAddon.Features.PlayerStats
             }
         }
 
-        // Full colonist profile for a player, or null if none reported.
         public static ColonistProfile GetColonist(string username)
         {
             if (string.IsNullOrEmpty(username)) return null;
             lock (_lock) { return _colonists.TryGetValue(username, out ColonistProfile d) ? d : null; }
         }
 
-        // Flattened roster of every colony's reported colonists, each stamped with its owner + colony name.
         public static ColonistRosterSnapshot BuildColonistRoster()
         {
             ColonistRosterSnapshot snap = new ColonistRosterSnapshot();
@@ -202,7 +337,6 @@ namespace KMHServerAddon.Features.PlayerStats
             return snap;
         }
 
-        // Bound a reported roster: at most 10 colonists, strings capped, skills/age/days/kills clamped.
         private static List<ColonistEntry> SanitizeRoster(List<ColonistEntry> list)
         {
             List<ColonistEntry> outList = new List<ColonistEntry>();
@@ -229,8 +363,7 @@ namespace KMHServerAddon.Features.PlayerStats
             return outList;
         }
 
-        // Bound a client-reported profile so a modified client can't bloat storage or push absurd values (it's a
-        // display-only vanity card; just keep it sane). Strings capped, lists truncated, numbers clamped.
+        // Bounded so a modified client can't bloat storage or push absurd values onto a vanity card.
         private const int MaxListItems = 32;
 
         private static ColonistProfile Sanitize(ColonistProfile c)
@@ -281,8 +414,7 @@ namespace KMHServerAddon.Features.PlayerStats
             return list;
         }
 
-        // -- colonist persistence (separate file so the roster JSON stays small) --
-
+        // A separate file so the roster JSON stays small.
         private class ColonistState { public Dictionary<string, ColonistProfile> Colonists { get; set; } = new Dictionary<string, ColonistProfile>(StringComparer.OrdinalIgnoreCase); }
 
         public static void LoadColonistsFromDisk()
@@ -304,8 +436,7 @@ namespace KMHServerAddon.Features.PlayerStats
             JsonFileStore.Save(KmhDataPaths.ColonistsFile, s);
         }
 
-        // Snapshot accessor. Entries are CLONES with guild + discord-link joined in live - the affiliation lives in
-        // GuildStore/LinkedAccountsStore, never on the persisted roster, so it can't go stale on disk
+        // Clones with guild + discord-link joined in live: affiliation is never persisted here, so it can't go stale.
         public static PlayerStatsSnapshot BuildSnapshot()
         {
             PlayerStatsSnapshot s = new PlayerStatsSnapshot();
@@ -318,6 +449,9 @@ namespace KMHServerAddon.Features.PlayerStats
                     {
                         Username          = e.Username,
                         FirstSeenUtcTicks = e.FirstSeenUtcTicks,
+                        LastSeenUtcTicks  = e.LastSeenUtcTicks,
+                        ActiveSeconds     = e.ActiveSeconds,
+                        ConnectedSeconds  = e.ConnectedSeconds,
                         SilverDonated     = e.SilverDonated,
                         SalesEarned       = e.SalesEarned,
                         PurchasesSpent    = e.PurchasesSpent,
@@ -325,13 +459,12 @@ namespace KMHServerAddon.Features.PlayerStats
                         QuestsPosted      = e.QuestsPosted,
                         MarketplaceSales  = e.MarketplaceSales,
                         SitesBuilt        = e.SitesBuilt,
-                        SitesRaided       = e.SitesRaided,
                         WorkerXp          = e.WorkerXp,
-                        EconomyScore      = e.EconomyScore,
                         ColonyName         = e.ColonyName,
                         ColonyAgeDays      = e.ColonyAgeDays,
                         TimePlayedHours    = e.TimePlayedHours,
                         Wealth             = e.Wealth,
+                        Settlements        = SanitizeSettlements(e.Settlements),
                         Kills              = e.Kills,
                         TopColonistName       = e.TopColonistName,
                         TopColonistTitle      = e.TopColonistTitle,
@@ -357,48 +490,139 @@ namespace KMHServerAddon.Features.PlayerStats
                     });
                 }
             }
-            // join outside the lock - GuildStore/LinkedAccountsStore/SiteStore have their own locks, never nest
-            Dictionary<string, long> siteSilver = SiteSilverByOwner();
+            // Joined outside the lock - GuildStore/LinkedAccountsStore/SiteStore hold their own, and these never nest.
+            List<Sites.Dto.SiteEntry> sites = SitesForJoin();
+            Dictionary<string, long> siteSilver = SiteSilverFrom(sites);
+            Dictionary<string, int>  owned      = SitesOwnedByPlayer(sites, out Dictionary<string, int> outposts);
+            Dictionary<string, long> workerXp   = WorkerXpByWorker(sites);
             foreach (PlayerLeaderboardEntry e in s.Entries)
             {
                 e.GuildName         = Guilds.GuildStore.CurrentGuildOf(e.Username) ?? "";
                 e.IsLinkedToDiscord = LinkedAccounts.LinkedAccountsStore.IsLinked(e.Username);
                 e.SiteSilverProduced = siteSilver.TryGetValue(e.Username, out long v) ? v : 0;
+                e.SitesOwned         = owned.TryGetValue(e.Username, out int n) ? n : 0;
+                e.OutpostsHeld       = outposts.TryGetValue(e.Username, out int o) ? o : 0;
+                e.WorkerXp           = workerXp.TryGetValue(e.Username, out long xp) ? xp : 0;
+                // Server-side total, never the client's claim, and the same call the storyteller and audit-player use.
+                e.KmhWealth          = KmhWealthOf(e.Username);
+                e.EconomyScore       = EconomyScoreOf(e);   // last: the joins above are terms of it
+                // Derived per snapshot: no persisted field exists for an import or hand-edited save to smuggle a staff role through.
+                e.StaffRole          = Identity.StaffRegistry.RoleFor(e.Username);
             }
             return s;
         }
 
-        // Total silver each player's custom sites have generated, summed by owner (for Site Records).
-        private static Dictionary<string, long> SiteSilverByOwner()
+        // KMH value is optional to a standings snapshot: a failure here costs one column, never the whole board.
+        private static long KmhWealthOf(string username)
+        {
+            try { return Treasury.TreasuryStore.PersonalOffMapValue(username); }
+            catch (Exception ex)
+            {
+                Diagnostics.ServerLog.Warn($"PlayerStats: KMH wealth join failed for {username}: {ex.Message}");
+                return 0;
+            }
+        }
+
+        // Sites are optional to a standings snapshot: a failure here costs three joins, never the whole board.
+        private static List<Sites.Dto.SiteEntry> SitesForJoin()
+        {
+            try { return Sites.SiteStore.AllForApi(); }
+            catch (Exception ex)
+            {
+                Diagnostics.ServerLog.Warn($"PlayerStats: site join failed: {ex.Message}");
+                return new List<Sites.Dto.SiteEntry>();
+            }
+        }
+
+        // Live, so losing a site lowers it - which is why it is not SitesBuilt. A guild-held site counts for no individual.
+        private static Dictionary<string, int> SitesOwnedByPlayer(List<Sites.Dto.SiteEntry> sites, out Dictionary<string, int> outposts)
+        {
+            try { return SitesOwnedFrom(sites, out outposts); }
+            catch (Exception ex)
+            {
+                Diagnostics.ServerLog.Warn($"PlayerStats: sites-owned join failed: {ex.Message}");
+                outposts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                return new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            }
+        }
+
+        // Pure: the counting rule, separated from where the sites come from, so the arithmetic can be tested.
+        internal static Dictionary<string, int> SitesOwnedFrom(IEnumerable<Sites.Dto.SiteEntry> sites,
+                                                               out Dictionary<string, int> outposts)
+        {
+            var map = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            outposts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            if (sites != null)
+            {
+                foreach (Sites.Dto.SiteEntry site in sites)
+                {
+                    string acct = Features.Sites.SiteOwnership.PayoutAccount(site);
+                    if (string.IsNullOrEmpty(acct)) continue;
+                    map.TryGetValue(acct, out int cur);
+                    map[acct] = cur + 1;
+                    if (string.IsNullOrEmpty(site.OutpostTemplate)) continue;
+                    outposts.TryGetValue(acct, out int oc);
+                    outposts[acct] = oc + 1;
+                }
+            }
+            return map;
+        }
+
+        // XP belongs to the worker, never the site owner - or one owner absorbs five players' progress.
+        private static Dictionary<string, long> WorkerXpByWorker(List<Sites.Dto.SiteEntry> sites)
+        {
+            try { return WorkerXpFrom(sites); }
+            catch (Exception ex)
+            {
+                Diagnostics.ServerLog.Warn($"PlayerStats: worker-xp join failed: {ex.Message}");
+                return new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+            }
+        }
+
+        // Pure: XP is keyed by the WORKER, never the site owner.
+        internal static Dictionary<string, long> WorkerXpFrom(IEnumerable<Sites.Dto.SiteEntry> sites)
+        {
+            var map = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+            if (sites != null)
+            {
+                foreach (Sites.Dto.SiteEntry site in sites)
+                {
+                    if (site.WorkerProgress == null) continue;
+                    foreach (KeyValuePair<string, Sites.Dto.WorkerProgressDto> kv in site.WorkerProgress)
+                    {
+                        if (string.IsNullOrEmpty(kv.Key) || kv.Value == null) continue;
+                        map.TryGetValue(kv.Key, out long cur);
+                        map[kv.Key] = cur + (long)kv.Value.Xp;
+                    }
+                }
+            }
+            return map;
+        }
+
+        internal static Dictionary<string, long> SiteSilverFrom(IEnumerable<Sites.Dto.SiteEntry> sites)
         {
             Dictionary<string, long> map = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
             try
             {
-                foreach (Sites.Dto.SiteEntry site in Sites.SiteStore.AllForApi())
+                foreach (Sites.Dto.SiteEntry site in sites ?? new List<Sites.Dto.SiteEntry>())
                 {
-                    if (site == null || string.IsNullOrEmpty(site.OwnerUsername)) continue;
-                    map.TryGetValue(site.OwnerUsername, out long cur);
-                    map[site.OwnerUsername] = cur + (long)site.TotalSilverGenerated;
+                    string acct = Features.Sites.SiteOwnership.PayoutAccount(site);
+                    if (string.IsNullOrEmpty(acct)) continue;
+                    map.TryGetValue(acct, out long cur);
+                    map[acct] = cur + (long)site.TotalSilverGenerated;
                 }
             }
             catch { /* sites optional - never break the snapshot */ }
             return map;
         }
 
-        // Mutation entry points for other features (no-op now; consumers arrive when Treasury/Marketplace/Quest
-        // handlers port)
         public static void AddSilverDonated(string username, long delta)
         {
             if (string.IsNullOrEmpty(username) || delta == 0) return;
             EnsurePlayer(username); // make sure the row exists first - a bump on an unrostered player is otherwise lost
             lock (_lock)
-            {
                 if (_entries.TryGetValue(username, out PlayerLeaderboardEntry e))
-                {
                     e.SilverDonated = Math.Max(0, e.SilverDonated + delta); // never negative (withdraw nets it down)
-                    RecomputeEconomyScoreLocked(e);
-                }
-            }
             SaveToDisk();
         }
 
@@ -412,13 +636,11 @@ namespace KMHServerAddon.Features.PlayerStats
                 {
                     e.SalesEarned += delta;
                     e.MarketplaceSales += 1;
-                    RecomputeEconomyScoreLocked(e);
                 }
             }
             SaveToDisk();
         }
 
-        // Contract completion: bumps total + the per-kind bucket + the consecutive-completion streak.
         public static void RecordContractCompleted(string username, string kind)
         {
             if (string.IsNullOrEmpty(username)) return;
@@ -433,13 +655,11 @@ namespace KMHServerAddon.Features.PlayerStats
                     else if (kind == Quests.Dto.QuestEntry.KindDeliverItem) e.ContractsDeliver++;
                     else if (kind == Quests.Dto.QuestEntry.KindHunt)        e.ContractsHunt++;
                     else if (kind == Quests.Dto.QuestEntry.KindDefend)      e.ContractsDefend++;
-                    RecomputeEconomyScoreLocked(e);
                 }
             }
             SaveToDisk();
         }
 
-        // Contract failure (abandon / rejected proof): bumps the failure count and breaks the streak.
         public static void RecordContractFailed(string username)
         {
             if (string.IsNullOrEmpty(username)) return;
@@ -449,7 +669,7 @@ namespace KMHServerAddon.Features.PlayerStats
             SaveToDisk();
         }
 
-        // Trade detail on a completed marketplace sale (seller side; SalesEarned/count come via AddSalesEarned).
+        // SalesEarned and the sale count arrive separately through AddSalesEarned.
         public static void RecordSale(string seller, int qty, long saleValue)
         {
             if (string.IsNullOrEmpty(seller) || qty <= 0) return;
@@ -459,7 +679,6 @@ namespace KMHServerAddon.Features.PlayerStats
             SaveToDisk();
         }
 
-        // Trade detail on a completed marketplace buy (buyer side).
         public static void RecordPurchase(string buyer, int qty, long spent)
         {
             if (string.IsNullOrEmpty(buyer) || qty <= 0) return;
@@ -474,13 +693,26 @@ namespace KMHServerAddon.Features.PlayerStats
             if (string.IsNullOrEmpty(username)) return;
             EnsurePlayer(username);
             lock (_lock)
-            {
                 if (_entries.TryGetValue(username, out PlayerLeaderboardEntry e))
-                {
                     e.QuestsCompleted += 1;
-                    RecomputeEconomyScoreLocked(e);
-                }
-            }
+            SaveToDisk();
+        }
+
+        // Only a new site counts: a capture is a Frontier record instead, and losing a site never decrements this.
+        public static void BumpSitesBuilt(string username)
+        {
+            if (string.IsNullOrEmpty(username)) return;
+            EnsurePlayer(username);
+            lock (_lock) { if (_entries.TryGetValue(username, out PlayerLeaderboardEntry e)) e.SitesBuilt += 1; }
+            SaveToDisk();
+        }
+
+        // Credited to whoever executed the capture, guild claims included - a guild does not act on its own.
+        public static void BumpFrontierCaptures(string username)
+        {
+            if (string.IsNullOrEmpty(username)) return;
+            EnsurePlayer(username);
+            lock (_lock) { if (_entries.TryGetValue(username, out PlayerLeaderboardEntry e)) e.FrontierCaptures += 1; }
             SaveToDisk();
         }
 
@@ -498,15 +730,13 @@ namespace KMHServerAddon.Features.PlayerStats
             SaveToDisk();
         }
 
-        // Rough weighted sum so the leaderboard's "Score" sort means something.
-        private static void RecomputeEconomyScoreLocked(PlayerLeaderboardEntry e)
-        {
-            e.EconomyScore =
-                e.SilverDonated
-                + e.SalesEarned        / 2
-                + e.QuestsCompleted    * 100L
-                + e.SitesBuilt         * 50L
-                + e.WorkerXp           / 10L;
-        }
+        // Derived per snapshot, never stored - WorkerXp is joined live, so a cached score would lag it.
+        internal static long EconomyScoreOf(PlayerLeaderboardEntry e)
+            => e.SilverDonated
+             + e.SalesEarned        / 2
+             + e.QuestsCompleted    * 100L
+             // SitesBuilt, not SitesOwned: a score that fell when you sold a site would rank holding above achieving.
+             + e.SitesBuilt         * 50L
+             + e.WorkerXp           / 10L;
     }
 }

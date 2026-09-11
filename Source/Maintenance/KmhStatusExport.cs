@@ -1,13 +1,11 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using KMHServerAddon.Diagnostics;
 using KMHServerAddon.SubProtocol;
 
 namespace KMHServerAddon.Maintenance
 {
-    // Machine-readable KMH state for external tooling (dashboards, leaderboards, monitoring), written to
-    // KMH-Data/status.json on boot, each ~60s sweep, and on 'kmh export'. Its freshness doubles as a liveness
-    // heartbeat. Fields are gathered defensively so one failing subsystem can't blank the file.
+    // Gathered defensively, because one failing subsystem must not blank the whole file.
     internal static class KmhStatusExport
     {
         internal sealed class KmhStatus
@@ -34,9 +32,15 @@ namespace KMHServerAddon.Maintenance
             public int Sites              { get; set; }
             public int ActiveEvents       { get; set; }
             public int ActiveGlobalQuests { get; set; }
+            public int MailMessages       { get; set; }
+            public int ChatMessages       { get; set; }
 
             public long HousePoolSilver { get; set; }
             public long ReportedWealth  { get; set; }
+
+            // Value outside any treasury: unclaimed mail attachments, and goods parked by a failed delivery.
+            public long MailUnclaimedEscrowSilver { get; set; }
+            public int  RecoveryHeldRecords       { get; set; }
 
             public int          Season           { get; set; }
             public List<string> DisabledFeatures { get; set; } = new List<string>();
@@ -81,16 +85,20 @@ namespace KMHServerAddon.Maintenance
                 foreach (ServerClient c in Network.ServerClients.Keys) if (c?.IsVerified == true) clients++;
                 s.VerifiedClients = clients;
             });
-            Try(() => s.Players        = Features.PlayerStats.PlayerStatsStore.BuildSnapshot().Entries.Count);
+            Try(() => s.Players        = Features.PlayerStats.PlayerStatsStore.PlayerCount);
             Try(() => s.Guilds         = Features.Guilds.GuildStore.ListGuilds().Count);
             Try(() => s.LinkedAccounts = Features.LinkedAccounts.LinkedAccountsStore.BuildSnapshot().Links.Count);
             Try(() => s.MarketplaceListings = Features.Marketplace.MarketplaceStore.BuildSnapshot(null).Listings.Count);
             Try(() => s.Auctions       = Features.Auctions.AuctionStore.AllForAdmin().Count);
             Try(() => s.Wants          = Features.WantBoard.WantStore.AllForAdmin().Count);
             Try(() => s.Quests         = Features.Quests.QuestStore.BuildSnapshot(null).Quests.Count);
-            Try(() => s.Sites          = Features.Sites.SiteStore.BuildSnapshotFor("")?.Sites?.Count ?? 0);
+            Try(() => s.Sites          = Features.Sites.SiteStore.AllForApi().Count);
             Try(() => s.ActiveEvents       = Features.World.WorldStore.ActiveEvents().Count);
             Try(() => s.ActiveGlobalQuests = Features.World.WorldStore.ActiveQuests().Count);
+            Try(() => s.MailMessages       = Features.Mail.MailStore.TotalCount);
+            Try(() => s.ChatMessages       = Features.Chat.ChatStore.TotalMessageCount);
+            Try(() => s.MailUnclaimedEscrowSilver = Features.Mail.MailStore.UnclaimedEscrowSilver);
+            Try(() => s.RecoveryHeldRecords       = Features.Recovery.RecoveryStore.HeldCount);
             Try(() => s.HousePoolSilver = Features.Marketplace.MarketplaceStore.HousePoolBalance());
             Try(() => s.ReportedWealth  = Features.PlayerStats.PlayerStatsStore.TotalReportedWealth());
             Try(() => s.Season          = Features.Seasons.SeasonStore.CurrentSeason);

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -18,13 +18,9 @@ using KMHServerAddon.Util;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // The /kmh slash-command tree, registered on Ready (guild-scoped if Bot.GuildId set, else global). Slash
-    // commands don't need the MessageContent intent, so they work on bots that never enabled it. Tiers: player
-    // open; mod needs guild-admin/Roles.Moderators; console gated + runs in the admin channel. Legacy !kmh-* still works.
+    // Slash commands need no MessageContent intent, so these work on a bot that never enabled it.
     internal static class DiscordSlashCommands
     {
-        // -------- registration --------
-
         public static async Task RegisterAsync(DiscordSocketClient client, DiscordConfig cfg)
         {
             if (client == null || cfg == null || cfg.Bot == null || !cfg.Bot.UseSlashCommands) return;
@@ -66,7 +62,6 @@ namespace KMHServerAddon.Features.Discord
             kmh.AddOption(Sub("whois",   "(owner) An online player's IP for moderation - the reply is private to you")
                 .AddOption(Str("player", "In-game name (must be online)", true)));
 
-            // leaderboard
             SlashCommandOptionBuilder lb = Group("leaderboard", "Top players / guilds / reputation");
             lb.AddOption(Sub("show", "Show the leaderboard")
                 .AddOption(new SlashCommandOptionBuilder().WithName("board").WithDescription("Which board")
@@ -79,34 +74,29 @@ namespace KMHServerAddon.Features.Discord
             lb.AddOption(Sub("refresh", "(mod) Re-post the leaderboard now"));
             kmh.AddOption(lb);
 
-            // market
             SlashCommandOptionBuilder mk = Group("market", "Browse the marketplace");
             mk.AddOption(Sub("list", "Open listings").AddOption(IntOpt("page", "Page number", false)));
             mk.AddOption(Sub("search", "Search listings").AddOption(Str("query", "Item or seller", true)));
             kmh.AddOption(mk);
 
-            // site
             SlashCommandOptionBuilder st = Group("site", "Custom sites");
             st.AddOption(Sub("list", "All active sites"));
             st.AddOption(Sub("info", "One site by world tile").AddOption(IntOpt("tile", "World tile id", true)));
+            st.AddOption(Sub("roads", "Road network built by Roadworks sites"));
             kmh.AddOption(st);
 
-            // announcement
             SlashCommandOptionBuilder an = Group("announcement", "Server announcements");
             an.AddOption(Sub("send", "(mod) Post an announcement").AddOption(Str("message", "Text to post", true)));
             kmh.AddOption(an);
 
-            // discord
             SlashCommandOptionBuilder dc = Group("discord", "Bot admin");
             dc.AddOption(Sub("reload", "(mod) Reload Discord config + restart the bridge"));
             kmh.AddOption(dc);
 
-            // config
             SlashCommandOptionBuilder cf = Group("config", "Game config admin");
             cf.AddOption(Sub("reload", "(mod) Reload Economy + Sites config"));
             kmh.AddOption(cf);
 
-            // console
             SlashCommandOptionBuilder co = Group("console", "Owner console");
             co.AddOption(Sub("run", "(owner) Run any server console command")
                 .AddOption(Str("command", "e.g. help / players / kmh status / kmh enforce on", true)));
@@ -130,8 +120,6 @@ namespace KMHServerAddon.Features.Discord
         private static SlashCommandOptionBuilder IntOpt(string name, string desc, bool required)
             => new SlashCommandOptionBuilder().WithName(name).WithDescription(desc)
                 .WithType(ApplicationCommandOptionType.Integer).WithRequired(required);
-
-        // -------- dispatch --------
 
         public static async Task Handle(SocketSlashCommand cmd)
         {
@@ -191,6 +179,7 @@ namespace KMHServerAddon.Features.Discord
 
                 case "site.list": await DoSites(cmd, cfg, -1); return;
                 case "site.info": await DoSites(cmd, cfg, (int)GetInt(args, "tile", -1)); return;
+                case "site.roads": await DoRoads(cmd, cfg); return;
 
                 case "announcement.send":
                     if (!await RequireMod(cmd, cfg)) return;
@@ -214,8 +203,6 @@ namespace KMHServerAddon.Features.Discord
                     await Ephemeral(cmd, "Unknown command - try `/kmh help`."); return;
             }
         }
-
-        // -------- handlers --------
 
         private static async Task DoStatus(SocketSlashCommand cmd, DiscordConfig cfg)
         {
@@ -241,10 +228,7 @@ namespace KMHServerAddon.Features.Discord
             await cmd.RespondAsync(embed: Brand(cfg, $"Players online ({names.Count})", body).Build()).ConfigureAwait(false);
         }
 
-        // Owner-only, ephemeral: an online player's IP for moderation. The reply is private to the requesting admin
-        // (and RequireConsole keeps it in the admin channel), and it's built directly - NOT routed through
-        // DiscordBridge.Redact - so the admin sees the real IP while the channel never does. Online players only
-        // (their live connection IP); offline IP history lives in the local server console / `banlist`.
+        // Built directly rather than through DiscordBridge.Redact, so the real IP reaches the admin but never the channel.
         private static async Task DoWhois(SocketSlashCommand cmd, DiscordConfig cfg, string player)
         {
             if (!await RequireConsole(cmd, cfg)) return;
@@ -296,8 +280,7 @@ namespace KMHServerAddon.Features.Discord
             string query = GetStr(args, "player", "").Trim();
             if (query.Length == 0)
             {
-                query = LinkedAccountsStore.FindUsernameByDiscordId(cmd.User.Id)
-                     ?? LinkedAccountsStore.FindUsernameByDiscord(cmd.User.Username);
+                query = LinkedAccountsStore.FindUsernameByDiscordId(cmd.User.Id);   // id-only; no impersonable display fallback
                 if (string.IsNullOrEmpty(query))
                 {
                     await Ephemeral(cmd, "Give a player name, or link your account (`!kmh-link`) to use it bare.");
@@ -369,7 +352,7 @@ namespace KMHServerAddon.Features.Discord
             {
                 MarketplaceListing l = rows[i];
                 eb.AddField($"#{l.Id} · {DiscordText.Escape(ItemLabelCache.LabelFor(l.ItemDefName, l.StuffDefName, l.QualityIndex))}",
-                    $"**{l.RemainingQty}**× @ `{SilverFmt.Format(l.UnitPriceSilver)}/ea` · by **{DiscordText.Escape(l.SellerUsername)}**",
+                    $"**{l.RemainingQty}**× @ `{SilverFmt.Format(l.UnitPriceSilver)}/ea` · by **{DiscordText.SafeName(l.SellerUsername)}**",
                     inline: false);
             }
             eb.WithFooter(totalPages > 1 ? $"Page {page}/{totalPages} · {rows.Count} listings" : $"{rows.Count} listing(s)");
@@ -378,15 +361,14 @@ namespace KMHServerAddon.Features.Discord
 
         private static async Task DoSites(SocketSlashCommand cmd, DiscordConfig cfg, int tile)
         {
-            SiteSnapshot snap = SiteStore.BuildSnapshotFor("");
-            List<SiteEntry> sites = snap?.Sites ?? new List<SiteEntry>();
+            List<SiteEntry> sites = SiteStore.AllForApi();
 
             if (tile >= 0)
             {
                 SiteEntry s = sites.FirstOrDefault(x => x.Tile == tile);
                 if (s == null) { await Ephemeral(cmd, $"No site at tile {tile}."); return; }
                 EmbedBuilder eb = Brand(cfg, $"Site · tile {s.Tile}", null)
-                    .AddField("Owner",   string.IsNullOrEmpty(s.OwnerGuild) ? DiscordText.Escape(s.OwnerUsername) : $"{DiscordText.Escape(s.OwnerUsername)} ({DiscordText.Escape(s.OwnerGuild)})", true)
+                    .AddField("Owner",   DiscordText.SafeName(SiteOwnership.ControllerLabel(s)), true)
                     .AddField("Produces", $"{s.BaseAmountPerCycle}× {DiscordText.Escape(ItemLabelCache.LabelFor(s.ItemDefName))}", true)
                     .AddField("Access",  AccessLabel(s.AccessMode), true)
                     .AddField("Workers", $"{s.Workers?.Count ?? 0}/{s.MaxWorkers}", true);
@@ -403,13 +385,51 @@ namespace KMHServerAddon.Features.Discord
             }
             foreach (SiteEntry s in sites.Take(15))
             {
-                string owner = string.IsNullOrEmpty(s.OwnerGuild) ? DiscordText.Escape(s.OwnerUsername) : $"{DiscordText.Escape(s.OwnerUsername)} ({DiscordText.Escape(s.OwnerGuild)})";
+                string owner = DiscordText.SafeName(SiteOwnership.ControllerLabel(s));
                 list.AddField($"Tile {s.Tile} · {DiscordText.Escape(ItemLabelCache.LabelFor(s.ItemDefName))}",
                     $"{s.BaseAmountPerCycle}×/cycle · {AccessLabel(s.AccessMode)} · by **{owner}** · workers {s.Workers?.Count ?? 0}/{s.MaxWorkers}",
                     inline: false);
             }
             if (sites.Count > 15) list.WithFooter($"Showing 15 of {sites.Count}");
             await cmd.RespondAsync(embed: list.Build()).ConfigureAwait(false);
+        }
+
+        // Roads are world infrastructure, so this shows the network and never anyone's projects or reserved silver.
+        private static async Task DoRoads(SocketSlashCommand cmd, DiscordConfig cfg)
+        {
+            if (!Features.Sites.SitesConfig.Current.AllowRoadworks)
+            { await Ephemeral(cmd, "Roadworks is turned off on this server."); return; }
+
+            List<Features.Roadworks.Dto.RoadSegment> segments = Features.Roadworks.RoadworksStore.AllSegments();
+            EmbedBuilder e = Brand(cfg, $"Roadworks ({segments.Count} segment(s))", null);
+            if (segments.Count == 0)
+            {
+                e.WithDescription("_No roads built yet._");
+                await cmd.RespondAsync(embed: e.Build()).ConfigureAwait(false);
+                return;
+            }
+
+            var byTier  = new Dictionary<string, int>();
+            var byOwner = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            foreach (Features.Roadworks.Dto.RoadSegment s in segments)
+            {
+                string tier = Features.Roadworks.RoadTiers.Normalize(s?.Tier);
+                byTier[tier] = byTier.TryGetValue(tier, out int n) ? n + 1 : 1;
+                string o = s?.OwnerUsername ?? "";   // RoadSegment builder, not a Site controller
+                if (o.Length > 0) byOwner[o] = byOwner.TryGetValue(o, out int m) ? m + 1 : 1;
+            }
+
+            StringBuilder tiers = new StringBuilder();
+            foreach (string tier in Features.Roadworks.RoadTiers.All)
+                tiers.AppendLine($"**{Features.Roadworks.RoadTiers.DisplayName(tier)}** · {(byTier.TryGetValue(tier, out int c) ? c : 0)} segment(s)");
+            e.AddField("By tier", tiers.ToString(), inline: false);
+
+            StringBuilder builders = new StringBuilder();
+            foreach (KeyValuePair<string, int> kv in byOwner.OrderByDescending(k => k.Value).Take(10))
+                builders.AppendLine($"{DiscordText.SafeName(kv.Key)} · {kv.Value}");
+            if (builders.Length > 0) e.AddField("Top builders", builders.ToString(), inline: false);
+
+            await cmd.RespondAsync(embed: e.Build()).ConfigureAwait(false);
         }
 
         private static async Task DoAnnounce(SocketSlashCommand cmd, DiscordConfig cfg, string message)
@@ -428,8 +448,7 @@ namespace KMHServerAddon.Features.Discord
 
         private static async Task DoDiscordReload(SocketSlashCommand cmd)
         {
-            // Respond first - Reload tears down the client handling this very interaction, so confirm before
-            // pulling the rug
+            // Respond first, because Reload tears down the client handling this very interaction.
             await cmd.RespondAsync("Reloading the Discord bridge...", ephemeral: true).ConfigureAwait(false);
             DiscordBridge.Reload();
         }
@@ -444,9 +463,7 @@ namespace KMHServerAddon.Features.Discord
         private static async Task DoConsoleRun(SocketSlashCommand cmd, DiscordConfig cfg, string command)
         {
             if (!await RequireConsole(cmd, cfg)) return;
-            // ConsoleExecutor.Run is synchronous and can run past Discord's 3-second interaction window (big help/
-            // list output), which throws "Cannot respond after 3 seconds". Acknowledge immediately with DeferAsync
-            // (buys ~15 min), then follow up once the captured output is ready
+            // ConsoleExecutor.Run is synchronous and can outlast Discord's three-second interaction window.
             await cmd.DeferAsync(ephemeral: true).ConfigureAwait(false);
             string output;
             try { output = ConsoleExecutor.Run(command); }
@@ -460,7 +477,7 @@ namespace KMHServerAddon.Features.Discord
         {
             EmbedBuilder eb = Brand(cfg, "KMH Discord commands", null)
                 .AddField("Anyone",
-                    "`/kmh status` · `/kmh players` · `/kmh leaderboard show` · `/kmh market list|search` · `/kmh site list|info` · `/kmh help`", false)
+                    "`/kmh status` · `/kmh players` · `/kmh leaderboard show` · `/kmh market list|search` · `/kmh site list|info|roads` · `/kmh help`", false)
                 .AddField("Moderators",
                     "`/kmh leaderboard post|refresh` · `/kmh announcement send` · `/kmh discord reload` · `/kmh config reload`", false)
                 .AddField("Owners",
@@ -468,8 +485,6 @@ namespace KMHServerAddon.Features.Discord
                 .WithFooter("Account linking still uses /kmh link in-game + !kmh-link here.");
             await cmd.RespondAsync(embed: eb.Build(), ephemeral: true).ConfigureAwait(false);
         }
-
-        // -------- permissions --------
 
         private static async Task<bool> RequireMod(SocketSlashCommand cmd, DiscordConfig cfg)
         {
@@ -528,8 +543,6 @@ namespace KMHServerAddon.Features.Discord
             return false;
         }
 
-        // -------- helpers --------
-
         private static EmbedBuilder Brand(DiscordConfig cfg, string title, string description)
         {
             EmbedBuilder eb = new EmbedBuilder().WithTitle(title).WithColor(BrandColor(cfg));
@@ -547,7 +560,7 @@ namespace KMHServerAddon.Features.Discord
         private static Task Ephemeral(SocketSlashCommand cmd, string text)
             => cmd.RespondAsync(text, ephemeral: true);
 
-        // Wrap multi-line console/status output in a code block, clamped to Discord's 2000-char message ceiling
+        // Clamped to Discord's 2000-character message ceiling.
         private static Task RespondBlock(SocketSlashCommand cmd, string text, bool ephemeral)
         {
             string body = string.IsNullOrWhiteSpace(text) ? "(no output)" : text.TrimEnd();
@@ -555,8 +568,7 @@ namespace KMHServerAddon.Features.Discord
             return cmd.RespondAsync($"```\n{body}\n```", ephemeral: ephemeral);
         }
 
-        // Send captured output as one or more ```code``` followups after a DeferAsync, split on line boundaries so
-        // big results (help / deeplist) come through in full instead of being truncated to one message
+        // Split across several followups, so a large result arrives in full rather than truncated to one message.
         private static async Task FollowupBlocks(SocketSlashCommand cmd, string text)
         {
             string body = string.IsNullOrWhiteSpace(text) ? "(no output)" : text.TrimEnd();
@@ -570,7 +582,7 @@ namespace KMHServerAddon.Features.Discord
             }
         }
 
-        // Split text into chunks no larger than cap, breaking on newlines (a single over-long line is hard-split).
+        // Breaks on newlines where it can, since a single over-long line still has to be hard-split.
         private static List<string> SplitForBlocks(string text, int cap)
         {
             List<string> chunks = new List<string>();

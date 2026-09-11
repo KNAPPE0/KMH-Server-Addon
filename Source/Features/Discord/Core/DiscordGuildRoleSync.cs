@@ -13,7 +13,6 @@ using KMHServerAddon.Persistence;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // Mirrors guild membership to Discord roles "<Guild> (<Rank>)" - opt-in, REST-based, bot needs Manage Roles.
     internal static class DiscordGuildRoleSync
     {
         private static bool _started;
@@ -21,7 +20,7 @@ namespace KMHServerAddon.Features.Discord
         private static Dictionary<string, string> _applied  // username -> role name last applied
             = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-        // Any role named "<something> (Admin|Moderator|Officer|Member)" is one of ours to manage.
+        // Decides which existing roles KMH may delete, so it must not match a role an owner made by hand.
         private static readonly Regex KmhRolePattern =
             new Regex(@"^.+ \((Admin|Moderator|Officer|Member)\)$", RegexOptions.Compiled);
 
@@ -35,11 +34,11 @@ namespace KMHServerAddon.Features.Discord
             KmhEventBus bus = KmhEventBus.Instance;
             bus.PlayerLinked   += e => Fire(() => ReconcileUser(e.Username, e.DiscordId));
             bus.PlayerUnlinked += e => Fire(() => ReconcileUser(e.Username, e.DiscordId));
-            bus.GuildChanged   += _ => ScheduleReconcileAll();   // reason/actor vary, so reconcile everyone (debounced)
+            bus.GuildChanged   += _ => ScheduleReconcileAll();
             ServerLog.Info("Discord: guild-role sync subscribed (Roles.SyncGuildRoles gates actual changes)");
         }
 
-        // On (re)connect, catch up anything that changed while the bot was offline.
+        // Catches up whatever changed while the bot was offline.
         public static void OnBridgeReady() => ScheduleReconcileAll();
 
         private static bool Enabled()
@@ -58,11 +57,11 @@ namespace KMHServerAddon.Features.Discord
             });
         }
 
-        // Coalesce bursts of guild changes into one full reconcile a couple seconds later.
+        // Debounced, or a burst of guild changes would drive one full reconcile each.
         private static void ScheduleReconcileAll()
         {
             if (!Enabled()) return;
-            if (Interlocked.Exchange(ref _reconcilePending, 1) == 1) return; // already scheduled
+            if (Interlocked.Exchange(ref _reconcilePending, 1) == 1) return;
             _ = Task.Run(async () =>
             {
                 try { await Task.Delay(2500).ConfigureAwait(false); }
@@ -79,12 +78,11 @@ namespace KMHServerAddon.Features.Discord
                 await ReconcileUser(kv.Key, kv.Value).ConfigureAwait(false);
         }
 
-        // Align this user's Discord roles with their KMH guild+rank; the cache short-circuits unchanged users.
         private static async Task ReconcileUser(string username, ulong discordId)
         {
             if (!Enabled() || string.IsNullOrEmpty(username) || discordId == 0) return;
 
-            // Target role from their CURRENT link + guild. Unlinked or guildless -> no KMH role.
+            // Empty target is the unlinked or guildless case, which then strips every KMH role below.
             string target = "";
             if (LinkedAccounts.LinkedAccountsStore.DiscordIdFor(username) == discordId)
             {
@@ -102,9 +100,8 @@ namespace KMHServerAddon.Features.Discord
             if (sg == null) return;
 
             RestGuildUser user = await client.Rest.GetGuildUserAsync(guildId, discordId).ConfigureAwait(false);
-            if (user == null) { SetApplied(username, ""); return; }   // not a member of the Discord server
+            if (user == null) { SetApplied(username, ""); return; }
 
-            // Strip any KMH-managed role that isn't the target (covers rank change, guild change, leave, unlink).
             foreach (ulong rid in user.RoleIds.ToArray())
             {
                 SocketRole r = sg.GetRole(rid);
@@ -113,7 +110,6 @@ namespace KMHServerAddon.Features.Discord
                 catch (Exception ex) { ServerLog.Verbose($"role remove '{r.Name}' from {username}: {ex.Message}"); }
             }
 
-            // Add the target, creating the role on first use.
             if (!string.IsNullOrEmpty(target))
             {
                 IRole role = sg.Roles.FirstOrDefault(r => string.Equals(r.Name, target, StringComparison.Ordinal));
@@ -137,8 +133,6 @@ namespace KMHServerAddon.Features.Discord
             if (string.IsNullOrEmpty(rank)) return "Member";
             return char.ToUpperInvariant(rank[0]) + rank.Substring(1).ToLowerInvariant();
         }
-
-        // --- applied-role cache (persisted, regenerable) ---
 
         private static void SetApplied(string username, string role)
         {

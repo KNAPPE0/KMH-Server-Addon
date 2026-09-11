@@ -3,8 +3,7 @@ using Newtonsoft.Json;
 
 namespace KMHServerAddon.Features.LinkedAccounts.Dto
 {
-    // Mirror of patch mod's KMHPatch.Features.LinkedAccounts.Dto. Server is the source of truth; client cache
-    // replaces wholesale on each push
+    // Mirrors the patch mod's DTO of the same name - a field changed here has to change there too.
     public class LinkedAccountsSnapshot
     {
         [JsonProperty("links")]

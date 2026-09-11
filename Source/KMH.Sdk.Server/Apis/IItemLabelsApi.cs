@@ -3,9 +3,8 @@ using System.Collections.Generic;
 namespace KMH.Sdk.Server.Apis
 {
     /// <summary>
-    /// Read the defName → human label catalog populated by patch-mod
-    /// clients at handshake. Useful for extensions that render item
-    /// names in custom output (Discord embeds, web dashboards, etc.).
+    /// The defName → human label catalog, contributed by patch-mod clients at handshake, so a server with none
+    /// connected yet knows no labels.
     /// </summary>
     public interface IItemLabelsApi
     {
@@ -15,14 +14,12 @@ namespace KMH.Sdk.Server.Apis
         /// <summary>True if the cache has a label entry for the defName.</summary>
         bool HasLabel(string defName);
 
-        /// <summary>Total entries in the cache (debug/diagnostic).</summary>
+        /// <summary>Total entries in the cache.</summary>
         int Count { get; }
 
         /// <summary>
-        /// Friendly-name resolution: "plasteel" → "Plasteel" / "power
-        /// armor" → "Apparel_PowerArmor". Returns the matching defName
-        /// when unambiguous; null + populated <paramref name="candidates"/>
-        /// when the query matches multiple items.
+        /// Resolve a friendly name such as "power armor" to a defName, or return null and fill
+        /// <paramref name="candidates"/> when the query is ambiguous.
         /// </summary>
         string ResolveDefNameByQuery(string query, out List<string> candidates);
     }

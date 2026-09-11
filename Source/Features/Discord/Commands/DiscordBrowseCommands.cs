@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using Discord;
@@ -15,10 +15,7 @@ using KMHServerAddon.Features.Treasury.Dto;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // Read-only browse commands for the Discord bridge (no cross-feature mutation): !kmh-market [page|mine|<query>],
-    // !kmh-quests [page], !kmh-treasury (needs link). Mutating commands (!buy/!sell/!cancel/!showcase/!wtb, buy
-    // buttons) live in DiscordTradeCommands.cs. All commands are visibility-aware: unlinked callers see only public
-    // listings/quests; linked callers also see guild-only items posted by their guildmates or allies.
+    // An unlinked caller resolves to no username, which is what limits them to public listings and quests.
     internal static class DiscordBrowseCommands
     {
         private const int PageSize = 8;
@@ -63,8 +60,6 @@ namespace KMHServerAddon.Features.Discord
                     return false;
             }
         }
-
-        // -- !kmh-market --
 
         private static async Task HandleMarket(SocketMessage raw, string[] parts)
         {
@@ -135,7 +130,7 @@ namespace KMHServerAddon.Features.Discord
                 eb.AddField(
                     $"{emoji} #{l.Id} · {DiscordText.Escape(label)}",
                     $"**{l.RemainingQty}**× @ `{SilverFmt.Format(l.UnitPriceSilver)}/ea` · total `{SilverFmt.Format((long)l.UnitPriceSilver * l.RemainingQty)}`\n" +
-                    $"by **{DiscordText.Escape(l.SellerUsername)}** · {expiry}",
+                    $"by **{DiscordText.SafeName(l.SellerUsername)}** · {expiry}",
                     inline: false);
             }
 
@@ -148,16 +143,12 @@ namespace KMHServerAddon.Features.Discord
             await raw.Channel.SendMessageAsync(embed: eb.Build()).ConfigureAwait(false);
         }
 
-        // -- !kmh-quests --
-
         private static async Task HandleQuests(SocketMessage raw, string[] parts)
         {
             string callerUser = ResolveLinkedUsername(raw);
             QuestSnapshot snap = QuestStore.BuildSnapshot(callerUser ?? "");
             List<QuestEntry> rows = snap?.Quests ?? new List<QuestEntry>();
 
-            // Default view = currently open quests (claimable). Players wanting to see in-flight quests should ask
-            // in-game
             List<QuestEntry> open = new List<QuestEntry>();
             foreach (QuestEntry q in rows)
             {
@@ -178,7 +169,6 @@ namespace KMHServerAddon.Features.Discord
                 return;
             }
 
-            // Newest first - keeps fresh posts above stale ones.
             open.Sort((a, b) => b.PostedUtcTicks.CompareTo(a.PostedUtcTicks));
 
             int totalPages = Math.Max(1, (open.Count + PageSize - 1) / PageSize);
@@ -191,7 +181,7 @@ namespace KMHServerAddon.Features.Discord
                 QuestEntry q = open[i];
                 string kindLabel = q.Kind == QuestEntry.KindBounty ? "Bounty" : "Deliver";
                 string title     = string.IsNullOrEmpty(q.Title) ? "(no title)" : q.Title;
-                string body      = $"**{kindLabel}** · bounty `{SilverFmt.Format(q.BountySilver)}` · by **{DiscordText.Escape(q.PosterUsername)}**";
+                string body      = $"**{kindLabel}** · bounty `{SilverFmt.Format(q.BountySilver)}` · by **{DiscordText.SafeName(q.PosterUsername)}**";
                 if (q.Kind == QuestEntry.KindDeliverItem && !string.IsNullOrEmpty(q.TargetItemDefName))
                 {
                     body += $"\nTarget: **{q.TargetItemQty}**× {DiscordText.Escape(ItemLabelCache.LabelFor(q.TargetItemDefName))}";
@@ -215,8 +205,6 @@ namespace KMHServerAddon.Features.Discord
 
             await raw.Channel.SendMessageAsync(embed: eb.Build()).ConfigureAwait(false);
         }
-
-        // -- !kmh-treasury --
 
         private static async Task HandleTreasury(SocketMessage raw)
         {
@@ -249,7 +237,6 @@ namespace KMHServerAddon.Features.Discord
 
             if (t.Items != null && t.Items.Count > 0)
             {
-                // Compact items dump - at most 20 lines, sorted by qty desc.
                 List<KeyValuePair<string, int>> items = new List<KeyValuePair<string, int>>(t.Items);
                 items.Sort((a, b) => b.Value.CompareTo(a.Value));
                 int max = Math.Min(20, items.Count);
@@ -274,11 +261,6 @@ namespace KMHServerAddon.Features.Discord
             await raw.Channel.SendMessageAsync(embed: eb.Build()).ConfigureAwait(false);
         }
 
-        // -- !kmh-find --
-
-        // Filter listings by case-insensitive substring match on label OR defName. Reuses the same paged-embed
-        // shape as !kmh-market so the output reads familiarly. Public - unlinked callers see only
-        // public listings via BuildSnapshot("").
         private static async Task HandleFind(SocketMessage raw, string[] parts)
         {
             if (parts.Length < 2)
@@ -323,7 +305,7 @@ namespace KMHServerAddon.Features.Discord
                 MarketplaceListing l = hits[i];
                 eb.AddField(
                     $"{DiscordItemIconMap.EmojiFor(l.ItemDefName)} #{l.Id} · {DiscordText.Escape(ItemLabelCache.LabelFor(l.ItemDefName, l.StuffDefName, l.QualityIndex))}",
-                    $"**{l.RemainingQty}**× @ `{SilverFmt.Format(l.UnitPriceSilver)}/ea` · by **{DiscordText.Escape(l.SellerUsername)}** · {FormatExpiry(l.ExpiresUtcTicks)}",
+                    $"**{l.RemainingQty}**× @ `{SilverFmt.Format(l.UnitPriceSilver)}/ea` · by **{DiscordText.SafeName(l.SellerUsername)}** · {FormatExpiry(l.ExpiresUtcTicks)}",
                     inline: false);
             }
             eb.WithFooter(hits.Count > max
@@ -332,11 +314,6 @@ namespace KMHServerAddon.Features.Discord
             await raw.Channel.SendMessageAsync(embed: eb.Build()).ConfigureAwait(false);
         }
 
-        // -- !kmh-compare --
-
-        // Top-5 cheapest listings for a single item + min/max/avg stats. Resolves the friendly name through
-        // ItemLabelCache the same way !kmh-sell does, including the "ambiguous → candidate list" reply shape so
-        // usage is consistent
         private static async Task HandleCompare(SocketMessage raw, string[] parts)
         {
             if (parts.Length < 2)
@@ -408,21 +385,15 @@ namespace KMHServerAddon.Features.Discord
                 MarketplaceListing l = matches[i];
                 eb.AddField(
                     $"#{l.Id} · `{SilverFmt.Format(l.UnitPriceSilver)}/ea",
-                    $"**{l.RemainingQty}**× · total `{(long)l.UnitPriceSilver * l.RemainingQty}s` · by **{DiscordText.Escape(l.SellerUsername)}** · `!kmh-buy {l.Id}`",
+                    $"**{l.RemainingQty}**× · total `{(long)l.UnitPriceSilver * l.RemainingQty}s` · by **{DiscordText.SafeName(l.SellerUsername)}** · `!kmh-buy {l.Id}`",
                     inline: false);
             }
 
-            // Attach Buy buttons to the cheapest listing only - Discord's 25-button cap + ambiguous attribution
-            // rules out per-listing button rows. The text receipts still list `!kmh-buy <id>`
-            // for the other 4 so they're never strictly worse.
+            // Cheapest only, because Discord caps a message at 25 buttons and the rest carry a !kmh-buy id anyway.
             MessageComponent components = DiscordBuyButton.BuildBuyComponents(matches[0]);
             await raw.Channel.SendMessageAsync(embed: eb.Build(), components: components).ConfigureAwait(false);
         }
 
-        // -- !kmh-history --
-
-        // Last N treasury transactions for the linked user. Default 10, capped at 25 by Discord embed-field limits.
-        // Most-recent first
         private static async Task HandleHistory(SocketMessage raw, string[] parts)
         {
             string callerUser = ResolveLinkedUsername(raw);
@@ -474,11 +445,6 @@ namespace KMHServerAddon.Features.Discord
             await raw.Channel.SendMessageAsync(embed: eb.Build()).ConfigureAwait(false);
         }
 
-        // -- !kmh-items / !kmh-catalog --
-
-        // First-N entries from ItemLabelCache, alphabetical by label. Useful as a discovery tool - "what does the
-        // server know about?" Cap at 25 entries (Discord embed limit on plain description length is large but
-        // readability is the actual constraint)
         private static async Task HandleCatalog(SocketMessage raw, string[] parts)
         {
             int count = ItemLabelCache.Count;
@@ -495,9 +461,6 @@ namespace KMHServerAddon.Features.Discord
                 return;
             }
 
-            // Build a sample listing. The cache itself is the canonical source - we materialize via
-            // ResolveDefNameByQuery's exposed shape: enumerate via Apply with an empty merge, no - actually we
-            // don't have a public iterator. Add a quick one
             string query = parts.Length >= 2 ? JoinFrom(parts, 1).Trim() : "";
             List<KeyValuePair<string, string>> sample = ItemLabelCache.Sample(query, 25);
 
@@ -517,8 +480,6 @@ namespace KMHServerAddon.Features.Discord
             await raw.Channel.SendMessageAsync(embed: eb.Build()).ConfigureAwait(false);
         }
 
-        // -- helpers --
-
         private static string JoinFrom(string[] parts, int startIndex)
         {
             if (parts == null || startIndex >= parts.Length) return "";
@@ -531,8 +492,6 @@ namespace KMHServerAddon.Features.Discord
             return sb.ToString();
         }
 
-        // Format a UTC-ticks timestamp as a Discord relative timestamp (<t:UNIX:R> → "5 minutes ago"). Falls back
-        // to a literal "(?)" on parse failure - receipts shouldn't crash because of a bad ticks
         private static string TryFormatRelative(long utcTicks)
         {
             if (utcTicks <= 0) return "(?)";
@@ -545,30 +504,13 @@ namespace KMHServerAddon.Features.Discord
             catch { return "(?)"; }
         }
 
-        // In-game username linked to the Discord author, or null if unlinked. Prefers snowflake-id lookup so the
-        // link survives a Discord rename; falls back to display lookup for legacy links from before Id storage.
+        // Id only: a display-name fallback would let someone read another player's treasury by copying their name.
         private static string ResolveLinkedUsername(SocketMessage raw)
         {
             if (raw?.Author == null) return null;
-            ulong  id      = raw.Author.Id;
-            string display = ResolveDiscordDisplay(raw.Author);
-            string byId    = LinkedAccountsStore.FindUsernameByDiscordId(id);
-            if (!string.IsNullOrEmpty(byId)) return byId;
-            return string.IsNullOrEmpty(display) ? null : LinkedAccountsStore.FindUsernameByDiscord(display);
+            return LinkedAccountsStore.FindUsernameByDiscordId(raw.Author.Id);
         }
 
-        private static string ResolveDiscordDisplay(IUser user)
-        {
-            string g = user?.GlobalName;
-            if (!string.IsNullOrEmpty(g)) return g;
-            string u = user?.Username;
-            string d = user?.Discriminator;
-            if (!string.IsNullOrEmpty(d) && d != "0" && d != "0000") return $"{u}#{d}";
-            return u ?? "";
-        }
-
-        // Renders an ExpiresUtcTicks value as a Discord relative timestamp (`<t:UNIX:R>` → "in 3 hours"). Treats 0
-        // as "never expires"
         private static string FormatExpiry(long utcTicks)
         {
             if (utcTicks <= 0) return "never expires";

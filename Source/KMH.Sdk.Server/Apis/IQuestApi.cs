@@ -3,13 +3,10 @@ using KMH.Sdk.Server.Records;
 
 namespace KMH.Sdk.Server.Apis
 {
-    /// <summary>Read + mutate the KMH quest board.</summary>
+    /// <summary>Read and mutate the quest board.</summary>
     public interface IQuestApi
     {
-        /// <summary>
-        /// All quests visible to the given caller (own posts always
-        /// visible; guild-only quests filtered against caller's guild).
-        /// </summary>
+        /// <summary>Quests visible to the caller: their own always, guild-only ones filtered against their guild.</summary>
         IReadOnlyList<QuestRecord> GetVisibleQuests(string callerUsername);
 
         /// <summary>Post a DeliverItem quest. Returns the new quest id or 0 on failure.</summary>
@@ -25,10 +22,8 @@ namespace KMH.Sdk.Server.Apis
         bool Claim(string claimerUsername, long questId);
 
         /// <summary>
-        /// Submit a claimed quest. For DeliverItem, server checks the
-        /// claimer's treasury for the target item + qty and auto-
-        /// completes on match. For Bounty, transitions to Submitted
-        /// awaiting the poster's <see cref="Approve"/>.
+        /// Submit a claimed quest. A DeliverItem quest completes as soon as the claimer's treasury holds the target;
+        /// a Bounty waits for the poster's <see cref="Approve"/>.
         /// </summary>
         bool Submit(string claimerUsername, long questId);
 

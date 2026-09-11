@@ -9,8 +9,6 @@ using KMHServerAddon.Persistence;
 
 namespace KMHServerAddon.Features.Enforcement
 {
-    // The hard-enforcement profile: a zip of an admin's Config folder, held with its SHA-256, file count, and
-    // timestamp. Persisted as Enforcement/Profile.zip
     internal static class EnforcementProfile
     {
         private static byte[] _zip = Array.Empty<byte>();
@@ -33,7 +31,6 @@ namespace KMHServerAddon.Features.Enforcement
             }
         }
 
-        // Read the persisted profile zip at boot (or after an external change).
         public static int Reload()
         {
             try
@@ -51,22 +48,34 @@ namespace KMHServerAddon.Features.Enforcement
             return _fileCount;
         }
 
-        // Promote an uploaded zip to the live profile and persist it.
-        public static void SetProfile(byte[] zip, string hash, long updatedTicks)
+        internal static Func<string> FailWriteForTest;
+
+        // False keeps the old profile active: publishing one the disk refused hands clients rules that vanish on restart.
+        public static bool SetProfile(byte[] zip, string hash, long updatedTicks)
         {
+            byte[] oldZip = _zip; string oldHash = _hash;
+            long oldTicks = _updatedTicks; int oldCount = _fileCount;
+
             _zip          = zip ?? Array.Empty<byte>();
             _hash         = string.IsNullOrEmpty(hash) ? Sha256Hex(_zip) : hash;
             _updatedTicks = updatedTicks > 0 ? updatedTicks : DateTime.UtcNow.Ticks;
             _fileCount    = CountEntries(_zip);
             try
             {
+                string injected = FailWriteForTest?.Invoke();
+                if (injected != null) throw new IOException(injected);
                 Directory.CreateDirectory(Path.GetDirectoryName(ZipPath));
                 File.WriteAllBytes(ZipPath, _zip);
+                return true;
             }
-            catch (Exception ex) { ServerLog.Warn($"Enforcement: profile save failed: {ex.Message}"); }
+            catch (Exception ex)
+            {
+                _zip = oldZip; _hash = oldHash; _updatedTicks = oldTicks; _fileCount = oldCount;
+                ServerLog.Warn($"Enforcement: profile save failed, the previous profile stays active: {ex.Message}");
+                return false;
+            }
         }
 
-        // The bytes streamed to clients (the zip itself).
         public static byte[] SerializeBytes() => _zip ?? Array.Empty<byte>();
 
         private static void Clear() { _zip = Array.Empty<byte>(); _hash = ""; _updatedTicks = 0; _fileCount = 0; }

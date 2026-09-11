@@ -1,12 +1,11 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
 
 namespace KMHServerAddon.Maintenance
 {
-    // Regression cover for server discovery, so the NEXT RWT rename fails here rather than in an owner's console.
-    // Uses synthetic bundles under the temp folder: the real parser runs and no RWT binaries are needed.
+    // The next RWT rename should fail here rather than in an owner's console.
     internal static class KmhRwtDiscoverySelfTest
     {
         public static bool Run(Action<string> log, out string summary)

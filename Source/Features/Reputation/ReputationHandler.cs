@@ -2,8 +2,6 @@ using KMHServerAddon.SubProtocol;
 
 namespace KMHServerAddon.Features.Reputation
 {
-    // Pushes the reputation roster to clients for tier badges. Snapshot is the full (small) roster - sent on
-    // request, on handshake, and after any quest action that moves a score
     internal static class ReputationHandler
     {
         public static void Register()

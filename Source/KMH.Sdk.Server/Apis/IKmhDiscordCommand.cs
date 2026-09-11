@@ -3,15 +3,12 @@ using System.Collections.Generic;
 namespace KMH.Sdk.Server.Apis
 {
     /// <summary>
-    /// Context handed to an extension's Discord command handler when a
-    /// matching <c>!command</c> arrives in a channel the KMH bot watches.
-    /// Hides Discord.NET's SocketMessage behind a stable surface so
+    /// A <c>!command</c> that arrived in a channel the KMH bot watches, hiding Discord.NET's SocketMessage so
     /// extension code never links against a specific Discord.NET version.
     /// </summary>
     /// <remarks>
-    /// Handlers run on the Discord gateway thread. Keep them quick or hand
-    /// heavy work to your own background thread; <see cref="Reply"/> is
-    /// fire-and-forget so it never blocks the gateway.
+    /// Handlers run on the Discord gateway thread, so hand heavy work to your own thread; <see cref="Reply"/> is
+    /// fire-and-forget and never blocks the gateway.
     /// </remarks>
     public interface IKmhDiscordCommand
     {
@@ -34,9 +31,8 @@ namespace KMH.Sdk.Server.Apis
         ulong ChannelId { get; }
 
         /// <summary>
-        /// The in-game KMH username this Discord author is linked to, or
-        /// empty string if they haven't linked. Use this to authorize
-        /// account-scoped actions the same way KMH's own trade commands do.
+        /// The KMH username this author is linked to, empty if unlinked. Authorize account-scoped actions on this,
+        /// never on a display name.
         /// </summary>
         string LinkedUsername { get; }
 

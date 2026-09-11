@@ -1,7 +1,6 @@
 namespace KMH.Sdk.Server.Events
 {
-    // Immutable event payloads. Always passed by reference but never mutated - handler code is welcome to
-    // capture-and-stash these without worrying about KMH writing into them later
+    /// <summary>Event payloads KMH never mutates after raising, so a handler may keep a reference.</summary>
 
     public sealed class PlayerJoinedEvent
     {
@@ -117,7 +116,9 @@ namespace KMH.Sdk.Server.Events
     {
         public int    Tile          { get; init; }
         public string OwnerUsername { get; init; } = "";
-        public string Reason        { get; init; } = "";   // "built" / "worker_joined" / "worker_left" / "removed" / "reward"
+        public string Reason        { get; init; } = "";   // built / worker_joined / worker_left / removed / reward / road_started / road_cancelled / road_segment
+        public string PreviousController { get; init; } = "";   // set on a capture; blank otherwise
+        public long   OperationId        { get; init; } = 0;
     }
 
     public sealed class AuctionPostedEvent
@@ -192,8 +193,6 @@ namespace KMH.Sdk.Server.Events
         public string Title   { get; init; } = "";
     }
 
-    // Ops lifecycle - backups, coordinated rollback, and seasons. Useful for external tooling that mirrors KMH state
-    // or coordinates with an RWT backup/rollback.
     public sealed class BackupCreatedEvent
     {
         public string Name   { get; init; } = "";   // backup folder name (yyyyMMdd-HHmmss-<reason>)
@@ -207,8 +206,7 @@ namespace KMH.Sdk.Server.Events
         public string SafetyBackup { get; init; } = "";   // snapshot of the pre-restore state (empty if it failed)
     }
 
-    // A versioned KMH snapshot (player or server) was written under KMH-Data/Snapshots/. Lets external backup
-    // tooling copy the folder beside its matching save/backup the moment it exists.
+    /// <summary>A versioned KMH snapshot was written under KMH-Data/Snapshots/.</summary>
     public sealed class SnapshotCreatedEvent
     {
         public string Kind           { get; init; } = "";   // "player" | "server"
@@ -225,5 +223,29 @@ namespace KMH.Sdk.Server.Events
         public int    RecordCount  { get; init; }         // leader records archived
         public string Actor        { get; init; } = "";
         public bool   EconomyWiped { get; init; }         // true when raised by a full 'season reset', false for 'roll'
+    }
+
+    /// <summary>A player-to-player mail was accepted and delivered. Attachment totals are what actually escrowed.</summary>
+    public sealed class MailSentEvent
+    {
+        public long   MailId          { get; init; }
+        public string FromUsername    { get; init; } = "";
+        public string ToUsername      { get; init; } = "";
+        public long   AttachedSilver  { get; init; }
+        public int    AttachedItems   { get; init; }      // total units across compact stacks
+        public int    AttachedGear    { get; init; }      // full-state payloads
+    }
+
+    /// <summary>
+    /// A chat line was accepted. Channel is "server", "guild:&lt;name&gt;" or "dm:&lt;lo&gt;|&lt;hi&gt;", and Origin
+    /// is "ingame" or "discord". Private bodies are included, as they already are in the owner's own chat log.
+    /// </summary>
+    public sealed class ChatMessagePostedEvent
+    {
+        public long   MessageId    { get; init; }
+        public string Channel      { get; init; } = "";
+        public string FromUsername { get; init; } = "";
+        public string Body         { get; init; } = "";
+        public string Origin       { get; init; } = "";
     }
 }

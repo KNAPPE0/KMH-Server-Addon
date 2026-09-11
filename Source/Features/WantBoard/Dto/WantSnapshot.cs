@@ -1,16 +1,16 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using Newtonsoft.Json;
 
 namespace KMHServerAddon.Features.WantBoard.Dto
 {
-    // Want-to-buy board wire shapes. Byte-identical to the patch-side DTO (matched by JsonProperty names).
+    // Mirrors the patch-side DTO - a field changed here has to change there too.
     public class WantSnapshot
     {
+        // Monotonic under the store lock: two transports can deliver snapshots out of order, and the client drops the older one.
+        [JsonProperty("revision")] public long Revision { get; set; } = 0;
         [JsonProperty("wants")] public List<WantDto> Wants { get; set; } = new List<WantDto>();
     }
 
-    // A buyer's open request: "I'll buy up to QtyWanted of ItemDefName at UnitPriceSilver each." Silver is escrowed
-    // out of the buyer's treasury at post time; sellers fulfill from their own treasury for the payout.
     public class WantDto
     {
         [JsonProperty("id")]                  public long   Id               { get; set; } = 0;
@@ -25,12 +25,13 @@ namespace KMHServerAddon.Features.WantBoard.Dto
         [JsonProperty("ends_utc_ticks")]      public long   EndsUtcTicks     { get; set; } = 0;
         [JsonProperty("visibility")]          public string Visibility       { get; set; } = "public";
 
-        // Match constraints. Safe defaults: clean simple items only. A want never receives tainted/damaged/complex
-        // unless the buyer explicitly opts in - so the buyer can't be handed junk gear.
+        // Default to clean simple items, so a buyer is never handed junk gear they did not opt into.
         [JsonProperty("min_quality")]         public int    MinQuality       { get; set; } = 0;   // 0 = any
         [JsonProperty("required_stuff")]      public string RequiredStuff    { get; set; } = "";   // "" = any material
         [JsonProperty("allow_complex")]       public bool   AllowComplex     { get; set; } = false; // accept full-state items
         [JsonProperty("allow_tainted")]       public bool   AllowTainted     { get; set; } = false;
         [JsonProperty("allow_damaged")]       public bool   AllowDamaged     { get; set; } = false;
+
+        public WantDto ShallowClone() => (WantDto)MemberwiseClone();
     }
 }

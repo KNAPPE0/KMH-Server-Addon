@@ -1,21 +1,10 @@
-using System;
+﻿using System;
 using HarmonyLib;
 using KMHServerAddon.Diagnostics;
 using KMHServerAddon.Features.LinkedAccounts;
 
 namespace KMHServerAddon.Features.Discord.Patches
 {
-    // /kmh link + /kmh unlink chat-command handler.
-    //
-    // /kmh link issues a fresh single-use code via DiscordLinkFlow and tells the player how to redeem it on the
-    // Discord side. Works even when the Discord bridge is disabled - the code just won't get redeemed, which is
-    // loud enough to debug
-    //
-    // /kmh unlink wipes the current link for the calling user, if any. Symmetric with !kmh-unlink on the Discord
-    // side so a player can drop the link from whichever end they're already typing on
-    //
-    // second Prefix on PM_Chat.Receive, returns false on match so RWT's own chat pipeline doesn't also handle the
-    // unknown slash command
     [HarmonyPatch(typeof(PM_Chat), nameof(PM_Chat.Receive))]
     internal static class Patch_PM_Chat_LinkCommands
     {
@@ -35,7 +24,7 @@ namespace KMHServerAddon.Features.Discord.Patches
             bool   isUnlink = msg.StartsWith(CmdUnlink, StringComparison.OrdinalIgnoreCase);
             if (!isLink && !isUnlink) return true;
 
-            // Exact-prefix guard - "/kmh link " (space) is fine, "/kmh linker" must fall through to RWT
+            // Word-boundary match, so "/kmh linker" falls through to RWT.
             int cmdLen = isLink ? CmdLink.Length : CmdUnlink.Length;
             if (msg.Length > cmdLen && msg[cmdLen] != ' ') return true;
 
@@ -48,9 +37,9 @@ namespace KMHServerAddon.Features.Discord.Patches
             {
                 ServerLog.Error("Link command handler threw", ex);
                 try { PM_Chat.SendConsoleMessage(client, "[KMH] Link command failed unexpectedly."); }
-                catch { /* worst-case nothing more we can do */ }
+                catch { }
             }
-            return false; // skip RWT's chat-command dispatch - we handled it
+            return false; // handled
         }
 
         private static void HandleLink(ServerClient client, string raw)
@@ -62,8 +51,7 @@ namespace KMHServerAddon.Features.Discord.Patches
                 return;
             }
 
-            // Subcommand parse: /kmh link status -> show current binding without issuing a fresh code. Anything
-            // else = issue. Strip the two-word prefix first, since the subcommand now sits after it
+            // "status" reports the binding without issuing a code, since issuing one invalidates the last.
             string after = raw.Length > CmdLink.Length ? raw.Substring(CmdLink.Length).Trim() : "";
             if (after.StartsWith("status", StringComparison.OrdinalIgnoreCase))
             {
@@ -95,8 +83,7 @@ namespace KMHServerAddon.Features.Discord.Patches
                 Reply(client, "You must be logged in to use /kmh unlink.");
                 return;
             }
-            // Capture the previous display BEFORE removing so the announce line can include it ("X unlinked - was:
-            // Y"). TryGetLink doubles as the IsLinked check, so we don't probe twice
+            // Read before unlinking, because the announce below still needs the display name.
             if (!LinkedAccountsStore.TryGetLink(username, out string previousDisplay))
             {
                 Reply(client, "You don't currently have a Discord link.");

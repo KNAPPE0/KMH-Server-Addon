@@ -3,9 +3,7 @@ using System.Collections.Generic;
 
 namespace KMHServerAddon.Features.Sites
 {
-    // One output tier's rules. Every tier carries the SAME field set so the config reads uniformly. A site output is
-    // classified into a tier (auto by keyword, or an explicit allow/block list wins), and the tier decides whether it's
-    // allowed, how it's priced/paced, and how hard workers can scale it.
+    // Every tier carries the same field set, so an owner reading the config sees one shape rather than four.
     public sealed class SiteOutputTier
     {
         public bool     Enabled              { get; set; } = true;
@@ -65,12 +63,10 @@ namespace KMHServerAddon.Features.Sites
         public bool   IsExplicitlyBlocked;
     }
 
-    // Server-authoritative site-output classifier. BlockedDefNames/BlockedKeywords always win; unknown items default
-    // to the configured unknown tier (Tier 4 = blocked by default). Never trusts client market value.
+    // Never trusts a client-supplied market value, and an unknown item lands on the configured unknown tier.
     internal static class SiteOutputRules
     {
-        // Auto-classification keyword tables (lowercased, substring match on defName). Order matters only within a
-        // tier; cross-tier resolution is: explicit block > explicit allow > highest matching auto-tier > unknown.
+        // Resolution order: explicit block, then explicit allow, then the highest matching auto-tier, then unknown.
         private static readonly string[] Tier1Keywords =
         {
             "wood", "hay", "raw", "rice", "corn", "potato", "berry", "berries", "haygrass", "meat", "milk", "egg_",
@@ -82,8 +78,7 @@ namespace KMHServerAddon.Features.Sites
         };
         private static readonly string[] Tier3Keywords =
         {
-            // NOTE: "silver" deliberately NOT here - a Site must not print money. componentindustrial is Tier 3;
-            // componentspacer is caught by BlockedMarkers below.
+            // "silver" is deliberately absent - a Site must not print money.
             "plasteel", "uranium", "gold", "jade", "componentindustrial", "medicineindustrial", "smokeleaf", "psychoid",
             "devilstrand", "synthread", "hyperweave",
         };
@@ -100,11 +95,11 @@ namespace KMHServerAddon.Features.Sites
             "orbital", "tornado", "targeter", "shield", "flake", "yayo", "gojuice", "wakeup", "joint",
         };
 
-        // label = the item's human label (from ItemLabelCache) so owners can allow/block by EXACT defName OR EXACT
-        // label (case-insensitive). Keyword lists stay fuzzy but can never bypass the complex-item safety pre-filter.
-        public static SiteOutputClass Classify(string defName, string label, float marketValue)
+        // Keywords stay fuzzy but never bypass the complex-item pre-filter; value is not consulted, because at this point the caller's figure is still the client's.
+        public static SiteOutputClass Classify(string defName, string label)
         {
             SitesConfig cfg = SitesConfig.Current;
+            SiteOutputTier[] tiers = Tiers(cfg);   // resolved once: a malformed config hands back a fresh array per call
             string def = (defName ?? "").Trim();
             string lbl = (label ?? "").Trim();
             string kw  = (def + " " + lbl).ToLowerInvariant();   // fuzzy keyword haystack
@@ -116,30 +111,27 @@ namespace KMHServerAddon.Features.Sites
             };
 
             // 1) explicit BLOCK always wins (exact defName OR exact label, or a block keyword).
-            foreach (SiteOutputTier t in Tiers(cfg))
+            foreach (SiteOutputTier t in tiers)
                 if (MatchesNameOrLabel(def, lbl, t.BlockedDefNames) || MatchesKeyword(kw, t.BlockedKeywords))
                 {
                     r.TierNumber = 4; r.IsExplicitlyBlocked = true;
                     return Finalize(r, cfg, allowedFlagFromTier: false, blockReason: "blocked by server rules");
                 }
 
-            // 2) explicit ALLOW detection. EXACT (defName/label) allow can override the hard complex-item pre-filter;
-            //    a keyword allow can NOT (so a broad keyword can't accidentally unlock half the catalog's gear).
+            // An exact allow may override the complex-item pre-filter; a keyword allow must not.
             int tierIdx = -1; bool exactAllow = false, keywordAllow = false;
-            for (int i = 0; i < Tiers(cfg).Length; i++)
-                if (MatchesNameOrLabel(def, lbl, Tiers(cfg)[i].AllowedDefNames)) { tierIdx = i; exactAllow = true; break; }
+            for (int i = 0; i < tiers.Length; i++)
+                if (MatchesNameOrLabel(def, lbl, tiers[i].AllowedDefNames)) { tierIdx = i; exactAllow = true; break; }
             if (tierIdx < 0)
-                for (int i = 0; i < Tiers(cfg).Length; i++)
-                    if (MatchesKeyword(kw, Tiers(cfg)[i].AllowedKeywords)) { tierIdx = i; keywordAllow = true; break; }
+                for (int i = 0; i < tiers.Length; i++)
+                    if (MatchesKeyword(kw, tiers[i].AllowedKeywords)) { tierIdx = i; keywordAllow = true; break; }
             bool explicitAllow = exactAllow || keywordAllow;
 
-            // 3) hard complex-item pre-filter (weapons/apparel/minified/comp-heavy). An EXACT allowlist can override it
-            //    ONLY when the owner opted in (AllowExplicitComplexSiteOutputs) and the target tier is enabled + within
-            //    the server max tier. Otherwise it's a hard block.
+            // Overridable only when the owner opted in AND the target tier is enabled and within the server max.
             if (!Items.KmhItemSafety.IsAllowedSiteOutput(def, out string hardReason))
             {
                 int idx = tierIdx >= 0 ? tierIdx : ClampTier(cfg.DefaultUnknownOutputTier) - 1;
-                SiteOutputTier tt = Tiers(cfg)[idx];
+                SiteOutputTier tt = tiers[idx];
                 bool canOverride = exactAllow && cfg.AllowExplicitComplexSiteOutputs && tt.Enabled
                                    && (idx + 1) <= ClampTier(cfg.MaxAllowedSiteOutputTier);
                 if (!canOverride)
@@ -175,7 +167,7 @@ namespace KMHServerAddon.Features.Sites
             r.IsExplicitlyAllowed = explicitAllow;
             r.IsUnknownOrSuspicious = unknown;
 
-            SiteOutputTier tier = Tiers(cfg)[tierIdx];
+            SiteOutputTier tier = tiers[tierIdx];
             bool autoAllowed = explicitAllow || (tier.AllowAutoClassifiedItems && !unknown);
             string reason = (unknown && !explicitAllow) ? "unknown item - not on an allowed tier" : null;
             return Finalize(r, cfg, autoAllowed, reason);
@@ -217,8 +209,7 @@ namespace KMHServerAddon.Features.Sites
 
         private static int ClampTier(int t) => t < 1 ? 1 : (t > 4 ? 4 : t);
 
-        // Exact match against either the raw defName OR the human label (case-insensitive). No fuzzy/contains here -
-        // an owner listing "plasteel" (label) or "Plasteel" (defName) matches, but never a partial.
+        // Exact only, never a partial, so an owner's entry cannot widen itself into neighbouring defNames.
         private static bool MatchesNameOrLabel(string def, string label, string[] entries)
         {
             if (entries == null) return false;

@@ -5,8 +5,6 @@ using KMHServerAddon.Diagnostics;
 
 namespace KMHServerAddon.Extensibility
 {
-    // Singleton event hub extensions subscribe to. Each handler runs in a try/catch so one misbehaving extension can't
-    // break dispatch for the others.
     internal sealed class KmhEventBus : IKmhEvents
     {
         public static KmhEventBus Instance { get; } = new KmhEventBus();
@@ -40,9 +38,10 @@ namespace KMHServerAddon.Extensibility
         public event Action<RestoreAppliedEvent>       RestoreApplied;
         public event Action<SnapshotCreatedEvent>      SnapshotCreated;
         public event Action<SeasonRolledEvent>         SeasonRolled;
+        public event Action<MailSentEvent>             MailSent;
+        public event Action<ChatMessagePostedEvent>    ChatMessagePosted;
 
-        // Raise helpers called by KMH internals. Each one walks the delegate chain manually so one throwing
-        // subscriber doesn't stop the others - Action<T>.Invoke would short-circuit on first exception
+        // SafeRaise walks the delegate chain by hand, because Action<T>.Invoke stops at the first subscriber that throws.
         internal void RaisePlayerJoined    (PlayerJoinedEvent     e) => SafeRaise(PlayerJoined,     e, nameof(PlayerJoined));
         internal void RaisePlayerLeft      (PlayerLeftEvent       e) => SafeRaise(PlayerLeft,       e, nameof(PlayerLeft));
         internal void RaisePlayerLinked    (PlayerLinkedEvent     e) => SafeRaise(PlayerLinked,     e, nameof(PlayerLinked));
@@ -71,6 +70,8 @@ namespace KMHServerAddon.Extensibility
         internal void RaiseRestoreApplied      (RestoreAppliedEvent       e) => SafeRaise(RestoreApplied,       e, nameof(RestoreApplied));
         internal void RaiseSnapshotCreated     (SnapshotCreatedEvent      e) => SafeRaise(SnapshotCreated,      e, nameof(SnapshotCreated));
         internal void RaiseSeasonRolled        (SeasonRolledEvent         e) => SafeRaise(SeasonRolled,         e, nameof(SeasonRolled));
+        internal void RaiseMailSent            (MailSentEvent             e) => SafeRaise(MailSent,             e, nameof(MailSent));
+        internal void RaiseChatMessagePosted   (ChatMessagePostedEvent    e) => SafeRaise(ChatMessagePosted,    e, nameof(ChatMessagePosted));
 
         private static void SafeRaise<T>(Action<T> evt, T payload, string name)
         {

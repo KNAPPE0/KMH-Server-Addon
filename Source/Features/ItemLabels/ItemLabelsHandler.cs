@@ -4,9 +4,7 @@ using KMHServerAddon.SubProtocol;
 
 namespace KMHServerAddon.Features.ItemLabels
 {
-    // Wire handler for kmh.item_labels: the client pushes its DefDatabase catalog at handshake and the server merges
-    // it into the cache. Payload (snake_case): { labels: { defName: label, ... } }. Fire-and-forget (no response);
-    // the cache persists to KMH-Data/Catalog/ItemLabels.json so labels survive restarts.
+    // Fire-and-forget: a client pushes its catalog at handshake and never waits for an answer.
     internal static class ItemLabelsHandler
     {
         public static void Register()
@@ -38,8 +36,7 @@ namespace KMHServerAddon.Features.ItemLabels
             ItemLabelCache.MarkFungible(payload.Fungible);
             ServerLog.Verbose(
                 $"ItemLabels: received {payload.Labels.Count} entries from {client?.GetData<UserFile>()?.Username ?? "?"}");
-            // On the final catalog chunk, consolidate legacy treasury payloads that predate the mergeable flag.
-            // Idempotent: a no-op after the first run.
+            // Idempotent, so a reconnect that re-pushes the catalog does not re-run the compaction.
             if (payload.ChunkTotal <= 0 || payload.ChunkIndex >= payload.ChunkTotal)
                 Features.Treasury.TreasuryStore.CompactFungiblePayloads();
         }

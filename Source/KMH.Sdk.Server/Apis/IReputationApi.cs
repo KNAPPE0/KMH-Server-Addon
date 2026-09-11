@@ -4,10 +4,8 @@ using KMH.Sdk.Server.Records;
 namespace KMH.Sdk.Server.Apis
 {
     /// <summary>
-    /// Read player quest-reputation. Scores are server-owned and only move on
-    /// quest activity (completed / abandoned / proof-rejected), so this surface
-    /// is read-only - subscribe to <see cref="IKmhEvents.ReputationChanged"/> to
-    /// react when one shifts.
+    /// Read player quest-reputation. Scores are server-owned and move only on quest activity, so this is read-only;
+    /// subscribe to <see cref="IKmhEvents.ReputationChanged"/> to react when one shifts.
     /// </summary>
     public interface IReputationApi
     {

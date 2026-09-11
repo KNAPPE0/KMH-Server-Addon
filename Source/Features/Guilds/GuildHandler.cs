@@ -37,8 +37,7 @@ namespace KMHServerAddon.Features.Guilds
             KmhRouter.RegisterHandler(KmhProtocol.Kind.GuildLeaderboardRequest, OnLeaderboardRequest);
         }
 
-        // Cross-guild leaderboard request - returns every guild on the server with the metrics we track. Caller's
-        // own guild isn't privileged; the snapshot is the same for everyone
+        // Every caller gets identical rows - a guild is deliberately not privileged in its own leaderboard.
         private static void OnLeaderboardRequest(ServerClient client, KmhEnvelope env)
         {
             System.Collections.Generic.List<GuildStore.GuildSummary> rows = GuildStore.ComputeLeaderboard();
@@ -93,8 +92,7 @@ namespace KMHServerAddon.Features.Guilds
             {
                 ServerLog.Info($"Guild: {actor} kicked {target}");
                 BroadcastToGuildOf(actor);
-                // The kicked player now has no guild - push them an updated snapshot too (will render the 'not in a
-                // guild' empty state)
+                // The broadcast above no longer reaches them - they are out of the guild as of this call.
                 SendSnapshotToUsername(target);
             }
             else SendSnapshotTo(client);
@@ -104,6 +102,11 @@ namespace KMHServerAddon.Features.Guilds
         {
             string actor   = client?.GetData<UserFile>()?.Username;
             string perkKey = env?.GetString("perk_key") ?? "";
+
+            // Each buy takes the next level, so a duplicate is two levels charged twice - not a repeat of one.
+            var op = new Security.KmhOpClaim("guild.buy_perk", actor, env);
+            if (!op.Begin()) { SendSnapshotTo(client); return; }
+
             if (GuildStore.BuyPerk(actor, perkKey, out string reason, out int newLevel, out int cost))
             {
                 ServerLog.Info($"Guild: {actor} bought perk {perkKey} -> Lv {newLevel} ({cost}s)");
@@ -112,6 +115,7 @@ namespace KMHServerAddon.Features.Guilds
             }
             else
             {
+                op.Release();
                 ServerLog.Verbose($"Guild: {actor} perk buy '{perkKey}' rejected - {reason}");
                 KmhRouter.Notify(client, "negative", $"Could not buy {GuildStore.PerkLabel(perkKey)}: {reason}");
                 SendSnapshotTo(client);
@@ -138,13 +142,12 @@ namespace KMHServerAddon.Features.Guilds
             int    amount = env?.GetInt("amount", 0) ?? 0;
             string reqId  = env?.GetString("req_id") ?? "";
             if (amount <= 0) { KmhRouter.Notify(client, "negative", "Donation amount must be positive."); return; }
-            // Same double-click/replay guards as withdraw; the donation itself books as PENDING and only credits the
-            // guild vault when the donor's save confirms (rides the treasury deposit-confirm pipeline).
+            // The donation books as PENDING and credits the vault only when the donor's save confirms.
             long now = System.DateTime.UtcNow.Ticks;
             if (_lastWithdrawTicks.TryGetValue("donate|" + actor, out long last) && now - last < System.TimeSpan.FromSeconds(2).Ticks)
             { KmhRouter.Notify(client, "negative", "Donation is on a short cooldown - try again in a moment."); return; }
-            if (!string.IsNullOrEmpty(reqId) && !_seenWithdrawIds.TryAdd("donate|" + actor + "|" + reqId, 0))
-            { SendSnapshotTo(client); return; }   // duplicate click/replay: already processed
+            var op = new Security.KmhOpClaim("guild.donate", actor, env, "req_id");
+            if (!op.Begin()) { SendSnapshotTo(client); return; }   // duplicate click/replay: already processed
             if (GuildStore.DepositToGuild(actor, amount, out string reason, Features.Economy.EconomyContext.FromEnvelope(env), txnId: reqId))
             {
                 _lastWithdrawTicks["donate|" + actor] = now;
@@ -152,29 +155,25 @@ namespace KMHServerAddon.Features.Guilds
                 BroadcastToGuildOf(actor);
                 SendSnapshotTo(client);
             }
-            else KmhRouter.Notify(client, "negative", reason ?? "Could not donate to the guild.");
+            else { op.Release(); KmhRouter.Notify(client, "negative", reason ?? "Could not donate to the guild."); }
         }
 
-        // Withdraw abuse guards: per-user cooldown + request-id dedup so a double-click/replayed packet can't withdraw twice.
+        // Per-user cooldown, on top of the op-id dedup: the cooldown also bounds distinct rapid requests.
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _lastWithdrawTicks
             = new System.Collections.Concurrent.ConcurrentDictionary<string, long>(System.StringComparer.OrdinalIgnoreCase);
-        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _seenWithdrawIds
-            = new System.Collections.Concurrent.ConcurrentDictionary<string, byte>(System.StringComparer.Ordinal);
 
         private static void OnWithdraw(ServerClient client, KmhEnvelope env)
         {
             string actor  = client?.GetData<UserFile>()?.Username;
             int    amount = env?.GetInt("amount", 0) ?? 0;
-            string reqId  = env?.GetString("req_id") ?? "";
             if (amount <= 0) { KmhRouter.Notify(client, "negative", "Withdraw amount must be positive."); return; }
             if (string.Equals(Features.Economy.EconomyConfig.Current.GuildTreasuryAccessMode, "Disabled", System.StringComparison.OrdinalIgnoreCase))
             { KmhRouter.Notify(client, "negative", "Guild vault is disabled by server."); return; }
             long now = System.DateTime.UtcNow.Ticks;
             if (_lastWithdrawTicks.TryGetValue(actor ?? "", out long last) && now - last < System.TimeSpan.FromSeconds(3).Ticks)
             { KmhRouter.Notify(client, "negative", "Withdraw is on a short cooldown - try again in a moment."); return; }
-            if (!string.IsNullOrEmpty(reqId) && !_seenWithdrawIds.TryAdd(actor + "|" + reqId, 0))
-            { SendSnapshotTo(client); return; }   // duplicate click/replay: already processed, just refresh
-            if (_seenWithdrawIds.Count > 512) _seenWithdrawIds.Clear();
+            var op = new Security.KmhOpClaim("guild.withdraw", actor, env, "req_id");
+            if (!op.Begin()) { SendSnapshotTo(client); return; }   // duplicate click/replay: already processed, just refresh
             if (GuildStore.WithdrawFromGuild(actor, amount, out string reason))
             {
                 _lastWithdrawTicks[actor ?? ""] = now;
@@ -183,7 +182,7 @@ namespace KMHServerAddon.Features.Guilds
                 BroadcastToGuildOf(actor);
                 SendSnapshotTo(client);   // refresh the caller's personal treasury line too
             }
-            else KmhRouter.Notify(client, "negative", reason ?? "Could not withdraw from the guild vault.");
+            else { op.Release(); KmhRouter.Notify(client, "negative", reason ?? "Could not withdraw from the guild vault."); }
         }
 
         private static void OnTransferOwner(ServerClient client, KmhEnvelope env)
@@ -226,8 +225,7 @@ namespace KMHServerAddon.Features.Guilds
         private static void OnSaveSettings(ServerClient client, KmhEnvelope env)
         {
             string actor    = client?.GetData<UserFile>()?.Username;
-            // env.Data IS the GuildSettingsDto shape (the patch mod sends the typed DTO directly as the data
-            // field)
+            // The patch mod sends the typed DTO as the data field itself, so there is no wrapper to unpack.
             GuildSettingsDto settings = env?.DataAs<GuildSettingsDto>();
             if (settings != null && GuildStore.SaveSettings(actor, settings))
             {
@@ -246,8 +244,7 @@ namespace KMHServerAddon.Features.Guilds
                 ServerLog.Info($"Guild: {actor} invited {target} to {gname}");
                 KmhRouter.Notify(client, "positive", $"Invited {target}.");
                 BroadcastToGuildOf(actor);
-                // Invitee: live toast + fresh snapshot if online, queued mail for next connect if offline.
-                Notifications.KmhMail.ToUser(target.Trim(), "positive", $"Guild invite: {gname}",
+                Notifications.KmhNotify.ToUser(target.Trim(), "positive", $"Guild invite: {gname}",
                     $"{actor} invited you to join '{gname}'. Open the Guild Hall (KMH tab) to accept or decline.");
                 SendSnapshotToUsername(target.Trim());
             }
@@ -264,13 +261,13 @@ namespace KMHServerAddon.Features.Guilds
                 KmhRouter.Notify(client, "neutral", $"Declined the invite to {guildName}.");
                 SendSnapshotTo(client);
                 if (!string.IsNullOrEmpty(inviter))
-                    Notifications.KmhMail.ToUser(inviter, "neutral", "Guild invite declined",
+                    Notifications.KmhNotify.ToUser(inviter, "neutral", "Guild invite declined",
                         $"{actor} declined your invite to '{guildName}'.");
             }
             else KmhRouter.Notify(client, "negative", err ?? "Could not decline that invite.");
         }
 
-        // Known guildless players for the invite picker (online first); the invite itself stays rank-gated.
+        // Open to any guild member: this only names guildless players, and the invite itself is still rank-gated.
         private static void OnInvitablesRequest(ServerClient client, KmhEnvelope env)
         {
             string actor = client?.GetData<UserFile>()?.Username;
@@ -337,7 +334,7 @@ namespace KMHServerAddon.Features.Guilds
         {
             string actor = client?.GetData<UserFile>()?.Username;
             string name  = env?.GetString("name") ?? "";
-            int    hallTile = env?.GetInt("hall_tile", -1) ?? -1;   // P8: optional hall location at creation
+            int    hallTile = env?.GetInt("hall_tile", -1) ?? -1;   // optional hall location at creation
             if (GuildStore.CreateGuildAndJoinAsAdmin(actor, name, out string err, hallTile))
             {
                 ServerLog.Info($"Guild: {actor} created {name}");
@@ -368,8 +365,6 @@ namespace KMHServerAddon.Features.Guilds
             if (ok) { ServerLog.Info($"Guild: {actor} removed hall"); BroadcastToGuildOf(actor); }
         }
 
-        // --- snapshot delivery helpers ---
-
         private static void SendSnapshotTo(ServerClient client)
         {
             string username = client?.GetData<UserFile>()?.Username;
@@ -381,7 +376,6 @@ namespace KMHServerAddon.Features.Guilds
         private static void SendSnapshotToUsername(string username)
         {
             if (string.IsNullOrEmpty(username)) return;
-            // Find the connected client by username.
             foreach (ServerClient c in Network.ServerClients.Keys)
             {
                 if (c == null || !c.IsVerified) continue;
@@ -393,15 +387,13 @@ namespace KMHServerAddon.Features.Guilds
             }
         }
 
-        // After a guild mutation, push a fresh snapshot to every CURRENTLY- CONNECTED member of the actor's guild.
-        // The guild membership for the post-mutation state is the canonical view
+        // Membership is read after the mutation, so whoever the change added or removed is already accounted for.
         private static void BroadcastToGuildOf(string actor)
         {
             if (string.IsNullOrEmpty(actor)) return;
             GuildSnapshotEnvelope envelope = GuildStore.BuildEnvelopeFor(actor);
             if (!envelope.InGuild || envelope.Guild == null) return;
 
-            // Build a set of usernames currently in the guild (post-mutation).
             System.Collections.Generic.HashSet<string> memberSet
                 = new System.Collections.Generic.HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
             foreach (GuildMemberDto m in envelope.Guild.Members) memberSet.Add(m.Username);

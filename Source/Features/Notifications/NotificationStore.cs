@@ -5,9 +5,6 @@ using KMHServerAddon.Persistence;
 
 namespace KMHServerAddon.Features.Notifications
 {
-    // Per-user mailbox for notices that fired while the player was offline (auction won/sold/outbid, marketplace
-    // sale, etc.). Drained and delivered as in-game letters on next login. Bounded per user; persisted so a server
-    // restart doesn't lose a player's missed events. All access under _lock.
     internal static class NotificationStore
     {
         private static readonly object _lock = new object();
@@ -36,7 +33,6 @@ namespace KMHServerAddon.Features.Notifications
             Diagnostics.ServerLog.Info($"Notifications: loaded queued notices for {s.Users.Count} user(s)");
         }
 
-        // Season reset: clear all pending mail/notifications.
         public static void ClearForNewSeason()
         {
             lock (_lock) { _byUser.Clear(); }
@@ -52,16 +48,15 @@ namespace KMHServerAddon.Features.Notifications
             return n;
         }
 
-        public static void SaveToDisk()
+        public static bool SaveToDisk()
         {
             PersistedState s = new PersistedState();
             lock (_lock)
                 foreach (KeyValuePair<string, List<NotificationDto>> kv in _byUser)
                     s.Users[kv.Key] = new List<NotificationDto>(kv.Value);
-            JsonFileStore.Save(KmhDataPaths.NotificationsFile, s);
+            return JsonFileStore.Save(KmhDataPaths.NotificationsFile, s);
         }
 
-        // Queue a notice for an offline user. Newest-wins past the cap.
         public static void Enqueue(string user, string tone, string title, string body)
         {
             if (string.IsNullOrEmpty(user)) return;
@@ -84,8 +79,6 @@ namespace KMHServerAddon.Features.Notifications
             SaveToDisk();
         }
 
-        // Return + clear a user's queued notices (delivered on login).
-        // Read-only copy of a user's queued mail (does NOT drain) - for snapshots.
         public static List<NotificationDto> PeekForUser(string user)
         {
             List<NotificationDto> outList = new List<NotificationDto>();
@@ -111,8 +104,7 @@ namespace KMHServerAddon.Features.Notifications
             return outList;
         }
 
-        // Put drained notices back if delivery couldn't be handed to the client (e.g. it dropped mid-login), so the
-        // mail survives to the next login instead of being silently lost. Drained notices are older -> front.
+        // Drained notices are older than anything queued since, so they go back at the front.
         public static void Restore(string user, List<NotificationDto> notices)
         {
             if (string.IsNullOrEmpty(user) || notices == null || notices.Count == 0) return;
@@ -126,7 +118,11 @@ namespace KMHServerAddon.Features.Notifications
                 list.InsertRange(0, notices);
                 if (list.Count > MaxPerUser) list.RemoveRange(0, list.Count - MaxPerUser);
             }
-            SaveToDisk();
+            // The drain already took these off disk, so a failed re-queue is a real loss, not a delivery.
+            if (!SaveToDisk())
+                Diagnostics.ServerLog.Error(
+                    $"Notifications: {notices.Count} notice(s) for {user} could not be re-queued to disk after a " +
+                    "failed hand-off. They are held in memory only and are lost if the server restarts.");
         }
     }
 }

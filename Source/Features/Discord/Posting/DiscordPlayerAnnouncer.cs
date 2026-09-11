@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using KMHServerAddon.Features.LinkedAccounts;
 
@@ -30,8 +30,7 @@ namespace KMHServerAddon.Features.Discord
             string text    = $"🟢 **{display}** has joined the server!";
             PostIfConfigured(text);
 
-            // Notify extensions. Same dedup as Discord posting - only raised the first time we see this user in a
-            // session
+            // Raised under the same dedup as the Discord post, so an extension sees one join per session.
             Extensibility.KmhEventBus.Instance.RaisePlayerJoined(
                 new KMH.Sdk.Server.Events.PlayerJoinedEvent { Username = username });
         }
@@ -42,8 +41,7 @@ namespace KMHServerAddon.Features.Discord
 
             bool wasTracked;
             lock (_lock) { wasTracked = _joined.Remove(username); }
-            // Only relay if we previously announced this user as joined. Stops duplicate-disconnect events from
-            // producing duplicate leave lines
+            // Only after a matching join, so a duplicate disconnect cannot produce a second leave line.
             if (!wasTracked) return;
 
             string display = ResolveDisplay(username);
@@ -63,7 +61,6 @@ namespace KMHServerAddon.Features.Discord
             }
         }
 
-        // Show "username (DiscordHandle)" when the player is linked, plain username otherwise.
         private static string ResolveDisplay(string username)
         {
             if (LinkedAccountsStore.TryGetLink(username, out string discord)
@@ -81,9 +78,7 @@ namespace KMHServerAddon.Features.Discord
             DiscordBridge.PostToChannel(cfg.PlayerAnnounceChannelId, text);
         }
 
-        // Caller must hold _lock. Drops anyone in _joined who is no longer in the connected-clients list - guards
-        // against the rare case where a client drops without OnDisconnect firing (crash, network blip that's
-        // resolved by the time we check)
+        // Caller must hold _lock; this catches a client that vanished without OnDisconnect ever firing.
         private static void PruneStaleLocked()
         {
             long nowTicks = DateTime.UtcNow.Ticks;

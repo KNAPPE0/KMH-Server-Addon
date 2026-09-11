@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Text;
 using System.Threading.Tasks;
 using KMHServerAddon.Diagnostics;
@@ -6,7 +6,7 @@ using KMHServerAddon.Features.Discord;
 
 namespace KMHServerAddon.Maintenance
 {
-    // Must-read owner notice after the defaults upgrade: console ~5s post-boot + Discord Admin channel if set.
+    // Describes the recommended defaults set rather than the running build, since only the upgrade raises it.
     internal static class KmhOwnerNotice
     {
         public static void ScheduleIfNeeded()
@@ -26,8 +26,8 @@ namespace KMHServerAddon.Maintenance
 
         private static void PrintConsole()
         {
-            ServerLog.Warn("================= KMH v1.2.0 UPDATE NOTICE - PLEASE READ =================");
-            ServerLog.Warn("This update refreshed the recommended defaults on this server (one-time):");
+            ServerLog.Warn("============== KMH RECOMMENDED DEFAULTS - PLEASE READ ==============");
+            ServerLog.Warn("Your server was behind KMH's recommended defaults; they have been applied (one-time):");
             foreach (string c in KmhDefaultsUpgrade.Changed)   ServerLog.Warn($"  changed:   {c}");
             foreach (string p in KmhDefaultsUpgrade.Preserved) ServerLog.Warn($"  preserved: {p} (your custom value was kept)");
             if (KmhDefaultsUpgrade.Changed.Count == 0)
@@ -57,7 +57,7 @@ namespace KMHServerAddon.Maintenance
             if (DiscordBridge.Client?.ConnectionState != global::Discord.ConnectionState.Connected) return;
 
             StringBuilder sb = new StringBuilder();
-            sb.AppendLine("**v1.2.0 updated this server's recommended defaults** (one-time, custom settings preserved):");
+            sb.AppendLine("**KMH applied its recommended defaults to this server** (one-time, custom settings preserved):");
             foreach (string c in KmhDefaultsUpgrade.Changed) sb.AppendLine($"• {c}");
             if (KmhDefaultsUpgrade.Changed.Count == 0) sb.AppendLine("• nothing changed - all targeted settings were owner-customized");
             sb.AppendLine();
@@ -68,7 +68,7 @@ namespace KMHServerAddon.Maintenance
             sb.Append("Please review `KMH-Data/Config/` after this update.");
 
             DiscordBridge.PostEmbedToChannel(cfg.AdminChannelId,
-                KmhEmbedBuilder.Base(cfg, "⚠️ KMH v1.2.0 update notice", sb.ToString()),
+                KmhEmbedBuilder.Base(cfg, "⚠️ KMH recommended defaults applied", sb.ToString()),
                 DiscordIcons.Warning);
         }
     }

@@ -1,11 +1,11 @@
-using System;
+﻿using System;
+using System.Collections.Generic;
 using KMHServerAddon.Diagnostics;
 using KMHServerAddon.SubProtocol;
 
 namespace KMHServerAddon.Maintenance
 {
-    // Season lifecycle reset: archive the outgoing season's leaders, then wipe the live economy for a fresh season
-    // (guilds, Discord links, and the season archive are kept). Backs up first, so it's reversible via 'kmh restore'.
+    // Backs up first, so a season reset stays reversible through 'kmh restore'.
     internal static class KmhSeasonReset
     {
         public static bool Run(string actorName, out string summary)
@@ -16,24 +16,20 @@ namespace KMHServerAddon.Maintenance
             if (!Persistence.KmhDataBackup.TryCreate("pre-season-reset", out string dir, out string err))
             { summary = $"aborted - backup failed: {err}"; return false; }
             string backup = System.IO.Path.GetFileName(dir);
+            // Named before the wipe, because a partial failure never produces the summary that would name it.
+            ServerLog.Warn($"Season reset: restore point is backup {backup} (restore with: kmh restore {backup}).");
 
             // Archive the outgoing season's leaders BEFORE wiping the stats they're computed from.
             (int rolledSeason, int recordCount) = Features.Seasons.SeasonStore.RollSeason();
 
-            // Wipe live economy (guilds, linked accounts, and the season archive are left intact). Clear every silver
-            // source first, then treasury LAST, so a concurrent sweeper settlement can't re-credit a wiped vault.
-            Features.Marketplace.MarketplaceStore.ClearForNewSeason();
-            Features.Auctions.AuctionStore.ClearForNewSeason();
-            Features.WantBoard.WantStore.ClearForNewSeason();
-            Features.Sites.SiteStore.ClearForNewSeason();
-            Features.Quests.QuestStore.ClearForNewSeason();
-            Features.Reputation.ReputationStore.ClearForNewSeason();
-            Features.Notifications.NotificationStore.ClearForNewSeason();
-            Features.Recovery.RecoveryStore.ClearForNewSeason();
-            Features.World.WorldStore.ClearForNewSeason();
-            Features.PlayerStats.PlayerStatsStore.ClearForNewSeason();
+            // Treasury last, so a concurrent sweeper settlement cannot re-credit an already-wiped vault.
+            foreach (Action clear in SeasonClearers()) clear();
+            // In-memory only, but a fresh season must not inherit the old cooldown windows.
+            Features.Economy.EconomyAccess.ClearRuntimeState();
             int vaults = Features.Treasury.TreasuryStore.ClearAllVaults();
 
+            // Ids restart at 1, so anything still holding an old one must not reach whatever now carries that number.
+            Features.Economy.KmhEconomyReset.BumpDataGeneration($"season {rolledSeason} reset");
             Rebroadcast();
 
             int newSeason = Features.Seasons.SeasonStore.CurrentSeason;
@@ -47,8 +43,26 @@ namespace KMHServerAddon.Maintenance
             return true;
         }
 
-        // Push fresh state to connected clients. Defensive: a stale client view is cosmetic (server state is correct),
-        // so one failing broadcast never aborts the reset.
+        // Enumerated rather than inlined so the coverage test can reflect over it and prove none was forgotten.
+        internal static IEnumerable<Action> SeasonClearers()
+        {
+            yield return Features.Marketplace.MarketplaceStore.ClearForNewSeason;
+            yield return Features.Auctions.AuctionStore.ClearForNewSeason;
+            yield return Features.WantBoard.WantStore.ClearForNewSeason;
+            yield return Features.Mail.MailStore.ClearForNewSeason;
+            yield return Features.Chat.ChatStore.ClearForNewSeason;
+            yield return Features.Sites.SiteStore.ClearForNewSeason;
+            yield return Features.Roadworks.RoadworksStore.ClearForNewSeason;
+            yield return Features.Frontier.KmhWorldDirector.ClearForNewSeason;
+            yield return Features.Quests.QuestStore.ClearForNewSeason;
+            yield return Features.Reputation.ReputationStore.ClearForNewSeason;
+            yield return Features.Notifications.NotificationStore.ClearForNewSeason;
+            yield return Features.Recovery.RecoveryStore.ClearForNewSeason;
+            yield return Features.World.WorldStore.ClearForNewSeason;
+            yield return Features.PlayerStats.PlayerStatsStore.ClearForNewSeason;
+        }
+
+        // A stale client view is cosmetic, so one failing broadcast never aborts the reset.
         private static void Rebroadcast()
         {
             Safe(() => Features.Marketplace.MarketplaceHandler.BroadcastSnapshot());
@@ -56,6 +70,7 @@ namespace KMHServerAddon.Maintenance
             Safe(() => Features.Auctions.AuctionHandler.BroadcastSnapshot());
             Safe(() => Features.WantBoard.WantHandler.BroadcastSnapshot());
             Safe(() => Features.Sites.SiteHandler.BroadcastSnapshot());
+            Safe(() => Features.Roadworks.RoadworksHandler.BroadcastSnapshot());
             Safe(() => Features.Reputation.ReputationHandler.BroadcastSnapshot());
             Safe(() => Features.World.WorldHandler.BroadcastSnapshot());
             Safe(() => Features.PlayerStats.PlayerStatsHandler.BroadcastSnapshot());

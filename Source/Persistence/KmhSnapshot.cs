@@ -10,10 +10,11 @@ using Newtonsoft.Json.Linq;
 
 namespace KMHServerAddon.Persistence
 {
-    // Versioned read-only snapshots (player + server) with checksummed manifests; see SNAPSHOTS.txt.
+    // Read-only and checksummed; the format is documented in SNAPSHOTS.txt.
     internal static class KmhSnapshot
     {
-        public const int SchemaVersion = 1;
+        // A key may be added, but never repurposed: old snapshots are read by humans adjudicating disputes.
+        public const int SchemaVersion = 2;
 
         private static readonly JsonSerializerSettings JsonSettings = new JsonSerializerSettings
         {
@@ -23,13 +24,11 @@ namespace KMHServerAddon.Persistence
 
         public static string Season() => "S" + Features.Seasons.SeasonStore.CurrentSeason;
 
-        // Caller's match timestamp (pairs with their backup folder) or UTC-now.
         public static string FolderName(string matchTimestamp)
             => string.IsNullOrWhiteSpace(matchTimestamp)
                 ? DateTime.UtcNow.ToString("yyyy-MM-dd_HH-mm")
                 : SanitizePart(matchTimestamp.Trim());
 
-        // ---- server snapshot (all shared state) ----
 
         public static bool SnapshotServer(string matchTimestamp, string sourceSaveTimestamp, out string dir, out string error)
         {
@@ -78,19 +77,10 @@ namespace KMHServerAddon.Persistence
             catch (Exception ex) { error = ex.Message; return false; }
         }
 
-        // ---- player snapshot (everything tied to one player) ----
 
-        public static bool SnapshotPlayer(string username, string matchTimestamp, string sourceSaveTimestamp, out string dir, out string error)
+        // One list, so the writer and its coverage test can never disagree about what a player record contains.
+        private static void GatherPlayer(string user, JObject data, List<string> included, List<string> warnings)
         {
-            dir = null; error = null;
-            if (string.IsNullOrWhiteSpace(username)) { error = "no username"; return false; }
-            List<string> warnings = new List<string>();
-            List<string> included = new List<string>();
-            try
-            {
-                string user = username.Trim();
-                JObject data = new JObject();
-
                 Gather(data, included, warnings, "standings", () =>
                     Features.PlayerStats.PlayerStatsStore.BuildSnapshot().Entries.FirstOrDefault(e => Eq(e.Username, user)));
                 Gather(data, included, warnings, "colonist", () => Features.PlayerStats.PlayerStatsStore.GetColonist(user));
@@ -111,8 +101,45 @@ namespace KMHServerAddon.Persistence
                     Features.Quests.QuestStore.BuildSnapshot(user).Quests.Where(q => Eq(q.PosterUsername, user) || Eq(q.ClaimedByUsername, user)).ToList());
                 Gather(data, included, warnings, "sites", () =>
                     Features.Sites.SiteStore.AllForApi().Where(s => Eq(s.OwnerUsername, user) || (s.Workers != null && s.Workers.Any(w => Eq(w, user)))).ToList());
-                Gather(data, included, warnings, "mail", () => Features.Notifications.NotificationStore.PeekForUser(user));
+                Gather(data, included, warnings, "roadworks", () => Features.Roadworks.RoadworksStore.ProjectsFor(user));
+                // "notifications" is the offline notice queue, "player_mail" the Mail feature - never merge the keys.
+                Gather(data, included, warnings, "notifications", () => Features.Notifications.NotificationStore.PeekForUser(user));
+                Gather(data, included, warnings, "player_mail", () => Features.Mail.MailStore.BuildView(user));
+                Gather(data, included, warnings, "recovery", () => Features.Recovery.RecoveryStore.ForUser(user));
+                Gather(data, included, warnings, "blocks", () => Features.Chat.ChatModerationStore.BlockedSetFor(user));
+                Gather(data, included, warnings, "linked_account", () =>
+                    Features.LinkedAccounts.LinkedAccountsStore.TryGetLink(user, out string dn)
+                        ? new { linked = true, discord_name = dn, discord_id = Features.LinkedAccounts.LinkedAccountsStore.DiscordIdFor(user).ToString() }
+                        : (object)new { linked = false });
+                Gather(data, included, warnings, "guild_contributions", () =>
+                {
+                    string g = Features.Guilds.GuildStore.CurrentGuildOf(user);
+                    return string.IsNullOrEmpty(g)
+                        ? new List<Features.Guilds.Contributions.KmhGuildContribution>()
+                        : Features.Guilds.Contributions.KmhGuildContributionLedger.ForPlayer(g, user);
+                });
                 Gather(data, included, warnings, "ledger", () => TransactionLedger.ReadRecent(200, user));
+        }
+
+        // Coverage seam. Callers pass a username that cannot exist, so no store is created by asking.
+        public static List<string> PlayerStoreKeys(string username)
+        {
+            List<string> included = new List<string>();
+            GatherPlayer(username ?? "", new JObject(), included, new List<string>());
+            return included;
+        }
+
+        public static bool SnapshotPlayer(string username, string matchTimestamp, string sourceSaveTimestamp, out string dir, out string error)
+        {
+            dir = null; error = null;
+            if (string.IsNullOrWhiteSpace(username)) { error = "no username"; return false; }
+            List<string> warnings = new List<string>();
+            List<string> included = new List<string>();
+            try
+            {
+                string user = username.Trim();
+                JObject data = new JObject();
+                GatherPlayer(user, data, included, warnings);
 
                 bool inGuild = false;
                 try { inGuild = !string.IsNullOrEmpty(Features.Guilds.GuildStore.CurrentGuildOf(user)); } catch { }
@@ -170,7 +197,6 @@ namespace KMHServerAddon.Persistence
             catch (Exception ex) { error = ex.Message; return false; }
         }
 
-        // Server snapshot + one player snapshot per known player. Returns count written.
         public static int SnapshotAll(string matchTimestamp, out string serverDir, List<string> failures)
         {
             int written = 0;
@@ -189,7 +215,6 @@ namespace KMHServerAddon.Persistence
             return written;
         }
 
-        // ---- verify: files must parse and match the manifest hashes ----
 
         public static bool Verify(string dir, out string detail)
         {
@@ -218,11 +243,9 @@ namespace KMHServerAddon.Persistence
             catch (Exception ex) { detail = ex.Message; return false; }
         }
 
-        // ---- retention ----
 
         private static DateTime _lastPrune = DateTime.MinValue;
 
-        // Drop leaves past the age cap, then trim each player/_server to the newest N. Throttled ~15 min, fully guarded.
         public static void PruneOldIfDue()
         {
             if ((DateTime.UtcNow - _lastPrune).TotalMinutes < 15) return;
@@ -244,7 +267,7 @@ namespace KMHServerAddon.Persistence
                     List<(string path, DateTime when)> stamps = new List<(string, DateTime)>();
                     foreach (string ts in Directory.GetDirectories(leafDir))
                         stamps.Add((ts, LeafTime(ts)));
-                    stamps.Sort((a, b) => b.when.CompareTo(a.when));   // newest first
+                    stamps.Sort((a, b) => b.when.CompareTo(a.when));
 
                     for (int i = 0; i < stamps.Count; i++)
                     {
@@ -267,7 +290,6 @@ namespace KMHServerAddon.Persistence
             try { return Directory.GetLastWriteTimeUtc(dir); } catch { return DateTime.UtcNow; }
         }
 
-        // ---- request marker ----
 
         // One request per line: "player <user> [ts]" | "server [ts]" | "all [ts]" (# = comment). Deleted after use.
         public static void ConsumePendingRequests()
@@ -297,7 +319,6 @@ namespace KMHServerAddon.Persistence
             if (done > 0) ServerLog.Info($"Snapshot requests consumed ({done}).");
         }
 
-        // ---- restore preview (read-only) ----
 
         public static void PreviewPlayer(string dir, Action<string> reply)
         {
@@ -335,8 +356,6 @@ namespace KMHServerAddon.Persistence
                 if (listings + auctions + wants > 0)
                     reply($"  [REVIEW] open escrows in snapshot (listings {listings}, auctions {auctions}, wants {wants}) - restoring may conflict with market state that moved on.");
 
-                // Item-state proof: legacy compact items + partial payloads can't have their exact taint/damage/comp
-                // state proven, so restoring them must never silently produce clean/full-value items.
                 int legacyItems = 0, partialItems = 0, fullItems = 0;
                 foreach (JProperty it in (data["treasury"]?["items"] as JObject)?.Properties() ?? System.Linq.Enumerable.Empty<JProperty>())
                 {
@@ -358,8 +377,7 @@ namespace KMHServerAddon.Persistence
                 if (legacyItems > 0)
                     reply($"  [REVIEW] {legacyItems} LEGACY item stack(s) (pre-payload) - taint/damage/comp state cannot be proven; must NOT be silently restored as clean/full-value.");
 
-                // Uncommitted local deposits captured in the snapshot: never spendable, and a restore that resurrects
-                // them alongside a rolled-back colony could re-open the dupe window - flag for review.
+                // Restoring an uncommitted deposit beside a rolled-back colony re-opens the dupe window.
                 int pendingDeps = (data["treasury"]?["pending_deposits"] as JArray)?.Count ?? 0;
                 if (pendingDeps > 0)
                     reply($"  [REVIEW] {pendingDeps} PENDING (unconfirmed) deposit(s) in snapshot - not spendable; must be re-reconciled against the client's saved ledger, not minted on restore.");
@@ -373,7 +391,6 @@ namespace KMHServerAddon.Persistence
             catch (Exception ex) { reply($"Preview failed: {ex.Message}"); }
         }
 
-        // ---- helpers ----
 
         private static void RaiseCreated(string kind, string playerId, string matchTs, string dir)
         {

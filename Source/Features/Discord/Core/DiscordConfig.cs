@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using KMHServerAddon.Diagnostics;
 using KMHServerAddon.Persistence;
@@ -6,8 +6,6 @@ using Newtonsoft.Json;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // Deliberately lean on-disk shape (token + guild + a few channels); the [JsonIgnore] accessors below fan it out to
-    // whatever each feature asks for.
     internal class DiscordConfig
     {
         public int              SchemaVersion   { get; set; } = 1;
@@ -18,6 +16,7 @@ namespace KMHServerAddon.Features.Discord
         public RoleSettings     Roles           { get; set; } = new RoleSettings();
         public EventSettings    Events          { get; set; } = new EventSettings();
         public ConsoleSettings  Console         { get; set; } = new ConsoleSettings();
+        public KmhChatSettings  KmhChat         { get; set; } = new KmhChatSettings();
         public bool             UseBundledIcons { get; set; } = true;
 
         internal class BotSettings
@@ -25,9 +24,7 @@ namespace KMHServerAddon.Features.Discord
             public string Token            { get; set; } = "";
             public string GuildId          { get; set; } = "";
             public bool   UseSlashCommands { get; set; } = true;
-            // Multi-bot: require a player to @mention THIS bot before a !kmh-* text command runs, so several bots in
-            // one channel don't all answer. Off by default (a single bot needs no mention). Slash commands are already
-            // per-bot, so they're unaffected.
+            // For a channel holding several KMH bots, so they do not all answer the same text command.
             public bool   RequireMention   { get; set; } = false;
         }
 
@@ -37,8 +34,7 @@ namespace KMHServerAddon.Features.Discord
             public string EmbedColorHex { get; set; } = "#C88A2A";
         }
 
-        // One channel per visible feed, plus a single Admin channel for admin actions + console logs +
-        // console-command input. Blank = that feed off
+        // Blank turns that feed off.
         internal class ChannelSettings
         {
             public string Chat          { get; set; } = "";
@@ -47,27 +43,23 @@ namespace KMHServerAddon.Features.Discord
             public string Marketplace   { get; set; } = "";
             public string SiteEvents    { get; set; } = "";
             public string Admin         { get; set; } = "";
-            public string Commands      { get; set; } = "";   // where !kmh-* commands are allowed; blank = any configured channel
+            public string Commands      { get; set; } = "";
         }
 
         internal class RoleSettings
         {
-            // Anyone with one of these (or guild-admin permission) can use the mod-tier slash commands
             public string[] Moderators    { get; set; } = Array.Empty<string>();
-            // Required for /kmh console run when Console.RequireRole is on.
             public string[] ConsoleAccess { get; set; } = Array.Empty<string>();
-            // Mirror KMH guild membership to Discord roles named "<Guild> (<Rank>)" on linked players, kept in sync on
-            // join/leave/promote/demote/unlink. Off by default. Needs the bot to have Manage Roles, and its own role
-            // above the roles it creates. No privileged intent required (uses REST).
+
+            // Needs Manage Roles, and the bot's own role sitting above the roles it creates.
             public bool     SyncGuildRoles { get; set; } = false;
         }
 
-        // Which game events get auto-posted as embeds.
         internal class EventSettings
         {
-            public bool Server      { get; set; } = true;   // server online, quest completed, guild created
-            public bool Marketplace { get; set; } = true;   // new listing, item sold
-            public bool Sites       { get; set; } = true;   // site built / removed
+            public bool Server      { get; set; } = true;
+            public bool Marketplace { get; set; } = true;
+            public bool Sites       { get; set; } = true;
         }
 
         internal class ConsoleSettings
@@ -77,11 +69,21 @@ namespace KMHServerAddon.Features.Discord
             public bool LiveFeed    { get; set; } = true;   // stream the live server console into the Admin channel
         }
 
-        // ---- flat accessors the features read ----
+        // Separate from the RWT-chat bridge on Channels.Chat; blank turns this one off.
+        internal class KmhChatSettings
+        {
+            public string Channel     { get; set; } = "";
+            public bool   ToDiscord   { get; set; } = true;
+            public bool   FromDiscord { get; set; } = true;
 
-        [JsonIgnore] public bool   IsEnabled     => Enabled && !string.IsNullOrWhiteSpace(Bot?.Token);
-        [JsonIgnore] public string BotToken      => Bot?.Token ?? "";
-        [JsonIgnore] public string CommandPrefix => "!";   // legacy !kmh-* prefix, fixed
+            // This bot and anything shaped like a KMH relay line are skipped regardless, or bridges feed each other.
+            public bool   RelayBots   { get; set; } = true;
+        }
+
+        // KMH_DISCORD_BOT_TOKEN wins over the file, so a secret need never be stored in a shareable config.
+        [JsonIgnore] public bool   IsEnabled     => Enabled && !string.IsNullOrWhiteSpace(BotToken);
+        [JsonIgnore] public string BotToken      => DiscordTokenSource.Resolve(Bot?.Token);
+        [JsonIgnore] public string CommandPrefix => "!";
         [JsonIgnore] public bool   UseSlashCommandsOn => Bot?.UseSlashCommands ?? true;
         [JsonIgnore] public bool   RequireMentionForCommands => Bot?.RequireMention ?? false;
         [JsonIgnore] public bool   SyncGuildRolesOn          => Roles?.SyncGuildRoles ?? false;
@@ -91,8 +93,10 @@ namespace KMHServerAddon.Features.Discord
             get { ulong g = ParseId(Bot?.GuildId); return g != 0 ? new[] { g } : Array.Empty<ulong>(); }
         }
 
-        // channels
         [JsonIgnore] public ulong ChatBridgeChannelId      => ParseId(Channels?.Chat);
+        [JsonIgnore] public ulong KmhChatChannelId         => ParseId(KmhChat?.Channel);
+        [JsonIgnore] public bool  KmhChatToDiscordOn       => KmhChat?.ToDiscord ?? true;
+        [JsonIgnore] public bool  KmhChatFromDiscordOn     => KmhChat?.FromDiscord ?? true;
         [JsonIgnore] public ulong AnnouncementsChannelId   => ParseId(Channels?.Announcements);
         [JsonIgnore] public ulong PlayerAnnounceChannelId  => ParseId(Channels?.Announcements);
         [JsonIgnore] public ulong LinkAnnounceChannelId    => ParseId(Channels?.Announcements);
@@ -106,8 +110,7 @@ namespace KMHServerAddon.Features.Discord
         [JsonIgnore] public ulong ConsoleCommandsChannelId => ParseId(Channels?.Admin);
         [JsonIgnore] public ulong CommandsChannelId        => ParseId(Channels?.Commands);
 
-        // True if !kmh-* commands may run from here. DMs always (linking). A set Commands channel locks them to it;
-        // otherwise any configured KMH channel works - never an unrelated one like #general.
+        // Falls back to the configured KMH channels rather than anywhere, so commands never run in an unrelated channel.
         public bool CommandsAllowedIn(ulong channelId, bool isDm)
         {
             if (isDm) return true;
@@ -120,19 +123,17 @@ namespace KMHServerAddon.Features.Discord
                                    || channelId == SiteEventsChannelId);
         }
 
-        // event toggles
         [JsonIgnore] public bool PostServerEvents      => Events?.Server      ?? true;
         [JsonIgnore] public bool PostMarketplaceEvents => Events?.Marketplace ?? true;
         [JsonIgnore] public bool PostSiteEvents        => Events?.Sites       ?? true;
 
-        // console gating
         [JsonIgnore] public bool AllowConsoleCommands => Console?.Allow       ?? false;
         [JsonIgnore] public bool RequireConsoleRole   => Console?.RequireRole ?? true;
-        // Live console feed only runs when its toggle is on AND an Admin channel is set (no channel = no feed).
+
+        // Also requires an Admin channel, since there is nowhere to stream a feed without one.
         [JsonIgnore] public bool ConsoleLiveFeed      => (Console?.LiveFeed ?? true) && AdminChannelId != 0;
 
-        // leaderboard / showcase cadence - sensible fixed defaults (kept out of the config to keep it lean; change
-        // here if a server ever needs to)
+        // Fixed rather than configurable, to keep the owner-facing file short.
         [JsonIgnore] public int LeaderboardIntervalMinutes   => 60;
         [JsonIgnore] public int LeaderboardTopCount          => 10;
         [JsonIgnore] public int LeaderboardRolloverHours      => 24;

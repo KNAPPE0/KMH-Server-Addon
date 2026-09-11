@@ -7,8 +7,7 @@ using KMHServerAddon.Features.LinkedAccounts;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // Extension-provided Discord commands. The "kmh-" prefix is reserved for core (refused here) and this dispatches
-    // last, so an extension can never shadow a built-in command.
+    // Dispatched last and refused the core prefix, so an extension can never shadow a built-in command.
     internal static class DiscordExtensionCommands
     {
         private static readonly object _lock = new object();
@@ -17,7 +16,6 @@ namespace KMHServerAddon.Features.Discord
 
         private const string ReservedPrefix = "kmh-";
 
-        // Returns true if registered, false if rejected (reserved/duplicate/bad input).
         public static bool Register(string extensionName, string command, Action<IKmhDiscordCommand> handler)
         {
             if (string.IsNullOrWhiteSpace(command) || handler == null) return false;
@@ -42,8 +40,7 @@ namespace KMHServerAddon.Features.Discord
             return true;
         }
 
-        // Consulted by DiscordBridge.OnMessage. Returns true if an extension claimed the command. Handler
-        // exceptions are caught so one bad extension can't break the gateway message loop
+        // A throwing handler is caught, or one bad extension would break the gateway message loop.
         public static bool TryDispatch(SocketMessage message, string cmd, string[] parts)
         {
             Action<IKmhDiscordCommand> handler;
@@ -63,18 +60,16 @@ namespace KMHServerAddon.Features.Discord
             return true;
         }
 
-        // Stable IKmhDiscordCommand over a Discord.NET SocketMessage.
+        // Keeps Discord.NET's own types out of the SDK surface extensions bind against.
         private sealed class Context : IKmhDiscordCommand
         {
-            private readonly SocketMessage _message;
-            private readonly List<string>  _args;
+            private readonly List<string> _args;
 
             public Context(SocketMessage message, string cmd, string[] parts)
             {
-                _message = message;
-                Command  = cmd;
+                Command = cmd;
 
-                // parts[0] is the command word; the rest are args.
+                // From index 1, because parts[0] is the command word itself.
                 _args = new List<string>();
                 for (int i = 1; i < parts.Length; i++) _args.Add(parts[i]);
                 RawArgs = _args.Count > 0 ? string.Join(" ", _args) : "";
@@ -98,7 +93,6 @@ namespace KMHServerAddon.Features.Discord
             public void Reply(string text)
             {
                 if (string.IsNullOrEmpty(text) || ChannelId == 0) return;
-                // Reuse the bridge's gated, fire-and-forget channel poster.
                 DiscordBridge.PostToChannel(ChannelId, text);
             }
         }

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -7,11 +7,7 @@ using Newtonsoft.Json;
 
 namespace KMHServerAddon.Persistence
 {
-    // Readable per-domain history for important KMH state changes, for owner inspection and targeted dispute
-    // resolution (silver/item movements themselves live in the Ledger; player/guild point-in-time restore lives
-    // in Snapshots). One JSONL line per event, monthly files per domain under KMH-Data/History/, pruned after
-    // KeepMonths. Subscribes to the same event bus extensions use, so coverage tracks the features automatically.
-    // Inspect with: kmh history <domain> [contains] [count]   (domains: market, auctions, quests, guilds, sites, world, admin)
+    // Subscribed to the same event bus extensions use, so a new feature appears here without being wired in.
     internal static class KmhHistory
     {
         private const int KeepMonths = 3;
@@ -45,6 +41,8 @@ namespace KMHServerAddon.Persistence
                 bus.BackupCreated        += e => Write("admin",    "backup",    e);
                 bus.RestoreApplied       += e => Write("admin",    "restore",   e);
                 PruneOld();
+                // Retention has to keep running: pruning only at boot means a server up for months never prunes again.
+                Maintenance.KmhScheduler.Register("history-prune", TimeSpan.FromHours(24), PruneOld, TimeSpan.FromHours(24));
                 ServerLog.Info($"History: recording state changes to {Dir} (kept {KeepMonths} months; inspect via 'kmh history').");
             }
             catch (Exception ex) { ServerLog.Warn($"History: could not start ({ex.Message}) - state-change history disabled."); }
@@ -66,8 +64,6 @@ namespace KMHServerAddon.Persistence
             catch { /* history is best-effort; never let it break the action it records */ }
         }
 
-        // Newest matching lines from a domain's files (newest file first), optionally filtered by substring
-        // (username, guild, quest id...). For 'kmh history'.
         public static List<string> ReadRecent(string domain, string contains, int count)
         {
             List<string> result = new List<string>();

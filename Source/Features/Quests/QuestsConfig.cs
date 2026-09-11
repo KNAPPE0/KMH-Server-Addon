@@ -1,14 +1,10 @@
-using KMHServerAddon.Persistence;
+﻿using KMHServerAddon.Persistence;
 using Newtonsoft.Json;
 
 namespace KMHServerAddon.Features.Quests
 {
-    // Owner-tunable quest limits, loaded from KMH-Data/Config/Quests.json. Anti-spam / anti-forge caps the server
-    // enforces on posting. Generated with the KMH defaults on first boot; clamped on load. Applied at startup
-    // - restart after editing.
     internal sealed class QuestsConfig
     {
-        // Schema version for forward-compatible migrations (absent = 1). Changes so far are additive.
         public int SchemaVersion       { get; set; } = 1;
 
         public int MaxOpenPerUser      { get; set; } = 10;
@@ -16,15 +12,17 @@ namespace KMHServerAddon.Features.Quests
         public int MaxDescriptionLength { get; set; } = 1024;
         public int MaxBountyItems      { get; set; } = 20;
 
-        // Client auto-verify (escort/defend/hunt/build) guards. The verify report is client-tracked, so:
-        // a claim younger than this can't complete (stops claim->instant-verify macros)...
+        // The verify report is client-tracked, so a claim younger than this cannot complete and macros gain nothing.
         public int AutoVerifyMinClaimSeconds { get; set; } = 120;
-        // ...and owners who want human sign-off can route auto-verified quests to the poster's review
-        // queue (PendingReview -> poster approves/rejects) instead of paying instantly.
+        // Routes an auto-verified quest to the poster for sign-off instead of paying out immediately.
         public bool AutoVerifyRequiresPosterReview { get; set; } = false;
 
         private static QuestsConfig _current;
         public static QuestsConfig Current => _current ?? (_current = LoadOrDefault());
+        public static void Reload() { _current = null; }
+
+        // The open-quest cap is enforced across an escrow that releases the lock, so the race needs it set in memory.
+        internal static QuestsConfig ApplyForTest(QuestsConfig cfg) { QuestsConfig prev = _current; _current = cfg; return prev; }
 
         public static QuestsConfig LoadOrDefault()
         {

@@ -6,8 +6,6 @@ using KMHServerAddon.SubProtocol;
 
 namespace KMHServerAddon.Features.Guilds.Patches
 {
-    // /kmh guild chat commands: create / join / leave / list / whoami / transfer / help sits alongside KmhIntercept
-    // on PM_Chat.Receive; leading-slash check keeps the Prefixes apart
     [HarmonyPatch(typeof(PM_Chat), nameof(PM_Chat.Receive))]
     internal static class Patch_PM_Chat_GuildCommands
     {
@@ -22,7 +20,7 @@ namespace KMHServerAddon.Features.Guilds.Patches
             if (pkt == null || !pkt.IsCommand) return true;
 
             string msg = (pkt.Message ?? "").Trim();
-            // Word-boundary match so "/kmh guildfoo" doesn't get swallowed.
+            // Word-boundary match, so "/kmh guildfoo" falls through to RWT.
             if (!(msg.Equals(CommandPrefix, StringComparison.OrdinalIgnoreCase)
                   || msg.StartsWith(CommandPrefix + " ", StringComparison.OrdinalIgnoreCase)))
                 return true;
@@ -49,7 +47,7 @@ namespace KMHServerAddon.Features.Guilds.Patches
                 return;
             }
 
-            // strip the two-word "/kmh guild" prefix, rebuild parts so handlers keep [1]=sub [2]=arg
+            // Rebuilt so handlers still see [1]=sub and [2]=arg after the two-word prefix is removed.
             string rest = raw.Length > CommandPrefix.Length ? raw.Substring(CommandPrefix.Length).Trim() : "";
             string[] restParts = rest.Length == 0
                 ? Array.Empty<string>()
@@ -88,7 +86,7 @@ namespace KMHServerAddon.Features.Guilds.Patches
             {
                 Reply(client, $"Invited {target}. They can /kmh guild join now.");
                 ServerLog.Info($"Guild: {username} invited {target}");
-                Notifications.KmhMail.ToUser(target.Trim(), "positive", $"Guild invite: {gname}",
+                Notifications.KmhNotify.ToUser(target.Trim(), "positive", $"Guild invite: {gname}",
                     $"{username} invited you to join '{gname}'. Open the Guild Hall (KMH tab) to accept or decline.");
             }
             else Reply(client, $"Could not invite: {err}");

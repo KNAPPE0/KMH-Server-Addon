@@ -1,13 +1,9 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Security.Cryptography;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // Short-lived, single-use codes for binding an in-game username to a Discord identity. Flow: /kmh link issues a
-    // code (10-min TTL); `!kmh-link <code>` in Discord consumes it, which fires LinkedAccountsStore.SetLink and
-    // broadcasts the snapshot. Single-use (TryConsume removes it); stale codes are reaped lazily on Issue/Consume;
-    // a new code for the same username invalidates the previous one (one outstanding code per player).
     internal static class DiscordLinkFlow
     {
         private static readonly object _lock = new object();
@@ -23,7 +19,7 @@ namespace KMHServerAddon.Features.Discord
             {
                 ReapStaleLocked();
 
-                // Drop any previous code this user had outstanding - only one in-flight code per player
+                // Only one code may be outstanding per player, or an older one stays redeemable.
                 List<string> remove = new List<string>();
                 foreach (KeyValuePair<string, Pending> kv in _byCode)
                 {
@@ -56,8 +52,7 @@ namespace KMHServerAddon.Features.Discord
             }
         }
 
-        // Crockford-style alphabet (no I/O/1/0) for copy-paste-friendly codes. 6 chars over a 31-symbol alphabet =
-        // ~887M keyspace, plenty for a 10-minute window at any realistic player count
+        // I, O, 1 and 0 are left out so a player reading a code aloud cannot produce a different one.
         private const string Alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
         private static string GenerateCode()
