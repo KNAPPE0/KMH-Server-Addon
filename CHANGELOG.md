@@ -16,6 +16,13 @@ an automatic backup beforehand. No configuration changes are required.
 
 ### Fixed
 
+- **One player dropping mid-download no longer floods the server log.** If a client's connection was reset while the
+  server was sending it the enforced config profile, the failed write left that connection registered as healthy — so
+  every remaining chunk was written to the same dead socket, each failure logged twice, and the push ran to the last
+  chunk regardless. A single disconnect could fill a log file, and with the chat fallback enabled the leftover chunks
+  were queued as chat. A write that fails now closes that connection straight away, and a profile push that loses its
+  recipient stops where it is; the client re-requests it on its next connection.
+
 - **A brand-new server no longer reports itself as damaged.** The first boot scanned KMH-Data before it had written
   it, so a fresh install announced "23 required missing" and then listed every file it was about to create. A new
   server now says it is new and names what it has; the missing-file warnings are kept for a server that really has

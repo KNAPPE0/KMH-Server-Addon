@@ -139,10 +139,15 @@ namespace KMHServerAddon.Features.Media
             {
                 int offset = i * ChunkBytes;
                 int len = Math.Min(ChunkBytes, bytes.Length - offset);
-                KmhRouter.SendTo(client, KmhProtocol.Kind.ChatMediaChunk, new
+                // One refused chunk means the peer is gone; the rest are failed writes carrying half a picture.
+                if (!KmhRouter.SendTo(client, KmhProtocol.Kind.ChatMediaChunk, new
                 {
                     id = e.Id, i, n = chunks, b64 = Convert.ToBase64String(bytes, offset, len),
-                });
+                }))
+                {
+                    ServerLog.Verbose($"Media: send of '{e.Id}' abandoned after {i}/{chunks} chunk(s) - the recipient is gone.");
+                    return;
+                }
             }
         }
 
