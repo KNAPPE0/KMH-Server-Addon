@@ -80,6 +80,24 @@ namespace KMHServerAddon.Maintenance
                             : $"A={aHas}/{aGone} B={bHasNot}/{bNow} - the API is still addressed by name");
                 });
 
+                Check("API: a failed write drops the connection instead of leaving it registered", () =>
+                {
+                    ServerClient a = Session("taz");
+                    Login(a);
+                    KmhApiServer.RegisterForTest("taz", a);
+                    bool live = KmhApiServer.IsConnected(a);
+                    // A test connection has no stream, so the write throws exactly where a reset socket throws.
+                    KmhApiServer.SendResult first  = KmhApiServer.Send(a, new KmhEnvelope(ProbeKind, null));
+                    bool dropped = !KmhApiServer.IsRegisteredFor(a) && !KmhApiServer.IsConnected(a);
+                    KmhApiServer.SendResult second = KmhApiServer.Send(a, new KmhEnvelope(ProbeKind, null));
+                    Logout(a);
+                    bool ok = live && first == KmhApiServer.SendResult.IoFailure
+                           && dropped && second == KmhApiServer.SendResult.NotConnected;
+                    return (ok, ok
+                        ? "the first write fails and deregisters; the second never touches the dead socket"
+                        : $"live={live} first={first} dropped={dropped} second={second} - a dead socket stays registered and every later send retries it");
+                });
+
                 Check("API: closing a session leaves a namesake's connection alone", () =>
                 {
                     ServerClient a = Session("taz"), b = Session("taz");

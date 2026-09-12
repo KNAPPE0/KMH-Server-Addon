@@ -242,30 +242,37 @@ namespace KMHServerAddon.Features.Enforcement
                 string hash  = EnforcementProfile.Hash;
                 int chunkCount = (bytes.Length + ChunkRawBytes - 1) / ChunkRawBytes;
 
-                KmhRouter.SendTo(client, KmhProtocol.Kind.EnforcementProfileBegin, new
+                if (!KmhRouter.SendTo(client, KmhProtocol.Kind.EnforcementProfileBegin, new
                 {
                     hash,
                     file_count  = EnforcementProfile.FileCount,
                     chunk_count = chunkCount,
                     total_bytes = bytes.Length,
-                });
+                }))
+                { LogPushAbandoned(client, 0, chunkCount); return; }
 
                 for (int i = 0; i < chunkCount; i++)
                 {
                     int off = i * ChunkRawBytes;
                     int len = Math.Min(ChunkRawBytes, bytes.Length - off);
-                    KmhRouter.SendTo(client, KmhProtocol.Kind.EnforcementProfileChunk, new
+                    // One refused chunk means the peer is gone; pushing the rest is thousands of failed writes and a profile nobody can assemble.
+                    if (!KmhRouter.SendTo(client, KmhProtocol.Kind.EnforcementProfileChunk, new
                     {
                         hash,
                         index = i,
                         data  = Convert.ToBase64String(bytes, off, len),
-                    });
+                    }))
+                    { LogPushAbandoned(client, i, chunkCount); return; }
                 }
 
                 KmhRouter.SendTo(client, KmhProtocol.Kind.EnforcementProfileEnd, new { hash });
             }
             catch (Exception ex) { ServerLog.Warn($"Enforcement: profile push failed: {ex.Message}"); }
         }
+
+        private static void LogPushAbandoned(ServerClient client, int sent, int total)
+            => ServerLog.Warn($"Enforcement: profile push to {client?.GetData<UserFile>()?.Username ?? "?"} abandoned "
+                            + $"after {sent}/{total} chunk(s) - it will be re-requested when that client reconnects.");
 
         public static void SendRestoreToAll()
         {

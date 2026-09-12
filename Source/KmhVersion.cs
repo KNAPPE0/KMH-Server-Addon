@@ -5,7 +5,7 @@
     {
         public const string Build        = "1.3.0";
         // Names the exact working build behind a public version, so a stale binary is identifiable from a log line.
-        public const string BuildTag     = "rel-212";
+        public const string BuildTag     = "rel-213";
         public const int    ConfigSchema = 3;
         public static int   DataSchema   => Persistence.KmhDataMeta.CurrentFormat;
         public const int    Protocol     = SubProtocol.KmhProtocol.CurrentVersion;

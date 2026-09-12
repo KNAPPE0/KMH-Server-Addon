@@ -159,7 +159,16 @@ namespace KMHServerAddon.Features.Transport
         {
             string user = client?.GetData<UserFile>()?.Username;
             if (string.IsNullOrEmpty(user)) return null;
-            return _conns.TryGetValue(user, out ApiConn c) && ReferenceEquals(c.Owner, client) ? c : null;
+            return _conns.TryGetValue(user, out ApiConn c) && ReferenceEquals(c.Owner, client) && !c.IsDead ? c : null;
+        }
+
+        // Until this runs the reader may still be parked on its idle timeout, IsConnected keeps saying yes, and every later send retries the same dead socket.
+        private static void Invalidate(ApiConn conn)
+        {
+            if (conn == null || !conn.TryMarkDead()) return;
+            _conns.TryRemove(new System.Collections.Generic.KeyValuePair<string, ApiConn>(conn.Username, conn));
+            conn.Close();
+            ServerLog.Protocol($"API: dropped {conn.Username}'s connection after a failed write.");
         }
 
         // "Not on the API" and "too big" need separate answers, or an oversized payload falls back to chat and fails there too.
@@ -602,6 +611,12 @@ namespace KMHServerAddon.Features.Transport
             public int  FrameLimitBytes = 64 * 1024;
             public bool PeerFragments;
 
+            private int _dead;
+            public bool IsDead => System.Threading.Volatile.Read(ref _dead) != 0;
+
+            // True to exactly one caller, so a burst of failing writes drops and logs the connection once.
+            internal bool TryMarkDead() => System.Threading.Interlocked.Exchange(ref _dead, 1) == 0;
+
             public bool TrySend(KmhEnvelope env) => Send(env) == SendResult.Sent;
 
             // Encoded here only for a single recipient; a broadcast encodes once outside and calls the overload below.
@@ -630,7 +645,9 @@ namespace KMHServerAddon.Features.Transport
                 }
                 catch (Exception ex)
                 {
+                    // TCP has no transient single-frame failure: a write that threw means this socket is finished.
                     Diagnostics.ServerLog.Verbose($"KMH API: send '{framed.Kind}' to {Username} failed: {ex.Message}");
+                    Invalidate(this);
                     return SendResult.IoFailure;
                 }
             }
