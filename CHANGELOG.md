@@ -18,6 +18,13 @@ credentials, and are never touched. Before anything is rewritten a pre-migration
 `KMH-Data-Backups`, what was regenerated and what was kept is named in the console, and `KMH-Data/Config/README.txt`
 explains what each file is for.
 
+### rel-283
+
+- **`kmh doctor` tells the truth after the upgrade.** On the first v1.3.1 boot of a v1.3.0 server, the doctor said
+  the settings were upgraded and your values were kept, while that same boot had reset every tunable setting to the
+  v1.3.1 defaults. It now says they were reset, names the `premigration-config` backup in `KMH-Data-Backups` that
+  holds your old values, and says what to do: copy back what you need, then `kmh reload`. Nothing else changed.
+
 ### rel-279 (in progress)
 
 - **Cheat containment.** A player used a memory editor to create 396,000 silver and 5,000 ultratech medicine and

@@ -362,8 +362,9 @@ namespace KMHServerAddon.Maintenance
                    "no failure reported"));
 
             UpgradeBanner(r);
+            DoctorAfterUpgrade(r);
 
-            var names = new List<string> { "20260101-a", "20260102-b", "20260103-premigration-config-v3", "20260104-d" };
+            var names =new List<string> { "20260101-a", "20260102-b", "20260103-premigration-config-v3", "20260104-d" };
             List<string> unpinned = Persistence.KmhDataBackup.PruneCandidates(names, 1);
             Persistence.KmhDataBackup.Pin("20260103-premigration-config-v3");
             List<string> pinned = Persistence.KmhDataBackup.PruneCandidates(names, 1);
@@ -414,6 +415,35 @@ namespace KMHServerAddon.Maintenance
 
             r.Add(("Banner: names the pre-migration backup an owner has to restore from",
                    !regenerates || text.Contains("premigration-config"), "restore path named"));
+        }
+
+        // The doctor follows the banner: an upgrade that replaced the owner's values must not say they were kept.
+        private static void DoctorAfterUpgrade(List<(string, bool, string)> r)
+        {
+            var steps = new List<KmhConfigMigration.Step> { new KmhConfigMigration.Step(KmhVersion.ConfigSchema, "selftest step", _ => (1, null)) };
+            int applied = Persistence.KmhDataMeta.AppliedConfigSchema;
+            string Says(int from)
+            {
+                // Stamped at the applied schema, a no-op, so the runner's meta is untouched.
+                string fail = KmhConfigMigration.ApplySteps(
+                    new KmhConfigMigrationPlan(true, from, applied, $"20261029-000000-premigration-config-v{from}", null), steps);
+                if (fail != null) return "apply failed: " + fail;
+                return string.Join(" | ", AdminCommands.KmhDoctor.Collect()
+                    .FindAll(d => d.Text.Contains($"config schema {KmhVersion.ConfigSchema} this boot"))
+                    .ConvertAll(d => d.Text + " -> " + d.Fix));
+            }
+
+            string fromV3, fromV5;
+            using (KmhConfigMigration.KeepBootStateForTest())
+            {
+                fromV3 = Says(3);
+                fromV5 = Says(5);
+            }
+            r.Add(("Doctor: an upgrade that regenerated configs says they were reset and names the backup holding the originals",
+                   fromV3.Contains("reset to the v1.3.1 defaults") && fromV3.Contains("'20261029-000000-premigration-config-v3'")
+                   && !fromV3.Contains("were kept"), fromV3));
+            r.Add(("Doctor: an upgrade that did not regenerate still says the values were kept",
+                   fromV5.Contains("your values were kept") && !fromV5.Contains("reset"), fromV5));
         }
 
         private static void Recovery(List<(string, bool, string)> r, Features.FeaturesConfig sample)

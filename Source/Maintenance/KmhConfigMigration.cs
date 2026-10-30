@@ -51,6 +51,9 @@ namespace KMHServerAddon.Maintenance
             => System.Array.Exists(Steps, s => s.Run == (StepAction)KmhConfigRegeneration.RegenerateAll);
 
         public static bool RanThisBoot { get; private set; }
+        // This boot replaced the owner's tunable values; BackupThisBoot holds the originals.
+        public static bool RegeneratedThisBoot { get; private set; }
+        public static string BackupThisBoot { get; private set; }
         public static List<string> Report { get; } = new List<string>();
 
         // The schema-4 step rewrites every tunable config from defaults, so only a verified backup keeps it reversible.
@@ -123,11 +126,14 @@ namespace KMHServerAddon.Maintenance
 
         // Null means the migration completed and the new schema is on disk; anything else is the reason it did not.
         // Main runs this under the migration journal, so a crash mid-write rolls back to the pre-migration backup.
-        public static string Apply(KmhConfigMigrationPlan plan)
+        public static string Apply(KmhConfigMigrationPlan plan) => ApplySteps(plan, Steps);
+
+        // Not an Apply overload: the migration harness finds Apply by name.
+        internal static string ApplySteps(KmhConfigMigrationPlan plan, IEnumerable<Step> steps)
         {
             try
             {
-                string stepFailure = RunSteps(Steps, plan.From, Report);
+                string stepFailure = RunSteps(steps, plan.From, Report);
                 if (stepFailure != null) return stepFailure;
 
                 // Last, and only if it persists: an unrecorded stamp makes the next boot reset the settings again.
@@ -135,12 +141,30 @@ namespace KMHServerAddon.Maintenance
                     return $"the new config schema v{plan.To} could not be recorded ({stampErr})";
 
                 RanThisBoot = Report.Count > 0;
+                RegeneratedThisBoot = RegeneratesFrom(plan.From);
+                BackupThisBoot = plan.BackupName;
                 ServerLog.Info(Report.Count > 0
                     ? $"Config schema: migrated v{plan.From} -> v{plan.To}. {string.Join("; ", Report)}"
                     : $"Config schema: stamped v{plan.To} (nothing to migrate).");
                 return null;
             }
             catch (Exception ex) { return $"the migration threw ({ex.Message})"; }
+        }
+
+        // Apply sets the boot-wide state the doctor reads, so a test that runs it puts that state back.
+        internal static IDisposable KeepBootStateForTest() => new BootState();
+
+        private sealed class BootState : IDisposable
+        {
+            private readonly bool _ran = RanThisBoot, _regenerated = RegeneratedThisBoot;
+            private readonly string _backup = BackupThisBoot;
+            private readonly List<string> _report = new List<string>(Report);
+
+            public void Dispose()
+            {
+                RanThisBoot = _ran; RegeneratedThisBoot = _regenerated; BackupThisBoot = _backup;
+                Report.Clear(); Report.AddRange(_report);
+            }
         }
 
         // Clears world events the zero-duration bug stranded in existing data; nothing creates new ones.

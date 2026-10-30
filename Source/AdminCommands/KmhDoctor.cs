@@ -77,7 +77,14 @@ namespace KMHServerAddon.AdminCommands
                 Add(DoctorLevel.Info, $"{lost} Guild Federation activity report(s) from this server were never counted (queue limit, too old, or the link ended).",
                     "'kmh federation status' breaks them down.");
 
-            if (Maintenance.KmhConfigMigration.RanThisBoot)
+            // A regenerating upgrade replaced the owner's values, so "kept" would contradict the boot banner.
+            if (Maintenance.KmhConfigMigration.RanThisBoot && Maintenance.KmhConfigMigration.RegeneratedThisBoot)
+                Add(DoctorLevel.Info, $"Settings were upgraded to config schema {KmhVersion.ConfigSchema} this boot, and your tunable settings "
+                    + "were reset to the v1.3.1 defaults. Your previous values are in the backup "
+                    + $"'{Maintenance.KmhConfigMigration.BackupThisBoot}' under KMH-Data-Backups.",
+                    "Copy back what you need from that backup's Config folder into KMH-Data/Config, then 'kmh reload'. "
+                    + "'kmh migration-report' lists what changed.");
+            else if (Maintenance.KmhConfigMigration.RanThisBoot)
                 Add(DoctorLevel.Info, $"Settings were upgraded to config schema {KmhVersion.ConfigSchema} this boot; your values were kept.",
                     "'kmh migration-report' lists exactly what moved.");
 
