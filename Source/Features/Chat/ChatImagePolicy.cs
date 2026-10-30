@@ -21,10 +21,7 @@ namespace KMHServerAddon.Features.Chat
             if (!cfg.AllowImagePreviews) { reason = "image previews are off (AllowImagePreviews)"; return ""; }
             if (typedByPlayer && !cfg.AllowTypedImageUrls) { reason = "typed links may not preview (AllowTypedImageUrls)"; return ""; }
             if (string.IsNullOrWhiteSpace(url)) { reason = "empty url"; return ""; }
-
-            Uri uri;
-            try { if (!Uri.TryCreate(url.Trim(), UriKind.Absolute, out uri) || uri == null) { reason = "unparseable url"; return ""; } }
-            catch { reason = "unparseable url"; return ""; }
+            if (!ChatMediaUrl.TryParseAbsolute(url.Trim(), out Uri uri)) { reason = "unparseable url"; return ""; }
 
             // A plain-http preview would be a downgrade the player cannot see and cannot refuse.
             if (!string.Equals(uri.Scheme, "https", StringComparison.OrdinalIgnoreCase)) { reason = "not https"; return ""; }
@@ -50,10 +47,7 @@ namespace KMHServerAddon.Features.Chat
         {
             isVideo = false;
             if (cfg == null || string.IsNullOrWhiteSpace(url)) return "";
-
-            Uri uri;
-            try { if (!Uri.TryCreate(url.Trim(), UriKind.Absolute, out uri) || uri == null) return ""; }
-            catch { return ""; }
+            if (!ChatMediaUrl.TryParseAbsolute(url.Trim(), out _)) return "";
 
             if (ChatMediaUrl.KindOf(cfg, url) == ChatMediaUrl.Kind.Video)
             {
@@ -105,14 +99,11 @@ namespace KMHServerAddon.Features.Chat
             return false;
         }
 
-        // Asked for only where the client would otherwise be stuck: measured, the proxy re-encodes a 212KB jpeg into 1.1MB of png.
+        // Asked for only where the client would be stuck: the proxy re-encodes a 212KB jpeg into 1.1MB of png.
         internal static string ApplyTranscode(ChatConfig cfg, string url)
         {
             if (cfg == null || !cfg.DiscordProxyTranscode || string.IsNullOrEmpty(url)) return url;
-
-            Uri uri;
-            try { if (!Uri.TryCreate(url, UriKind.Absolute, out uri) || uri == null) return url; }
-            catch { return url; }
+            if (!ChatMediaUrl.TryParseAbsolute(url, out Uri uri)) return url;
             if (!IsAllowedHost(uri.Host, cfg.TranscodeHosts)) return url;
             if (url.IndexOf("format=", StringComparison.OrdinalIgnoreCase) >= 0) return url;
             // Asking a proxy for an mp4 "as png" only produces a broken url.

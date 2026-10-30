@@ -16,6 +16,16 @@ namespace KMHServerAddon.Features.Identity
             return Resolve(username, cfg, cfg.TreatRwtAdminsAsStaff && IsRwtAdmin(username));
         }
 
+        // Deliberately not RoleFor: that answers "what badge do they show", which an owner can switch off without
+        // ceasing to be the owner. Authority must not be readable from a display setting.
+        public static bool IsOwner(string username)
+        {
+            if (string.IsNullOrWhiteSpace(username)) return false;
+            StaffConfig cfg = StaffConfig.Current;
+            if (cfg == null) return false;
+            return Contains(cfg.Owners, username);
+        }
+
         // Highest role wins, so listing someone as Owner is not outranked by their also being a live admin.
         internal static string Resolve(string username, StaffConfig cfg, bool rwtAdmin)
         {
@@ -31,67 +41,90 @@ namespace KMHServerAddon.Features.Identity
             return role;
         }
 
+        // Only the config side is trimmed: RWT keeps "Name " and "Name" as two accounts, so trimming the authenticated
+        // name would hand the owner's authority to whoever registered the padded one.
         internal static bool Contains(List<string> list, string username)
         {
             if (list == null || string.IsNullOrWhiteSpace(username)) return false;
             foreach (string s in list)
-                if (!string.IsNullOrWhiteSpace(s) && string.Equals(s.Trim(), username.Trim(), StringComparison.OrdinalIgnoreCase))
+                if (!string.IsNullOrWhiteSpace(s) && SameAccount(s.Trim(), username))
                     return true;
             return false;
         }
 
-        // Reflection because the user store is named differently across RWT generations, and a miss degrades to "not admin".
-        private static MethodInfo _lookup;
-        private static bool _lookupResolved;
+        // RWT's own account rule (UserManager compares Username.ToLower()); OrdinalIgnoreCase would merge "Iris" and
+        // "iris", which a Turkish or Azeri host keeps as two accounts.
+        internal static bool SameAccount(string a, string b)
+            => a != null && b != null && string.Equals(a.ToLower(), b.ToLower(), StringComparison.Ordinal);
+
+        internal static readonly IEqualityComparer<string> AccountComparer = new AccountNameComparer();
+
+        private sealed class AccountNameComparer : IEqualityComparer<string>
+        {
+            public bool Equals(string a, string b) => SameAccount(a, b);
+            public int GetHashCode(string s) => s == null ? 0 : StringComparer.Ordinal.GetHashCode(s.ToLower());
+        }
+
+        internal readonly struct RwtAccount
+        {
+            public readonly bool Admin, Banned;
+            public RwtAccount(bool admin, bool banned) { Admin = admin; Banned = banned; }
+        }
+
+        // RWT reads every account file to answer one name and badges ask per player, so one read a minute serves them all.
+        private static readonly TimeSpan AccountsMaxAge = TimeSpan.FromMinutes(1);
+        private static readonly object AccountsLock = new object();
+        private static Dictionary<string, RwtAccount> _accounts;
+        private static long _accountsAtTicks;
+        private static Dictionary<string, RwtAccount> _accountsForTest;
         private static bool _warned;
 
-        internal static bool IsRwtAdmin(string username)
+        internal static bool IsRwtAdmin(string username) => Account(username)?.Admin == true;
+
+        internal static bool IsRwtBanned(string username) => Account(username)?.Banned == true;
+
+        private static RwtAccount? Account(string username)
         {
-            try
-            {
-                UserFile uf = FindUserFile(username);
-                return uf != null && uf.IsAdmin;
-            }
-            catch (Exception ex)
-            {
-                if (!_warned) { _warned = true; ServerLog.Warn($"Staff: RWT admin lookup failed ({ex.Message}) - RWT admins will not be badged."); }
-                return false;
-            }
+            if (string.IsNullOrEmpty(username)) return null;
+            Dictionary<string, RwtAccount> all = Accounts(AccountsMaxAge);
+            return all != null && all.TryGetValue(username, out RwtAccount a) ? a : null;
         }
 
-        private static UserFile FindUserFile(string username)
+        // Every RWT account by its exact name, as RWT signs one in; null when this RWT exposes no account list.
+        internal static Dictionary<string, RwtAccount> Accounts(TimeSpan maxAge)
         {
-            if (!_lookupResolved)
+            if (_accountsForTest != null) return _accountsForTest;
+            lock (AccountsLock)
             {
-                _lookupResolved = true;
-                foreach (string typeName in new[] { "UserManager", "Managers.UserManager" })
+                long now = DateTime.UtcNow.Ticks;
+                if (_accounts != null && now - _accountsAtTicks < maxAge.Ticks) return _accounts;
+                try
                 {
-                    Type t = Type.GetType(typeName) ?? FindType(typeName);
-                    if (t == null) continue;
-                    _lookup = t.GetMethod("GetUserFileFromName", BindingFlags.Public | BindingFlags.Static, null,
-                                          new[] { typeof(string) }, null);
-                    if (_lookup != null) break;
+                    MethodInfo all = RwtCompat.UserStoreMethod("GetAllUserFiles", 0);
+                    if (all == null)
+                    {
+                        if (!_warned) { _warned = true; ServerLog.Info("Staff: this RWT build exposes no account list - only the names listed in Config/Staff.json are badged."); }
+                        return null;
+                    }
+                    var map = new Dictionary<string, RwtAccount>(StringComparer.Ordinal);
+                    if (all.Invoke(null, null) is System.Collections.IEnumerable files)
+                        foreach (object o in files)
+                            if (o is UserFile uf && !string.IsNullOrEmpty(uf.Username)) map[uf.Username] = new RwtAccount(uf.IsAdmin, uf.IsBanned);
+                    _accounts = map;
+                    _accountsAtTicks = now;
+                    return map;
                 }
-                if (_lookup == null && !_warned)
+                catch (Exception ex)
                 {
-                    _warned = true;
-                    ServerLog.Info("Staff: this RWT build exposes no user lookup - only the names listed in Config/Staff.json are badged.");
+                    if (!_warned) { _warned = true; ServerLog.Warn($"Staff: RWT account list failed ({ex.GetBaseException().Message}) - RWT admins will not be badged."); }
+                    return _accounts;
                 }
             }
-            return _lookup?.Invoke(null, new object[] { username }) as UserFile;
         }
 
-        private static Type FindType(string name)
-        {
-            foreach (Assembly a in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                Type t = a.GetType(name, throwOnError: false);
-                if (t != null) return t;
-            }
-            return null;
-        }
+        internal static void AccountsForTest(Dictionary<string, RwtAccount> accounts) => _accountsForTest = accounts;
 
-        // The reflection probe caches its miss, which would otherwise let a suite's first call decide the whole process.
-        internal static void ResetLookupForTest() { _lookup = null; _lookupResolved = false; _warned = false; }
+        // The table is cached, which would otherwise let a suite's first call decide the whole process.
+        internal static void ResetLookupForTest() { lock (AccountsLock) { _accounts = null; _accountsAtTicks = 0; _warned = false; } }
     }
 }

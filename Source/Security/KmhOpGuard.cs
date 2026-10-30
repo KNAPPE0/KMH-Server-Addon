@@ -2,14 +2,23 @@ using System;
 
 namespace KMHServerAddon.Security
 {
-    // A value-bearing request can arrive twice on one op id - a transport re-send, a second click. Operations whose repeat is already harmless skip this.
+    // A value-bearing request can arrive twice on one op id (a re-send, a second click); harmless repeats skip this.
     internal static class KmhOpGuard
     {
         private static readonly KmhSeenGuard _claimed = new KmhSeenGuard(TimeSpan.FromMinutes(10));
 
-        // The actor is in the key because op ids come from the client - otherwise one client could claim ids another is about to use.
-        private static string KeyOf(string scope, string actor, string opId)
-            => scope + "|" + (actor ?? "").ToLowerInvariant() + "|" + opId;
+        // Keyed by actor because op ids are client-chosen, or one client could claim ids another is about to use.
+        // A long id is hashed: it is held ten minutes, and its length is the client's choice.
+        internal static string KeyOf(string scope, string actor, string opId)
+            => scope + "|" + (actor ?? "").ToLowerInvariant() + "|" + (opId != null && opId.Length > MaxRawIdLength ? "#" + Hash(opId) : opId);
+
+        internal const int MaxRawIdLength = 64;
+
+        private static string Hash(string s)
+        {
+            using (var sha = System.Security.Cryptography.SHA256.Create())
+                return BitConverter.ToString(sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(s))).Replace("-", "");
+        }
 
         // An empty id is an older client with no op id to dedup on, and is never suppressed.
         public static bool TryBegin(string scope, string actor, string opId, long nowTicks)
@@ -18,7 +27,7 @@ namespace KMHServerAddon.Security
         public static bool TryBegin(string scope, string actor, string opId)
             => TryBegin(scope, actor, opId, DateTime.UtcNow.Ticks);
 
-        // Nothing moved, so the id must work again - otherwise a withdrawal refused for want of silver stays refused ten minutes after a top-up.
+        // Nothing moved, so the id must work again, or a refused withdrawal stays refused ten minutes after a top-up.
         public static void Release(string scope, string actor, string opId)
         {
             if (!string.IsNullOrEmpty(opId)) _claimed.Release(KeyOf(scope, actor, opId));

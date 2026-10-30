@@ -1,12 +1,7 @@
 namespace KMH.Sdk.Server.Apis
 {
-    /// <summary>
-    /// A handle for a connected client, hiding RWT's ServerClient so its API drift stays out of extension code.
-    /// </summary>
-    /// <remarks>
-    /// The handle is a snapshot from when the event fired, so the client may already be gone; a send to a stale
-    /// handle returns false rather than throwing.
-    /// </remarks>
+    /// <summary>A connected-client handle hiding RWT's ServerClient, so its API drift stays out of extension code.</summary>
+    /// <remarks>A snapshot from when the event fired: the client may be gone, and a send to it returns false, never throws.</remarks>
     public interface IKmhClient
     {
         /// <summary>In-game username, empty until the handshake completes.</summary>
@@ -15,10 +10,7 @@ namespace KMH.Sdk.Server.Apis
         /// <summary>The connecting IP address, as a string. Diagnostic-only.</summary>
         string Ip { get; }
 
-        /// <summary>
-        /// True once RWT's verification handshake is done. Events see verified clients almost always, but a raw chat
-        /// patch can see a pre-verified one, so check this if your handler needs the username.
-        /// </summary>
+        /// <summary>True once RWT's verification is done; check it if you need the username, as raw chat can arrive earlier.</summary>
         bool IsVerified { get; }
     }
 }

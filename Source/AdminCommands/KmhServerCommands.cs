@@ -6,10 +6,10 @@ namespace KMHServerAddon.AdminCommands
 {
     internal static class KmhServerCommands
     {
-        // The fingerprint guard cannot tell a modified client from a legitimately changed modpack, so reset is the owner's override.
+        // The fingerprint guard can't tell a modified client from a changed modpack, so reset is the owner's override.
         private static void SiteCatalogCmd(string[] args, string actor, Action<string> reply)
         {
-            string sub = args != null && args.Length > 1 ? args[1].ToLowerInvariant() : "";
+            string sub = LowerArg1(args);
             if (sub == "reset")
             {
                 Features.Sites.SiteCatalogStore.Reset();
@@ -40,7 +40,7 @@ namespace KMHServerAddon.AdminCommands
                     + $"mineable={m.IsMineable} crafted={m.IsCraftedProduct} ingestible={m.IsIngestible}");
                 if (!string.IsNullOrEmpty(m.FoodType)) reply($"  foodType   : {m.FoodType}");
                 reply("  Accepted by: " + AcceptingArchetypes(m));
-                reply("  Override with Config/Sites.json -> OutputFamilyOverrides (\"defName=family\").");
+                reply("  Override with Config/Sites.json -> Output.FamilyOverrides (\"defName=family\").");
                 return;
             }
 
@@ -49,7 +49,7 @@ namespace KMHServerAddon.AdminCommands
             if (!Features.Sites.SiteCatalogStore.HasCatalog)
             {
                 reply("  no catalog yet - archetype filtering is off until a client pushes one");
-                reply("  (any player on KMH v1.3.0+ pushes it automatically on connect)");
+                reply("  (any player on Colony Nexus v1.3.0+ pushes it automatically on connect)");
                 return;
             }
             reply($"  {Features.Sites.SiteCatalogStore.Count} classified item(s)");
@@ -64,7 +64,7 @@ namespace KMHServerAddon.AdminCommands
             foreach (string fam in Features.Sites.SiteOutputFamilies.All) counts[fam] = 0;
             foreach (string fam in Features.Sites.SiteOutputFamilies.All)
             {
-                // Counted through the lookup the economy uses, so this cannot report a classification the game would not apply.
+                // Counted via the economy's own lookup, so it never reports a classification the game would not apply.
                 int n = 0;
                 foreach (var e in Features.ItemLabels.ItemLabelCache.AllForCatalog())
                     if (Features.Sites.SiteCatalogStore.FamilyOf(e.DefName) == fam) n++;
@@ -74,7 +74,7 @@ namespace KMHServerAddon.AdminCommands
                 if (kv.Value > 0) reply($"    {Features.Sites.SiteOutputFamilies.DisplayName(kv.Key)}: {kv.Value}");
             if (counts[Features.Sites.SiteOutputFamilies.Unknown] > 0)
                 reply("  Unclassified items are hidden from preset site types and shown disabled under Custom. "
-                    + "Set Config/Sites.json -> OutputFamilyOverrides (\"defName=family\") to place them.");
+                    + "Set Config/Sites.json -> Output.FamilyOverrides (\"defName=family\") to place them.");
         }
 
         private static string Join(System.Collections.Generic.List<string> v)
@@ -92,7 +92,7 @@ namespace KMHServerAddon.AdminCommands
         // Nothing in KMH lowers a site's condition on its own, so this is the only thing that ever damages one.
         private static void SiteCondition(string[] args, string actorName, Action<string> reply)
         {
-            string verb = args != null && args.Length > 1 ? args[1].ToLowerInvariant() : "";
+            string verb = LowerArg1(args);
             int tile = args != null && args.Length > 2 && int.TryParse(args[2], out int t) ? t : -1;
             int pts  = args != null && args.Length > 3 && int.TryParse(args[3], out int p) ? Math.Abs(p) : 25;
             if (verb != "damage" && verb != "repair")
@@ -104,22 +104,91 @@ namespace KMHServerAddon.AdminCommands
             if (ok) Features.Sites.SiteHandler.BroadcastSnapshot();
         }
 
-        public static void Dispatch(string[] args, bool isAdmin, string actorName, Action<string> reply)
+        // Never reassigned automatically: a hand-on is explicit, logged with its admin, and counted so a reset waits.
+        private static void OrphansCmd(string[] args, string actorName, Action<string> reply)
+        {
+            string sub = LowerArg1(args);
+            using (Maintenance.KmhValueOps.Scope op = sub == "" ? null : Maintenance.KmhValueOps.Begin(Maintenance.KmhIngress.Admin, out _))
+            {
+                if (sub == "rebind-site")
+                {
+                    if (args.Length < 4 || !int.TryParse(args[2], out int tile)) { reply("Usage: kmh orphans rebind-site <tile> <guild name>"); return; }
+                    bool ok = Features.Sites.SiteStore.RebindOrphanedSite(tile, string.Join(" ", args, 3, args.Length - 3), actorName, out string msg);
+                    reply(msg);
+                    if (ok) Features.Sites.SiteHandler.BroadcastSnapshot();
+                    return;
+                }
+                if (sub == "rebind-legacy")
+                {
+                    bool confirm = args.Length > 2 && string.Equals(args[2], "confirm", StringComparison.OrdinalIgnoreCase);
+                    var listed = Features.Sites.SiteStore.RebindUnprovenLegacy(confirm, actorName, out string msg);
+                    foreach (var l in listed) reply($"  tile {l.Tile} -> guild '{l.Guild}'");
+                    reply(msg + (confirm ? $" (by {actorName})" : " Nothing changed - 'kmh orphans rebind-legacy confirm' applies it."));
+                    if (confirm) { ServerLog.Info($"kmh orphans rebind-legacy: {actorName} - {msg}"); Features.Sites.SiteHandler.BroadcastSnapshot(); }
+                    return;
+                }
+                if (sub == "release-vault")
+                {
+                    if (args.Length < 4) { reply("Usage: kmh orphans release-vault <vault> <player>"); return; }
+                    Features.Treasury.TreasuryStore.ReleaseOrphanVault(args[2], args[3], actorName, out string msg);
+                    reply(msg);
+                    return;
+                }
+                if (sub != "") { reply("Usage: kmh orphans [rebind-site <tile> <guild> | rebind-legacy [confirm] | release-vault <vault> <player>]"); return; }
+            }
+            var sites = Features.Sites.SiteStore.OrphanedGuildSites();
+            var vaults = Features.Treasury.TreasuryStore.OrphanVaults();
+            reply($"=== Orphans === {sites.Count} guild site(s), {vaults.Count} vault(s) no live guild holds.");
+            int owedQ = Features.Quests.QuestStore.OwedCount, owedS = Features.Sites.SiteStore.OwedCount, owedR = Features.Roadworks.RoadworksStore.OwedCount;
+            if (owedQ + owedS + owedR > 0)
+                reply($"  payouts written down but not yet credited: quests {owedQ}, sites {owedS}, roadworks {owedR} - retried every sweep and at start.");
+            foreach (var s in sites)
+                reply($"  site tile {s.Tile} '{s.Name}' - was guild '{s.Guild}', paused, {s.StoredUnits} unit(s) stored");
+            foreach (var v in vaults)
+                reply($"  vault '{v.Key}' - {Util.SilverFmt.Format(v.Silver)}, {v.ItemKinds} item kind(s), {v.Payloads} payload(s)");
+            if (sites.Count + vaults.Count > 0)
+                reply("Hand one on explicitly: 'kmh orphans rebind-site <tile> <guild>' or 'kmh orphans release-vault <vault> <player>'.");
+        }
+
+        // fromConsole comes from the caller, never actorName: a player can register an account called "console".
+        // Admin value moves are never refused (they end freezes) but are counted, so a backup or reset waits for one.
+        private static readonly System.Collections.Generic.HashSet<string> CountedAdminCommands = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "give-silver", "drain-house", "treasury-reset", "cancel", "quest", "recover", "purge", "wipe-economy",
+            "reset-player-economy", "wipe-player", "reset-cleanup", "remove-player-guilds", "freeze",
+        };
+
+        public static void Dispatch(string[] args, bool isAdmin, string actorName, Action<string> reply,
+                                    bool fromConsole = false)
         {
             string sub = args != null && args.Length > 0 ? args[0].ToLowerInvariant() : "help";
+            using (CountedAdminCommands.Contains(sub) ? Maintenance.KmhValueOps.Begin(Maintenance.KmhIngress.Admin, out _) : null)
+                DispatchCommand(sub, args, isAdmin, actorName, reply, fromConsole);
+        }
+
+        private static void DispatchCommand(string sub, string[] args, bool isAdmin, string actorName, Action<string> reply, bool fromConsole)
+        {
             switch (sub)
             {
-                case "status":         Status(reply);                          break;
-                case "diag":           Diag(reply);                            break;
+                case "status":         Status(reply, isAdmin);                 break;
+                case "diag":           Admin(isAdmin, "diag", reply, () => Diag(reply)); break;
+                case "doctor":         Admin(isAdmin, "doctor", reply, () => KmhDoctor.Run(reply)); break;
+                // `kmh config reload <area>` is the form `kmh help` advertises, so "reload" must not be read as an area.
+                case "config" when args.Length > 1 && string.Equals(args[1], "reload", StringComparison.OrdinalIgnoreCase):
+                                       Admin(isAdmin, "reload", reply, () => ReloadCmd(ShiftArgs(args), actorName, reply)); break;
                 case "config":         Admin(isAdmin, "config", reply, () => KmhConfigInspect.Run(args, reply)); break;
-                case "transport":      Transport(reply);                       break;
+                case "config-editor":  ConfigEditorCmd(args, actorName, reply, fromConsole); break;
+                case "setup":          Admin(isAdmin, "setup", reply, () => KmhSetupCommands.Run(args, actorName, reply, fromConsole)); break;
+                case "transport":      Admin(isAdmin, "transport", reply, () => Transport(reply)); break;
                 case "verify":         Admin(isAdmin, "verify",  reply, () => Verify(reply));            break;
                 case "audit":          Admin(isAdmin, "audit",   reply, () => Maintenance.KmhAudit.Run(reply)); break;
                 case "backup":         Admin(isAdmin, "backup",  reply, () => Backup(args, reply));      break;
                 case "site-condition": Admin(isAdmin, "site-condition", reply, () => SiteCondition(args, actorName, reply)); break;
                 case "site-catalog":   Admin(isAdmin, "site-catalog", reply, () => SiteCatalogCmd(args, actorName, reply)); break;
+                // Listing is for any admin; handing a site or vault on gives value away, so it is the owner's.
+                case "orphans":        Admin(isAdmin, "orphans", reply, () => { if (LowerArg1(args) == "" || OwnerOrConsole(actorName, fromConsole, "Handing on an orphaned site or vault", reply)) OrphansCmd(args, actorName, reply); }); break;
                 case "backups":        Admin(isAdmin, "backups", reply, () => Backups(reply));           break;
-                case "restore":        Admin(isAdmin, "restore", reply, () => Restore(args, reply));      break;
+                case "restore":        Admin(isAdmin, "restore", reply, () => { if (OwnerOrConsole(actorName, fromConsole, "Restoring a backup", reply)) Restore(args, reply); }); break;
                 case "snapshot-player": Admin(isAdmin, "snapshot-player", reply, () => SnapshotPlayerCmd(args, reply)); break;
                 case "snapshot-server": Admin(isAdmin, "snapshot-server", reply, () => SnapshotServerCmd(args, reply)); break;
                 case "snapshot-all":    Admin(isAdmin, "snapshot-all",    reply, () => SnapshotAllCmd(args, reply));    break;
@@ -128,11 +197,21 @@ namespace KMHServerAddon.AdminCommands
                 case "save":           Admin(isAdmin, "save",    reply, () => SaveAll(reply));           break;
                 case "export":         Admin(isAdmin, "export",  reply, () => Export(reply));            break;
                 case "inspect":        Admin(isAdmin, "inspect", reply, () => Inspect(args, reply));      break;
+                // Advertised by the guilds summary, `kmh validate` and the guild integrity notes.
+                case "guild":          Admin(isAdmin, "guild",   reply, () => KmhGuildCommands.Run(args, reply)); break;
+                case "sites":          Admin(isAdmin, "sites",   reply, () => KmhSitesCommands.Run(args, reply)); break;
                 case "cancel":         Admin(isAdmin, "cancel",  reply, () => CancelCmd(args, reply));    break;
-                case "recover":        Admin(isAdmin, "recover", reply, () => KmhRecoveryCommands.Run(args, reply));   break;
+                // Approving pays a poster's escrow to the claimer, who may be the admin's own alt; rejecting and refunding return it.
+                case "quest":          Admin(isAdmin, "quest",   reply, () => { if (LowerArg1(args) != "approve" || OwnerOrConsole(actorName, fromConsole, "Approving another player's bounty", reply)) QuestSettleCmd(args, actorName, reply); }); break;
+                case "recover":        Admin(isAdmin, "recover", reply, () => { if (LowerArg1(args) != "drop" || OwnerOrConsole(actorName, fromConsole, "Giving held value to another player", reply)) KmhRecoveryCommands.Run(args, reply); }); break;
                 case "validate":       Admin(isAdmin, "validate", reply, () => KmhValidateCommands.Run(args, reply)); break;
                 case "support-bundle": Admin(isAdmin, "support-bundle", reply, () => Maintenance.KmhSupportBundle.Create(reply)); break;
+                case "reports":        Admin(isAdmin, "reports", reply, () => KmhReportCommands.Run(args, reply)); break;
+                case "perf":           Admin(isAdmin, "perf",    reply, () => KmhPerfCommand.Run(reply)); break;
                 case "ledger":         Admin(isAdmin, "ledger",  reply, () => Ledger(args, reply));       break;
+                case "leaderboard":    Admin(isAdmin, "leaderboard", reply, () => KmhLeaderboardCommand.Run(args, reply)); break;
+                case "sim":            Admin(isAdmin, "sim", reply, () => Features.Simulation.SimulatedColonies.Command(args, reply)); break;
+                case "joins":          Admin(isAdmin, "joins", reply, () => SubProtocol.Patches.JoinDiagnostics.Command(args, reply)); break;
                 case "history":        Admin(isAdmin, "history", reply, () => History(args, reply));      break;
                 case "smoketest":      Admin(isAdmin, "smoketest", reply, () => Maintenance.KmhSmokeTest.Run(reply)); break;
                 case "selftest":       Admin(isAdmin, "selftest",  reply, () => Maintenance.KmhSmokeTest.RunRegression(reply)); break;
@@ -152,29 +231,94 @@ namespace KMHServerAddon.AdminCommands
                 case "wipe-economy":
                 case "reset-player-economy": Admin(isAdmin, "wipe-economy", reply, () => Maintenance.KmhPlayerCleanup.WipeEconomy(Arg1(args), IsConfirm(args), reply)); break;
                 case "reset-preview":  Admin(isAdmin, "reset-preview", reply, () => KmhCleanupCommands.ResetPreview(Arg1(args), reply)); break;
+                case "freeze":         Admin(isAdmin, "freeze", reply, () => Features.Moderation.KmhEconomyGuardCommands.Freeze(args, actorName, reply)); break;
+                case "unfreeze":       Admin(isAdmin, "unfreeze", reply, () => Features.Moderation.KmhEconomyGuardCommands.Unfreeze(args, actorName, reply)); break;
+                case "frozen":         Admin(isAdmin, "frozen", reply, () => Features.Moderation.KmhEconomyGuardCommands.List(reply)); break;
+                case "deposit-limit":  Admin(isAdmin, "deposit-limit", reply, () => Features.Moderation.KmhEconomyGuardCommands.DepositLimit(args, actorName, reply)); break;
                 case "wipe-player":    Admin(isAdmin, "wipe-player", reply, () => Maintenance.KmhPlayerCleanup.WipePlayer(Arg1(args), IsConfirm(args), reply)); break;
                 case "reset-cleanup":  Admin(isAdmin, "reset-cleanup", reply, () => Maintenance.KmhPlayerCleanup.ResetCleanup(Arg1(args), IsConfirm(args), reply)); break;
                 case "remove-player-guilds": Admin(isAdmin, "remove-player-guilds", reply, () => Maintenance.KmhPlayerCleanup.RemoveGuilds(Arg1(args), IsConfirm(args), reply)); break;
                 case "unlink-player":  Admin(isAdmin, "unlink-player", reply, () => Maintenance.KmhPlayerCleanup.Unlink(Arg1(args), IsConfirm(args), reply)); break;
                 case "rebuild-player": Admin(isAdmin, "rebuild-player", reply, () => Maintenance.KmhPlayerCleanup.RebuildPlayer(Arg1(args), reply)); break;
                 case "reload":         Admin(isAdmin, "reload", reply, () => ReloadCmd(args, actorName, reply)); break;
+                case "restart":        RestartCmd(args, actorName, reply, fromConsole); break;
                 case "extensions":     Extensions(reply);                      break;
-                case "give-silver":    Admin(isAdmin, "give-silver",    reply, () => GiveSilver(args, actorName, reply));  break;
-                case "treasury-reset": Admin(isAdmin, "treasury-reset", reply, () => TreasuryReset(args, actorName, reply)); break;
+                // Creates value out of nothing, which leaderboards and federation then count: the owner's call only.
+                case "give-silver":    Admin(isAdmin, "give-silver",    reply, () => { if (OwnerOrConsole(actorName, fromConsole, "Granting silver", reply)) GiveSilver(args, actorName, reply); });  break;
+                case "treasury-reset": Admin(isAdmin, "treasury-reset", reply, () => TreasuryReset(args, actorName, fromConsole, reply)); break;
                 case "reload-discord": Admin(isAdmin, "reload-discord", reply, () => ReloadDiscord(actorName, reply));     break;
                 case "reload-economy": Admin(isAdmin, "reload-economy", reply, () => ReloadEconomy(reply));                break;
                 case "reload-world":   Admin(isAdmin, "reload-world",   reply, () => ReloadWorld(reply));                  break;
                 case "reload-features": Admin(isAdmin, "reload-features", reply, () => ReloadFeatures(reply));             break;
-                case "drain-house":    Admin(isAdmin, "drain-house",    reply, () => DrainHouse(args, reply));             break;
+                case "drain-house":    Admin(isAdmin, "drain-house",    reply, () => { if (OwnerOrConsole(actorName, fromConsole, "Draining the house pool", reply)) DrainHouse(args, reply); }); break;
                 case "enforce":        Enforce(args, isAdmin, reply);          break;
                 case "event":          Admin(isAdmin, "event",          reply, () => EventCmd(args, actorName, reply));    break;
                 case "worldquest":
-                case "wq":             Admin(isAdmin, "worldquest",     reply, () => WorldQuestCmd(args, actorName, reply)); break;
-                case "season":         Admin(isAdmin, "season",         reply, () => SeasonCmd(args, actorName, reply));    break;
+                // A new quest's reward is minted past the house pool, and a credited delivery pays for goods never handed in.
+                case "wq":             Admin(isAdmin, "worldquest",     reply, () => { string s = LowerArg1(args); if (s == "" || s == "help" || s == "list" || s == "end" || OwnerOrConsole(actorName, fromConsole, "Creating or crediting a world quest", reply)) WorldQuestCmd(args, actorName, reply); }); break;
+                case "season":         Admin(isAdmin, "season",         reply, () => SeasonCmd(args, actorName, fromConsole, reply)); break;
                 case "frontier":       Admin(isAdmin, "frontier",       reply, () => FrontierCmd(args, actorName, reply));  break;
                 case "roadworks":      Admin(isAdmin, "roadworks",      reply, () => RoadworksCmd(args, actorName, reply)); break;
+                case "global":         Admin(isAdmin, "global",         reply, () => KmhGlobalCommands.Run(args, actorName, reply, fromConsole)); break;
+                case "federation":     Admin(isAdmin, "federation",     reply, () => KmhFederationCommands.Run(args, reply)); break;
                 case "help":           Help(args, reply, isAdmin);              break;
                 default:               Help(args, reply, isAdmin);              break;
+            }
+        }
+
+        // Says it is console-only rather than feigning absence, so an owner in game knows where to go.
+        private static void ConfigEditorCmd(string[] args, string actorName, Action<string> reply, bool fromConsole)
+        {
+            if (!fromConsole)
+            {
+                reply("'config-editor' can only be run at the server console. In-game settings access is deliberately");
+                reply("not something that can be opened from in game, from Discord, or by anyone holding a badge.");
+                return;
+            }
+
+            DateTimeOffset now = DateTimeOffset.UtcNow;
+            string action = LowerArg1(args, "status");
+            string who    = args != null && args.Length > 2 ? args[2] : "";
+
+            switch (action)
+            {
+                case "allow":
+                {
+                    if (who.Length == 0) { reply("Usage: kmh config-editor allow <player> [minutes]"); return; }
+                    if (!Features.Identity.StaffRegistry.IsOwner(who))
+                    {
+                        reply($"'{who}' is not listed under Owners in Staff.json, so access was NOT opened.");
+                        reply("Add them there first; console access alone does not make someone the owner.");
+                        return;
+                    }
+                    TimeSpan window = Features.Admin.ConfigEditorGrant.DefaultWindow;
+                    if (args.Length > 3 && int.TryParse(args[3], out int mins) && mins > 0)
+                        window = TimeSpan.FromMinutes(mins);
+                    DateTimeOffset until = Features.Admin.ConfigEditorGrant.Open(who, window, actorName, now);
+                    reply($"In-game settings access opened for '{who}' until {until:u} (UTC).");
+                    reply("It closes on its own, and a server restart closes it immediately.");
+                    return;
+                }
+                case "revoke":
+                {
+                    if (who.Length == 0) { reply("Usage: kmh config-editor revoke <player>"); return; }
+                    reply(Features.Admin.ConfigEditorGrant.Close(who)
+                        ? $"Closed in-game settings access for '{who}'."
+                        : $"'{who}' did not have access.");
+                    return;
+                }
+                case "revoke-all":
+                    Features.Admin.ConfigEditorGrant.CloseAll();
+                    reply("Closed in-game settings access for everyone.");
+                    return;
+                default:
+                {
+                    List<string> open = Features.Admin.ConfigEditorGrant.Describe(now);
+                    if (open.Count == 0) { reply("Nobody has in-game settings access."); return; }
+                    reply($"In-game settings access ({open.Count}):");
+                    foreach (string line in open) reply("  " + line);
+                    return;
+                }
             }
         }
 
@@ -184,9 +328,17 @@ namespace KMHServerAddon.AdminCommands
             run();
         }
 
-        private static void SeasonCmd(string[] args, string actorName, Action<string> reply)
+        // Server-wide and destructive, so an admin badge is not enough: the owner, or this machine's console.
+        private static bool OwnerOrConsole(string actorName, bool fromConsole, string what, Action<string> reply)
         {
-            string action = args != null && args.Length > 1 ? args[1].ToLowerInvariant() : "status";
+            if (fromConsole || Features.Identity.StaffRegistry.IsOwner(actorName)) return true;
+            reply($"{what} is owner-only. '{actorName}' is not listed under Owners in Staff.json - run it at the server console.");
+            return false;
+        }
+
+        private static void SeasonCmd(string[] args, string actorName, bool fromConsole, Action<string> reply)
+        {
+            string action = LowerArg1(args, "status");
             if (action == "roll")
             {
                 (int season, int count) = Features.Seasons.SeasonStore.RollSeason();
@@ -206,6 +358,7 @@ namespace KMHServerAddon.AdminCommands
                     reply("Guilds, Discord links, and the season archive are KEPT. It backs up first (reversible via 'kmh restore'). Confirm with:  kmh season reset confirm");
                     return;
                 }
+                if (!OwnerOrConsole(actorName, fromConsole, "A season reset", reply)) return;
                 if (Maintenance.KmhSeasonReset.Run(actorName, out string summary)) reply(summary);
                 else reply($"Season reset {summary}");
             }
@@ -217,7 +370,7 @@ namespace KMHServerAddon.AdminCommands
 
         private static void Diag(Action<string> reply)
         {
-            reply("=== KMH data pipeline ===");
+            reply("=== Colony Nexus data pipeline ===");
             reply($"Standings (live): {Features.PlayerStats.PlayerStatsStore.DiagLine()}");
             reply($"World (live):     {Features.World.WorldStore.ActiveEvents().Count} active event(s), " +
                   $"{Features.World.WorldStore.ActiveQuests().Count} active global quest(s)");
@@ -237,11 +390,13 @@ namespace KMHServerAddon.AdminCommands
         private static void Transport(Action<string> reply)
         {
             Features.Transport.TransportConfig c = Features.Transport.TransportConfig.Current;
-            reply("=== KMH transport ===");
+            reply("=== Colony Nexus transport ===");
             if (!c.EnableKmhApiTransport) { reply("API transport: OFF - clients use the RWT chat path. Enable in Config/Transport.json."); return; }
             // Bound once up, configured when not: an owner chasing a connection needs the number clients are given.
             bool up = Features.Transport.KmhApiServer.Running;
-            reply($"API transport: {(up ? "listening" : "ENABLED but not bound (see boot log)")} on {c.BindAddress}:{(up ? Features.Transport.KmhApiServer.Port : c.KmhApiPort)}");
+            string refused = Features.Transport.KmhApiServer.StartRefusal;
+            reply($"API transport: {(up ? "listening" : refused != null ? "REFUSED to start" : "ENABLED but not bound (see boot log)")} on {c.BindAddress}:{(up ? Features.Transport.KmhApiServer.Port : c.KmhApiPort)}");
+            if (refused != null) reply("  " + refused);
             if (up) reply($"Clients are told to dial: {(string.IsNullOrEmpty(c.PublicApiHost) ? "<the address they reached RWT on>" : c.PublicApiHost)}:{Features.Transport.KmhApiServer.Port}");
             reply($"Auth: {(c.RequireKmhApiAuth ? "required" : "OFF")} · chat fallback: {(c.AllowChatTransportFallback ? "on" : "off")} · connected: {Features.Transport.KmhApiServer.ConnectedCount}");
         }
@@ -249,7 +404,7 @@ namespace KMHServerAddon.AdminCommands
         private static void Verify(Action<string> reply)
         {
             Persistence.KmhDataIntegrity.ScanResult r = Persistence.KmhDataIntegrity.Scan();
-            reply($"=== KMH data integrity === {r.Summary}");
+            reply($"=== Colony Nexus data integrity === {r.Summary}");
             bool anyProblem = false;
             foreach (Persistence.KmhDataIntegrity.FileStatus fs in r.Files)
             {
@@ -282,7 +437,7 @@ namespace KMHServerAddon.AdminCommands
         private static void Backups(Action<string> reply)
         {
             System.Collections.Generic.List<Persistence.KmhDataBackup.BackupInfo> list = Persistence.KmhDataBackup.List();
-            reply($"=== KMH backups ({list.Count}) === {Persistence.KmhDataPaths.BackupRoot}");
+            reply($"=== Colony Nexus backups ({list.Count}) === {Persistence.KmhDataPaths.BackupRoot}");
             if (list.Count == 0) { reply("  (none yet - made on boot when enabled, or via 'kmh backup')"); return; }
             foreach (Persistence.KmhDataBackup.BackupInfo b in list)
                 reply($"  {b.Name}  ({b.Files} file(s), {b.Bytes} bytes)");
@@ -331,7 +486,7 @@ namespace KMHServerAddon.AdminCommands
             }
             if (Persistence.KmhDataRestore.Queue(spec, out string resolved, out string err))
             {
-                reply($"Restore queued: '{resolved}'. RESTART KMH to apply - current data is safety-backed-up automatically.");
+                reply($"Restore queued: '{resolved}'. RESTART the server to apply - current data is safety-backed-up automatically.");
                 ServerLog.Warn($"kmh restore queued by admin: {resolved}");
             }
             else reply($"Restore not queued: {err}");
@@ -340,8 +495,8 @@ namespace KMHServerAddon.AdminCommands
         private static void SaveAll(Action<string> reply)
         {
             int n = Maintenance.KmhDataFlush.FlushAll(reply);
-            reply($"Flushed {n} KMH store(s) to {Persistence.KmhDataPaths.Folder}.");
-            reply("NOTE: this saves KMH-Data ONLY, not RWT player colonies. KMH can't reach an RWT save-all API - save colonies via RWT/each client before restart.");
+            reply($"Flushed {n} Colony Nexus store(s) to {Persistence.KmhDataPaths.Folder}.");
+            reply("NOTE: this saves KMH-Data ONLY, not RWT player colonies. Colony Nexus can't reach an RWT save-all API - save colonies via RWT/each client before restart.");
             ServerLog.Info($"kmh save: flushed {n} store(s)");
         }
 
@@ -353,9 +508,17 @@ namespace KMHServerAddon.AdminCommands
                 reply("Status export failed - see server log.");
         }
 
+        internal static string[] ShiftArgs(string[] args)
+        {
+            if (args == null || args.Length < 2) return new[] { "" };
+            var outp = new string[args.Length - 1];
+            Array.Copy(args, 1, outp, 0, outp.Length);
+            return outp;
+        }
+
         private static void Inspect(string[] args, Action<string> reply)
         {
-            string what = args != null && args.Length > 1 ? args[1].ToLowerInvariant() : "";
+            string what = LowerArg1(args);
             switch (what)
             {
                 case "auctions":
@@ -374,7 +537,7 @@ namespace KMHServerAddon.AdminCommands
                     System.Collections.Generic.List<Features.WantBoard.Dto.WantDto> all = Features.WantBoard.WantStore.AllForAdmin();
                     reply($"=== Wants ({all.Count}) ===");
                     foreach (Features.WantBoard.Dto.WantDto w in all)
-                        reply($"  #{w.Id} {w.QtyFilled}/{w.QtyWanted}x {w.ItemDefName} by {w.BuyerUsername} @ {Util.SilverFmt.Format(w.UnitPriceSilver)}/ea, " +
+                        reply($"  #{w.Id} {w.QtyFilled}/{w.QtyWanted}x {w.ItemDefName} by {w.BuyerUsername} @ {Features.WantBoard.WantStore.PriceText(w.EffectiveMilli)}/ea, " +
                               $"escrow {Util.SilverFmt.Format(w.EscrowRemaining)}, ends in {Remain(w.EndsUtcTicks)}");
                     if (all.Count > 0) reply("Cancel a stuck one with: kmh cancel want <id>");
                     break;
@@ -385,7 +548,8 @@ namespace KMHServerAddon.AdminCommands
                     reply($"=== Quests ({qs.Count} public) ===");
                     foreach (var q in qs)
                         reply($"  #{q.Id} [{q.Kind}/{q.State}] {q.Title} by {q.PosterUsername}, bounty {Util.SilverFmt.Format(q.BountySilver)}");
-                    reply("Cancel a stuck one with: kmh cancel quest <id>  (refunds the poster)");
+                    reply("Cancel a stuck one with: kmh cancel quest <id>  (refunds the poster, review included)");
+                    reply("Settle one awaiting review with: kmh quest approve|reject <id>");
                     break;
                 }
                 case "world":
@@ -406,52 +570,14 @@ namespace KMHServerAddon.AdminCommands
                         reply($"  #{l.Id} {l.RemainingQty}x {l.ItemDefName} by {l.SellerUsername} @ {Util.SilverFmt.Format(l.UnitPriceSilver)}/ea");
                     break;
                 }
+                // Shifted past the subsystem word, or `kmh inspect guild repair` never reaches repair or per-player detail.
                 case "sites":
-                {
-                    var sites = Features.Sites.SiteStore.AllForApi();
-                    string user = args != null && args.Length > 2 && string.Equals(args[1], "inspect", StringComparison.OrdinalIgnoreCase) ? args[2] : null;
-                    int n = sites?.Count ?? 0;
-                    reply(user == null ? $"=== Sites ({n}) ===  ('kmh sites inspect <user>' for one player's detail)" : $"=== Sites involving '{user}' ===");
-                    if (sites != null)
-                        foreach (var s in sites)
-                        {
-                            // Not IsOwnedBy: a guild site has no owner username, so the player's guild sites would be missed.
-                            bool manages = Features.Sites.SiteOwnership.CanManage(s, user);
-                            bool works = user != null && s.Workers != null && s.Workers.Contains(user, StringComparer.OrdinalIgnoreCase);
-                            if (user != null && !manages && !works) continue;
-                            reply($"  tile {s.Tile} {s.ItemDefName} x{s.BaseAmountPerCycle}/cycle by {Features.Sites.SiteOwnership.ControllerLabel(s)}");
-                            if (user == null || s.WorkerProgress == null) continue;
-                            foreach (var kv in s.WorkerProgress)
-                            {
-                                var wp = kv.Value; if (wp == null) continue;
-                                string st = wp.Legacy ? "LEGACY (disabled)" : wp.PawnLoadId <= 0 ? "MISSING PAWN DATA (not producing)"
-                                          : !string.IsNullOrEmpty(wp.BlockedReason) ? $"BLOCKED ({wp.BlockedReason})" : $"active (pawn '{wp.PawnName}')";
-                                reply($"    worker {kv.Key}: {st}");
-                            }
-                        }
+                    KmhSitesCommands.Run(ShiftArgs(args), reply);
                     break;
-                }
                 case "guilds":
                 case "guild":
-                {
-                    string sub = args != null && args.Length > 1 ? args[1].ToLowerInvariant() : "";
-                    if (sub == "repair")
-                    {
-                        int fixes = Features.Guilds.GuildStore.RepairMembership(out System.Collections.Generic.List<string> gnotes);
-                        reply(fixes == 0 ? "Guild membership is consistent - nothing to repair."
-                                         : $"Guild membership repaired: {fixes} entry(ies) reconciled.");
-                        foreach (string n in gnotes) reply($"  {n}");
-                    }
-                    else if (sub == "inspect")
-                    {
-                        string gname = args != null && args.Length > 2 ? string.Join(" ", args, 2, args.Length - 2) : "";
-                        if (Features.Guilds.GuildStore.InspectGuild(gname, out System.Collections.Generic.List<string> glines))
-                            foreach (string l in glines) reply(l);
-                        else reply(string.IsNullOrEmpty(gname) ? "Usage: kmh guild inspect <guild name>" : $"No guild named '{gname}'.");
-                    }
-                    else reply($"=== Guilds === {Features.Guilds.GuildStore.ListGuilds().Count} guild(s). 'kmh guild inspect <name>' shows detail; 'kmh guild repair' reconciles membership. Manage in-game (Guild Hall) or Discord.");
+                    KmhGuildCommands.Run(ShiftArgs(args), reply);
                     break;
-                }
                 case "treasury":
                     reply($"=== Treasury === house pool {Util.SilverFmt.Format(Features.Marketplace.MarketplaceStore.HousePoolBalance())}, " +
                           $"server reported wealth {Util.SilverFmt.Format(Features.PlayerStats.PlayerStatsStore.TotalReportedWealth())}.");
@@ -467,7 +593,7 @@ namespace KMHServerAddon.AdminCommands
 
         private static void CancelCmd(string[] args, Action<string> reply)
         {
-            string kind = args != null && args.Length > 1 ? args[1].ToLowerInvariant() : "";
+            string kind = LowerArg1(args);
             if (args == null || args.Length < 3 || !long.TryParse(args[2], out long id) || id <= 0)
             {
                 reply("Usage: kmh cancel <auction|want|quest|marketplace> <id>   (see ids via: kmh inspect <auctions|wants|quests|marketplace>)");
@@ -490,7 +616,20 @@ namespace KMHServerAddon.AdminCommands
             }
         }
 
+        private static void QuestSettleCmd(string[] args, string actorName, Action<string> reply)
+        {
+            string action = LowerArg1(args);
+            if (args == null || args.Length < 3 || !long.TryParse(args[2], out long id) || id <= 0
+                || (action != "approve" && action != "reject" && action != "refund"))
+            {
+                reply("Usage: kmh quest <approve|reject|refund> <id>   (ids via: kmh inspect quests)");
+                return;
+            }
+            reply(Features.Quests.QuestHandler.AdminSettle(id, action, string.IsNullOrEmpty(actorName) ? "console" : actorName));
+        }
+
         private static string Arg1(string[] a) => a != null && a.Length > 1 ? a[1] : "";
+        private static string LowerArg1(string[] a, string fallback = "") => a != null && a.Length > 1 ? a[1].ToLowerInvariant() : fallback;
         private static bool IsConfirm(string[] a)
         {
             if (a != null) foreach (string s in a) if (string.Equals(s, "confirm", StringComparison.OrdinalIgnoreCase)) return true;
@@ -499,7 +638,7 @@ namespace KMHServerAddon.AdminCommands
 
         private static void PurgeRouter(string[] args, Action<string> reply)
         {
-            switch (args != null && args.Length > 1 ? args[1].ToLowerInvariant() : "")
+            switch (LowerArg1(args))
             {
                 case "marketplace": KmhCleanupCommands.PurgeMarketplaceSeller(args, reply); break;
                 case "sites":       Maintenance.KmhPlayerCleanup.PurgeSites(args.Length > 3 ? args[3] : "", IsConfirm(args), reply); break;
@@ -523,7 +662,6 @@ namespace KMHServerAddon.AdminCommands
             int count = 25;
             if (args != null && args.Length > 1)
             {
-                // arg can be a count or a username; a username may be followed by a count.
                 if (int.TryParse(args[1], out int c1)) count = c1;
                 else { user = args[1]; if (args.Length > 2 && int.TryParse(args[2], out int c2)) count = c2; }
             }
@@ -536,7 +674,7 @@ namespace KMHServerAddon.AdminCommands
 
         private static void History(string[] args, Action<string> reply)
         {
-            string domain = args != null && args.Length > 1 ? args[1].ToLowerInvariant() : "";
+            string domain = LowerArg1(args);
             if (string.IsNullOrEmpty(domain) || !System.Linq.Enumerable.Contains(Persistence.KmhHistory.Domains, domain))
             {
                 reply($"Usage: kmh history <{string.Join("|", Persistence.KmhHistory.Domains)}> [contains] [count]");
@@ -566,7 +704,7 @@ namespace KMHServerAddon.AdminCommands
 
         private static void PolicyCmd(string[] args, Action<string> reply)
         {
-            string sub = args != null && args.Length > 1 ? args[1].ToLowerInvariant() : "";
+            string sub = LowerArg1(args);
 
             if (sub == "set")
             {
@@ -595,15 +733,21 @@ namespace KMHServerAddon.AdminCommands
 
         private static void MaintenanceCmd(string[] args, Action<string> reply)
         {
-            string sub = args != null && args.Length > 1 ? args[1].ToLowerInvariant() : "";
-            if (sub == "on")  { Maintenance.KmhMaintenanceGate.Enter(Maintenance.KmhMaintenanceReason.OwnerMaintenance); reply("Maintenance ON - deposits, purchases and other value moves are paused. Run 'kmh maintenance off' when done."); return; }
-            if (sub == "off") { Maintenance.KmhMaintenanceGate.Release(); reply($"Maintenance released ({Maintenance.KmhMaintenanceGate.Describe()})."); return; }
+            string sub = LowerArg1(args);
+            if (sub == "on")  { Maintenance.KmhMaintenanceGate.EnterOwner(); reply("Maintenance ON - deposits, purchases and other value moves are paused. Run 'kmh maintenance off' when done."); return; }
+            if (sub == "off")
+            {
+                reply(Maintenance.KmhMaintenanceGate.ReleaseOwner()
+                    ? $"Maintenance released ({Maintenance.KmhMaintenanceGate.Describe()})."
+                    : $"No 'maintenance on' to release ({Maintenance.KmhMaintenanceGate.Describe()}) - a reset, restore or backup holding it lets go when it finishes.");
+                return;
+            }
             reply(Maintenance.KmhMaintenanceGate.Describe());
         }
 
         private static void CatalogCmd(string[] args, Action<string> reply)
         {
-            string def = args != null && args.Length > 1 ? args[1] : "";
+            string def = Arg1(args);
             if (def.Length == 0) { reply("Usage: kmh catalog <def> [value|unpin]"); return; }
 
             if (args.Length >= 3)
@@ -636,7 +780,8 @@ namespace KMHServerAddon.AdminCommands
             }
         }
 
-        private static void Status(Action<string> reply)
+        // Players and public Discord get the counts; the host path and economy internals are for the operator.
+        internal static void Status(Action<string> reply, bool isAdmin)
         {
             DateTime boot   = Main_.BootstrapUtc;
             string   uptime = boot == DateTime.MinValue ? "(unknown)" : FormatDuration(DateTime.UtcNow - boot);
@@ -653,8 +798,8 @@ namespace KMHServerAddon.AdminCommands
 
             long housePool  = Features.Marketplace.MarketplaceStore.HousePoolBalance();
             long wealthIdx  = Features.PlayerStats.PlayerStatsStore.TotalReportedWealth();
-            bool dynPrice   = Features.Economy.EconomyConfig.Current.DynamicDemandPricingEnabled;
-            bool minting    = Features.World.WorldConfig.Current.AllowMintedRewards;
+            bool dynPrice   = Features.Economy.EconomyConfig.Current.Marketplace.DynamicDemandPricingEnabled;
+            bool minting    = Features.World.WorldConfig.Current.WorldQuests.Rewards.AllowMinted;
 
             reply($"=== {Constants.DisplayName} v{typeof(Main_).Assembly.GetName().Version} ===");
             reply($"Uptime:           {uptime}");
@@ -664,6 +809,11 @@ namespace KMHServerAddon.AdminCommands
             reply($"Quests:           {quests} public quest(s)");
             reply($"Guilds:           {guilds}");
             reply($"LinkedAccounts:   {links}");
+            if (!isAdmin)
+            {
+                reply($"Economy:          dynamic-pricing {(dynPrice ? "on" : "off")}, quest-minting {(minting ? "on" : "off")}");
+                return;
+            }
             reply($"Economy:          house pool {Util.SilverFmt.Format(housePool)}, server wealth {Util.SilverFmt.Format(wealthIdx)}, " +
                   $"dynamic-pricing {(dynPrice ? "on" : "off")}, quest-minting {(minting ? "on" : "off")}");
             reply($"Discord bridge:   {Features.Discord.DiscordBridge.DescribeStatus()}");
@@ -691,7 +841,7 @@ namespace KMHServerAddon.AdminCommands
         // The legacy `reload-<area>` forms route here too, so the two spellings can never diverge.
         private static void ReloadCmd(string[] args, string actorName, Action<string> reply)
         {
-            string area = args != null && args.Length > 1 ? args[1].ToLowerInvariant() : "";
+            string area = LowerArg1(args);
 
             // These three do more than drop a cached object; everything else comes from the KmhConfigReload table.
             switch (area)
@@ -707,11 +857,10 @@ namespace KMHServerAddon.AdminCommands
                     // One hello for the whole reload, not one per area - see CommsStartup.BeginBatch.
                     Features.Comms.CommsStartup.BeginBatch();
 
+                    // Features and Discord come from the table; listing them here too restarts the Discord bridge twice.
                     int n = 0;
                     foreach (KmhConfigReload.Entry e in KmhConfigReload.All())
                         if (e.Reload != null && KmhConfigReload.Run(e.Area, reply, out _)) n++;
-                    ReloadFeatures(reply);
-                    ReloadDiscord(actorName, reply);
                     KmhCleanupCommands.ReloadMarketplace(reply);
                     Features.Comms.CommsStartup.EndBatch();
 
@@ -727,7 +876,7 @@ namespace KMHServerAddon.AdminCommands
                         foreach (string c in changed) { reply("  " + c); ServerLog.Warn("reload all: " + c); }
                     }
 
-                    reply($"Reloaded {n + 3} area(s). Restart-only: {RestartOnlyList()}");
+                    reply($"Reloaded {n + 1} area(s). Restart-only: {RestartOnlyList()}");
                     return;
                 }
             }
@@ -736,28 +885,63 @@ namespace KMHServerAddon.AdminCommands
 
             if (!string.IsNullOrEmpty(area)) reply(why);
             reply("Usage: kmh reload <" + string.Join("|", KmhConfigReload.ReloadableAreas().ToArray())
-                  + "|features|discord|marketplace|all>");
+                  + "|marketplace|all>");
             reply("Restart-only: " + RestartOnlyList());
         }
 
-        // These gate themselves outside Features.json, so an owner would otherwise be told everything is on while one is off.
+        // These gate themselves outside Features.json; without this an owner is told everything is on while one is off.
         private static string SubsystemSuffix()
         {
             var off = new System.Collections.Generic.List<string>();
             try { if (!Features.Frontier.FrontierConfig.Current.Enabled) off.Add("Frontier"); } catch { }
-            try { if (!Features.Media.MediaConfig.Current.ServerMediaResolverEnabled) off.Add("media resolver"); } catch { }
+            try { if (!Features.Media.MediaConfig.Current.Images.ResolverEnabled) off.Add("media resolver"); } catch { }
             try { if (!Features.Chat.ChatConfig.Current.AllowImagePreviews) off.Add("chat image previews"); } catch { }
             try { if (!Features.Identity.StaffConfig.Current.ShowStaffBadges) off.Add("staff badges"); } catch { }
             return off.Count == 0 ? "" : "; subsystems OFF: " + string.Join(", ", off);
         }
 
-        // Built from the same table, so this line cannot claim something is restart-only when it is not.
+        // Needs 'confirm': it disconnects every player, and it sits one keystroke from `reload`.
+        private static void RestartCmd(string[] args, string actorName, Action<string> reply, bool fromConsole)
+        {
+            // The settings window's bar: an RWT admin moderates a session but may not restart somebody's server.
+            // Discord's console role keeps it, as RWT's own console commands already stop the server from there.
+            if (!fromConsole && !ConsoleExecutor.Remote && !OwnerWithSettingsAccess(actorName, reply, "Restarting")) return;
+
+            if (!IsConfirm(args))
+            {
+                reply($"'kmh restart confirm' restarts this server now - {Maintenance.KmhRestart.Describe()}.");
+                reply("  Every player is disconnected and reconnects on their own once it is back.");
+                reply($"  Settings waiting on a restart: {RestartOnlyList()}");
+                return;
+            }
+            Maintenance.KmhRestart.Request(actorName, reply);
+        }
+
+        // Both halves: the Owners list is a file, the grant is a console action meaning "I am at the machine".
+        internal static bool OwnerWithSettingsAccess(string actorName, Action<string> reply, string what)
+        {
+            if (!Features.Identity.StaffRegistry.IsOwner(actorName))
+            {
+                reply($"{what} is owner-only. '{actorName}' is not listed under Owners in Staff.json.");
+                return false;
+            }
+            if (!Features.Admin.ConfigEditorGrant.Allows(actorName, DateTimeOffset.UtcNow))
+            {
+                reply($"{what} needs settings access opened at the server console first: "
+                    + $"kmh config-editor allow {actorName}");
+                return false;
+            }
+            return true;
+        }
+
         private static string RestartOnlyList()
         {
             var parts = new System.Collections.Generic.List<string>();
             foreach (KmhConfigReload.Entry e in KmhConfigReload.All())
-                if (e.Reload == null && !string.IsNullOrEmpty(e.ExemptReason) && e.Area == "transport")
-                    parts.Add($"{e.Area} ({e.ExemptReason})");
+            {
+                if (!string.IsNullOrEmpty(e.RestartOnly)) parts.Add($"{e.Area} ({e.RestartOnly})");
+                else if (e.Reload == null) parts.Add($"{e.Area} (the whole area)");
+            }
             return parts.Count == 0 ? "nothing" : string.Join(", ", parts.ToArray());
         }
 
@@ -766,38 +950,30 @@ namespace KMHServerAddon.AdminCommands
             Features.Economy.EconomyConfig.Reload();
             Features.Sites.SitesConfig.Reload();   // site pricing reads economy values; keep the pair consistent
             var cfg = Features.Economy.EconomyConfig.Current;
-            reply($"Economy config reloaded: tax {cfg.MarketplaceTaxPercent}%, " +
-                  $"price {cfg.MarketplaceMinUnitPrice:0.###}-{cfg.MarketplaceMaxUnitPrice:0.###}, " +
-                  $"max {cfg.MarketplaceMaxOpenListingsPerUser} listings/user, lifetime {cfg.MarketplaceListingLifetimeHours}h.");
+            reply($"Economy config reloaded: tax {cfg.Marketplace.TaxPercent}%, " +
+                  $"price {cfg.Marketplace.MinUnitPrice:0.###}-{cfg.Marketplace.MaxUnitPrice:0.###}, " +
+                  $"max {cfg.Marketplace.MaxOpenListingsPerUser} listings/user, lifetime {cfg.Marketplace.ListingLifetimeHours}h.");
         }
 
         private static void ReloadWorld(Action<string> reply)
         {
             Features.World.WorldConfig.Reload();
             var cfg = Features.World.WorldConfig.Current;
-            reply($"World config reloaded: events {(cfg.EventsEnabled ? "on" : "off")}, " +
-                  $"auto-roll {(cfg.AutoRollEvents ? $"every {cfg.EventRollEveryMinutes}m" : "off")}, " +
-                  $"auto-quests {(cfg.AutoGenerateQuests ? $"every {cfg.QuestGenEveryMinutes}m" : "off")}.");
+            reply($"World config reloaded: events {(cfg.Events.Enabled ? "on" : "off")}, " +
+                  $"auto-roll {(cfg.Events.AutoRoll ? $"every {cfg.Events.RollEveryMinutes}m" : "off")}, " +
+                  $"auto-quests {(cfg.WorldQuests.AutoGen.Enabled ? $"every {cfg.WorldQuests.AutoGen.EveryMinutes}m" : "off")}.");
         }
 
         private static void ReloadFeatures(Action<string> reply)
         {
-            Features.FeaturesConfig.Reload();
+            Features.Comms.CommsStartup.ApplyFeatures(push: true);
             System.Collections.Generic.List<string> disabled = Features.FeaturesConfig.Current.DisabledList();
-
-            int refreshed = 0;
-            foreach (ServerClient c in Network.ServerClients.Keys)
-            {
-                if (c?.IsVerified != true) continue;
-                SubProtocol.KmhHandshakeHandler.SendHelloTo(c);
-                refreshed++;
-            }
 
             // Named as Features.json specifically, because it is only one set of gates and a plain "all enabled" would lie.
             string state = disabled.Count == 0
                 ? "all Features.json gates enabled" + SubsystemSuffix()
                 : "disabled: " + string.Join(", ", disabled) + SubsystemSuffix();
-            reply($"Features reloaded ({state}). Refreshed {refreshed} client(s).");
+            reply($"Features reloaded ({state}). Connected clients refreshed.");
             ServerLog.Info($"Features reloaded by admin ({state})");
         }
 
@@ -853,7 +1029,7 @@ namespace KMHServerAddon.AdminCommands
                 { reply("Usage: kmh worldquest deliver <id> <user> <qty>"); return; }
                 var dq = Features.World.WorldStore.FindQuest(did);
                 if (dq == null) { reply($"No quest #{did}."); return; }
-                // The entry point a client's delivery packet lands on, so payout and consequences cannot drift from a real one.
+                // The entry point a client's delivery uses, so payout and consequences match a real one.
                 Features.World.WorldEngine.ApplyDelivery(args[3], did, dq.TargetDefName, dqty);
                 ServerLog.Info($"kmh worldquest deliver #{did} {args[3]} x{dqty} by {actorName}");
                 var after = Features.World.WorldStore.FindQuest(did);
@@ -1038,6 +1214,8 @@ namespace KMHServerAddon.AdminCommands
 
         private static void ReloadDiscord(string actorName, Action<string> reply)
         {
+            if (!Features.Discord.DiscordBridge.TryClaimReload(out TimeSpan wait))
+            { reply($"The Discord bridge was just reloaded - try again in {Math.Max(1, (int)Math.Ceiling(wait.TotalSeconds))}s."); return; }
             ServerLog.Info($"kmh reload-discord requested by {actorName}");
             reply("Reloading Config/Discord/DiscordConfig.json and restarting the Discord bridge...");
             Features.Discord.DiscordBridge.Reload();
@@ -1083,66 +1261,63 @@ namespace KMHServerAddon.AdminCommands
             else reply($"Deposit failed for '{target}'. Check the username and server log.");
         }
 
-        // A solo guild's vault goes too, or it shelters the silver; a multi-member vault is left alone.
-        private static void TreasuryReset(string[] args, string actorName, Action<string> reply)
+        // One player goes through the journaled wipe-economy, since a vault cleared alone leaves escrow and payouts to recover.
+        private static void TreasuryReset(string[] args, string actorName, bool fromConsole, Action<string> reply)
         {
             string target = args != null && args.Length > 1 ? args[1].Trim() : "";
+            bool commit = IsConfirm(args);
             if (target.Length == 0)
             {
-                reply("Usage: kmh treasury-reset <user|all>. Clears personal treasury (+ solo guild vault). Backs up first.");
+                reply("Usage: kmh treasury-reset <user|all> <dry|confirm>. One player: the same as wipe-economy. "
+                    + "all: every personal vault and nothing else. Backs up first.");
+                return;
+            }
+            if (!string.Equals(target, "all", StringComparison.OrdinalIgnoreCase))
+            {
+                Maintenance.KmhPlayerCleanup.WipeEconomy(target, commit, reply);
                 return;
             }
 
+            const string scope = "guild vaults, listings, auctions, wants, escrow and owed payouts are untouched - 'kmh season reset' wipes all of it";
+            if (!commit)
+            {
+                reply($"dry-run: {Features.Treasury.TreasuryStore.PersonalVaultCount()} personal treasury vault(s) WOULD be cleared; {scope}. "
+                    + "Run 'kmh treasury-reset all confirm' to do it.");
+                return;
+            }
+            if (!OwnerOrConsole(actorName, fromConsole, "Clearing every treasury", reply)) return;
             if (!Persistence.KmhDataBackup.TryCreate("pre-treasury-reset", out string dir, out string err))
             {
                 reply($"Reset aborted - backup failed: {err}");
                 return;
             }
             string backup = System.IO.Path.GetFileName(dir);
-
-            if (string.Equals(target, "all", StringComparison.OrdinalIgnoreCase))
+            int n;
+            bool saved;
+            // Quiesced, or a deposit admitted a moment earlier lands in a vault after it was cleared.
+            using (Maintenance.KmhValueOps.Barrier gate = Maintenance.KmhValueOps.Quiesce(
+                       Maintenance.KmhMaintenanceReason.DataRepair, TimeSpan.FromSeconds(10), out string busy))
             {
-                int n = Features.Treasury.TreasuryStore.ResetAllPersonal();
-                ServerLog.Warn($"treasury-reset ALL by {actorName}: cleared {n} personal vault(s) (backup {backup})");
-                reply($"Backup {backup}. Reset {n} personal treasury vault(s); guild vaults untouched.");
-                foreach (ServerClient c in Network.ServerClients.Keys)
-                {
-                    if (c?.IsVerified != true) continue;
-                    string u = c.GetData<UserFile>()?.Username;
-                    if (!string.IsNullOrEmpty(u))
-                        SubProtocol.KmhRouter.SendTo(c, SubProtocol.KmhProtocol.Kind.TreasurySnapshot, Features.Treasury.TreasuryStore.GetSnapshotFor(u));
-                }
-                return;
+                if (gate == null) { reply($"Reset aborted - {busy}. Nothing was cleared (backup {backup})."); return; }
+                n = Features.Treasury.TreasuryStore.ResetAllPersonal();
+                saved = n == 0 || Features.Treasury.TreasuryStore.SaveToDisk();
             }
-
-            long   had       = Features.Treasury.TreasuryStore.ResetPersonal(target);
-            string soloGuild = Features.Guilds.GuildStore.SoloGuildOf(target);
-            long   guildHad  = soloGuild != null ? Features.Treasury.TreasuryStore.ClearGuildVault(soloGuild) : -1;
-            if (had < 0 && guildHad < 0) { reply($"No personal treasury found for '{target}'."); return; }
-            // Purge escrowed value too (marketplace/auction/want), which sits outside the treasury and would shelter it.
-            int purged = Features.Marketplace.MarketplaceStore.PurgeSeller(target);
-            var (aRemoved, aRetracted) = Features.Auctions.AuctionStore.PurgeUser(target);
-            purged += aRemoved + aRetracted + Features.WantBoard.WantStore.PurgeBuyer(target);
-            long personalCleared = had < 0 ? 0 : had;
-            string guildNote = (soloGuild != null && guildHad >= 0) ? $" + solo guild '{soloGuild}' ({Util.SilverFmt.Format(guildHad)})" : "";
-            string escrowNote = purged > 0 ? $" + {purged} escrow(s) purged" : "";
-            ServerLog.Warn($"treasury-reset for {target} by {actorName}: cleared personal {personalCleared}s{guildNote}{escrowNote} (backup {backup})");
-            reply($"Backup {backup}. Reset {target}'s personal treasury (held {Util.SilverFmt.Format(personalCleared)}){guildNote}{escrowNote}.");
-            ServerClient sc = SubProtocol.KmhRouter.ResolveClient(target);
-            if (sc != null)
-                SubProtocol.KmhRouter.SendTo(sc, SubProtocol.KmhProtocol.Kind.TreasurySnapshot, Features.Treasury.TreasuryStore.GetSnapshotFor(target));
-            if (purged > 0)
+            ServerLog.Warn($"treasury-reset ALL by {actorName}: cleared {n} personal vault(s) (backup {backup}){(saved ? "" : " - NOT written down")}");
+            reply($"Backup {backup}. Reset {n} personal treasury vault(s); {scope}."
+                + (saved ? "" : " WARNING: the treasury could not be written down - a restart brings the vaults back; fix the disk and run it again."));
+            foreach (ServerClient c in Network.ServerClients.Keys)
             {
-                Features.Marketplace.MarketplaceHandler.BroadcastSnapshot();
-                Features.Auctions.AuctionHandler.BroadcastSnapshot();
-                Features.WantBoard.WantHandler.BroadcastSnapshot();
+                if (c?.IsVerified != true) continue;
+                string u = c.GetData<UserFile>()?.Username;
+                if (!string.IsNullOrEmpty(u))
+                    SubProtocol.KmhRouter.SendTo(c, SubProtocol.KmhProtocol.Kind.TreasurySnapshot, Features.Treasury.TreasuryStore.GetSnapshotFor(u));
             }
         }
 
         private static void Enforce(string[] args, bool isAdmin, Action<string> reply)
         {
             Features.Enforcement.EnforcementConfig cfg = Features.Enforcement.EnforcementConfig.Current;
-            string sub = args != null && args.Length > 1 ? args[1].ToLowerInvariant() : "status";
+            string sub = LowerArg1(args, "status");
 
             switch (sub)
             {
@@ -1155,7 +1330,7 @@ namespace KMHServerAddon.AdminCommands
                     if (Features.Enforcement.EnforcementProfile.HasProfile)
                         reply($"Config enforcement ENABLED. Connected clients will pull the profile ({Features.Enforcement.EnforcementProfile.FileCount} file(s)) if they don't already have it.");
                     else
-                        reply("Config enforcement ENABLED (soft lock only - no profile to push). An admin should Publish their configs in-game (KMH tab -> Config Enforcement) for hard enforcement.");
+                        reply("Config enforcement ENABLED (soft lock only - no profile to push). An admin should Publish their configs in-game (Colony Nexus tab -> Config Enforcement) for hard enforcement.");
                     return;
 
                 case "off":
@@ -1180,7 +1355,7 @@ namespace KMHServerAddon.AdminCommands
                             reply("Connected clients will pull the updated profile.");
                         }
                     }
-                    else reply("No profile published yet - an admin should Publish their configs in-game (KMH tab -> Config Enforcement).");
+                    else reply("No profile published yet - an admin should Publish their configs in-game (Colony Nexus tab -> Config Enforcement).");
                     return;
 
                 case "safe":
@@ -1189,7 +1364,7 @@ namespace KMHServerAddon.AdminCommands
 
                 default: // status
                     reply($"Config enforcement: {(cfg.Enabled ? "ON" : "OFF")}  (admin bypass: {(cfg.AdminBypass ? "on" : "off")})");
-                    reply($"Profile: {(Features.Enforcement.EnforcementProfile.HasProfile ? $"{Features.Enforcement.EnforcementProfile.FileCount} file(s), hash {Features.Enforcement.EnforcementProfile.Hash}" : "(none) - an admin should Publish configs in-game (KMH tab -> Config Enforcement)")}");
+                    reply($"Profile: {(Features.Enforcement.EnforcementProfile.HasProfile ? $"{Features.Enforcement.EnforcementProfile.FileCount} file(s), hash {Features.Enforcement.EnforcementProfile.Hash}" : "(none) - an admin should Publish configs in-game (Colony Nexus tab -> Config Enforcement)")}");
                     string[] safe = cfg.SafeMods ?? System.Array.Empty<string>();
                     reply($"Safe mods ({safe.Length}): {(safe.Length == 0 ? "(none)" : string.Join(", ", safe))}");
                     reply("Use: enforce on|off|publish  ·  enforce safe add|remove|list <mod>");
@@ -1238,11 +1413,11 @@ namespace KMHServerAddon.AdminCommands
         internal static void Help(string[] args, Action<string> reply, bool isAdmin = true)
         {
             string entered = args != null && args.Length > 0 ? args[0].ToLowerInvariant() : "";
-            string topic   = args != null && args.Length > 1 ? args[1].ToLowerInvariant() : null;
+            string topic   = LowerArg1(args, null);
 
             if (entered != "help" && entered != "")
             {
-                reply($"Unknown KMH command: {entered}");
+                reply($"Unknown Colony Nexus command: {entered}");
                 reply("Try: kmh help");
                 return;
             }
@@ -1275,20 +1450,18 @@ namespace KMHServerAddon.AdminCommands
         public KmhServerConsoleCommand()
         {
             Prefix        = "kmh";
-            Description   = "KMH server admin. Type 'kmh help' for topics, 'kmh help <topic>' for a group's commands.";
+            Description   = "Colony Nexus server admin. Type 'kmh help' for topics, 'kmh help <topic>' for a group's commands.";
             IsChatCommand = false;
             ParameterCount = -1; // accept any number of args
         }
 
         public override void Action()
         {
-            try
-            {
-                KmhServerCommands.Dispatch(CommandParameters ?? Array.Empty<string>(),
-                    isAdmin: true, actorName: "console",
-                    line => Printer.Message($"[KMH] {line}"));
-            }
-            catch (Exception ex) { Printer.Error($"[KMH] kmh console command threw: {ex.Message}"); }
+            try { Invoke(CommandParameters ?? Array.Empty<string>(), line => Printer.Message($"[Colony Nexus] {line}")); }
+            catch (Exception ex) { Printer.Error($"[Colony Nexus] kmh console command threw: {ex.Message}"); }
         }
+
+        internal static void Invoke(string[] args, Action<string> reply)
+            => KmhServerCommands.Dispatch(args, isAdmin: true, actorName: "console", reply, fromConsole: !ConsoleExecutor.Remote);
     }
 }

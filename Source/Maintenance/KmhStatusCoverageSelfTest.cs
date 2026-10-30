@@ -22,6 +22,9 @@ namespace KMHServerAddon.Maintenance
             ["Wealth"]      = "ReportedWealth",
             ["Mail"]        = "MailMessages",
             ["Chat"]        = "ChatMessages",
+            ["GuildFederation"]   = "FederatedGuilds",
+            ["ConnectedTreasury"] = "ConnectedPending",
+            ["Reports"]           = "ReportsHeld",
         };
 
         public static List<(string Name, bool Ok, string Detail)> Run()
@@ -57,7 +60,6 @@ namespace KMHServerAddon.Maintenance
             results.Add(("Status coverage: mapped status fields all exist", deadFields.Count == 0,
                 deadFields.Count == 0 ? $"{ToggleToStatusField.Count} mapping(s) resolve" : "missing: " + string.Join(", ", deadFields)));
 
-            // And the reverse: a mapping for a toggle that was removed.
             var deadToggles = ToggleToStatusField.Keys.Where(k => !toggles.Contains(k)).ToList();
             results.Add(("Status coverage: no mapping for a removed toggle", deadToggles.Count == 0,
                 deadToggles.Count == 0 ? "all live" : "stale: " + string.Join(", ", deadToggles)));

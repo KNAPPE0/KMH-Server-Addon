@@ -37,7 +37,7 @@ namespace KMHServerAddon.Features.Recovery
             int held = HeldCount;
             if (held > 0) Diagnostics.ServerLog.Warn($"Recovery: loaded {held} held item/silver record(s) awaiting admin triage ('kmh recover list').");
 
-            // Deliberately NOT re-held: only a human can settle whether it arrived, and re-delivering turns one outage into duplicated value.
+            // Deliberately NOT re-held: only a human can settle whether it arrived; re-delivering could duplicate value.
             List<RecoveryRecord> interrupted = new List<RecoveryRecord>();
             lock (_lock)
                 foreach (RecoveryRecord r in _records)
@@ -51,10 +51,11 @@ namespace KMHServerAddon.Features.Recovery
         public static bool SaveToDisk()
         {
             PersistedState s = new PersistedState();
-            lock (_lock) { s.NextId = _nextId; s.Records = new List<RecoveryRecord>(_records); }
-            bool ok = JsonFileStore.Save(KmhDataPaths.RecoveryFile, s);
-            // One successful write persists every record, so nothing is memory-only any more.
-            if (ok) lock (_lock) _memoryOnly.Clear();
+            long seq;
+            lock (_lock) { s.NextId = _nextId; s.Records = KmhDeepCopy.OfList(_records); seq = JsonFileStore.NextSequence(); }
+            bool ok = JsonFileStore.Save(KmhDataPaths.RecoveryFile, s, seq);
+            // Only what this snapshot held is on disk now; a hold added after it is still memory-only.
+            if (ok) lock (_lock) foreach (RecoveryRecord r in s.Records) _memoryOnly.Remove(r.Id);
             return ok;
         }
 
@@ -79,6 +80,43 @@ namespace KMHServerAddon.Features.Recovery
             return r.Id;
         }
 
+        // Past this a player's holds are refused: each is a real value claim an admin has to settle by hand.
+        internal const int MaxHeldPerUser = 50;
+
+        public static int HeldCountFor(string user)
+        {
+            if (string.IsNullOrEmpty(user)) return 0;
+            int n = 0;
+            lock (_lock)
+                foreach (RecoveryRecord r in _records)
+                    if (RecoveryPrune.IsHeld(r) && string.Equals(r.User, user, StringComparison.OrdinalIgnoreCase)) n++;
+            return n;
+        }
+
+        // One deposit's stacks, written with one save rather than one per stack.
+        public static int HoldItems(string user, List<Items.KmhThingPayload> payloads, string source, string reason)
+        {
+            var made = new List<RecoveryRecord>();
+            foreach (Items.KmhThingPayload p in payloads ?? new List<Items.KmhThingPayload>())
+            {
+                if (p == null) continue;
+                RecoveryRecord r = NewRecord(user, source, reason);
+                r.Kind = "item"; r.Payload = p;
+                made.Add(r);
+            }
+            if (made.Count == 0) return 0;
+            if (!SaveToDisk())
+            {
+                lock (_lock) foreach (RecoveryRecord r in made) _memoryOnly.Add(r.Id);
+                Diagnostics.ServerLog.Error($"Recovery: {made.Count} item hold(s) for '{user}' ({source}: {reason}) are NOT ON DISK - "
+                                          + "KMH-Data could not be written; fix free space and permissions now.");
+            }
+            else
+                foreach (RecoveryRecord r in made)
+                    Diagnostics.ServerLog.Warn($"Recovery #{r.Id}: item held: {Items.KmhItemSafety.DescribeStateForLedger(r.Payload)} for '{user}' ({source}: {reason})");
+            return made.Count;
+        }
+
         public static long HoldSilver(string user, long amount, string source, string reason)
         {
             if (amount <= 0) return 0;
@@ -88,6 +126,16 @@ namespace KMHServerAddon.Features.Recovery
             return r.Id;
         }
 
+        // Keyed on source: a settlement replayed after a crash finds its hold (held or already resolved) and adds none.
+        public static long HoldSilverOnce(string user, long amount, string source, string reason)
+        {
+            if (amount <= 0 || string.IsNullOrEmpty(source)) return 0;
+            lock (_lock)
+                foreach (RecoveryRecord r in _records)
+                    if (r.Kind == "silver" && string.Equals(r.Source, source, StringComparison.Ordinal)) return r.Id;
+            return HoldSilver(user, amount, source, reason);
+        }
+
         private static RecoveryRecord NewRecord(string user, string source, string reason)
         {
             RecoveryRecord r = new RecoveryRecord { User = user ?? "", Source = source ?? "", Reason = reason ?? "", UtcTicks = DateTime.UtcNow.Ticks };
@@ -95,7 +143,7 @@ namespace KMHServerAddon.Features.Recovery
             return r;
         }
 
-        // Holds whose write failed, so a durable hold is distinguishable from one a restart would lose; cleared by any later successful save.
+        // Holds whose write failed, so they are not reported as durable; cleared by any later successful save.
         private static readonly HashSet<long> _memoryOnly = new HashSet<long>();
 
         public static int MemoryOnlyHoldCount { get { lock (_lock) return _memoryOnly.Count; } }
@@ -186,7 +234,7 @@ namespace KMHServerAddon.Features.Recovery
             return ok;
         }
 
-        // The claim reaches disk BEFORE the value moves: an in-memory mark stops concurrent triage but not a restart, which delivered twice.
+        // The claim reaches disk BEFORE the value moves: an in-memory mark stops concurrent triage but not a restart.
         private static RecoveryRecord ClaimHeld(long id)
         {
             lock (_lock)

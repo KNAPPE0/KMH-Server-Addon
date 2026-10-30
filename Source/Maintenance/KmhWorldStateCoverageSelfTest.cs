@@ -71,7 +71,10 @@ namespace KMHServerAddon.Maintenance
                          ("KMHServerAddon.Features.Roadworks.RoadworksHandler", "BroadcastSnapshot"),
                      })
             {
+                // One hop deep: the entry may hand off to a private batching sender; the rule is where the send goes.
                 List<string> calls = CallsMadeBy(type, method);
+                foreach (string callee in new List<string>(calls))
+                    if (callee.EndsWith("Now", StringComparison.Ordinal)) calls.AddRange(CallsMadeBy(type, callee));
                 bool reachesEveryone = calls.Contains("BroadcastToVerified");
                 r.Add(($"World state: {type.Split('.').Last()}.{method} reaches every verified client",
                        reachesEveryone,
@@ -81,27 +84,6 @@ namespace KMHServerAddon.Maintenance
         }
 
         private static List<string> CallsMadeBy(string typeName, string methodName)
-        {
-            var names = new List<string>();
-            Type t = typeof(KmhDataPaths).Assembly.GetType(typeName);
-            MethodInfo m = t?.GetMethod(methodName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-            byte[] il = m?.GetMethodBody()?.GetILAsByteArray();
-            if (il == null) return names;
-
-            Module mod = m.Module;
-            for (int i = 0; i + 4 < il.Length; i++)
-            {
-                if (il[i] != 0x28 && il[i] != 0x6F) continue;
-                int tok = il[i + 1] | (il[i + 2] << 8) | (il[i + 3] << 16) | (il[i + 4] << 24);
-                try
-                {
-                    MethodBase called = mod.ResolveMethod(tok);
-                    if (called != null && called.Name.StartsWith("Broadcast", StringComparison.Ordinal))
-                        names.Add(called.Name);
-                }
-                catch { /* an operand byte that happened to look like a call token */ }
-            }
-            return names;
-        }
+            => KmhIlReader.CallsMadeBy(typeName, methodName, "Broadcast");
     }
 }

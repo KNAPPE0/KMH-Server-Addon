@@ -1,17 +1,14 @@
 ﻿using System;
-using System.Linq;
-using Discord;
 using KMH.Sdk.Server.Events;
 using KMHServerAddon.Diagnostics;
 using KMHServerAddon.Extensibility;
 using KMHServerAddon.Features.ItemLabels;
 using KMHServerAddon.Features.Sites;
 using KMHServerAddon.Features.Sites.Dto;
-using KMHServerAddon.Util;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // Subscribes to the event bus, so no feature has to know Discord exists.
+    // Fed by the event bus, so no feature has to know Discord exists; each event is one activity-log line, never a post.
     internal static class DiscordEventPublisher
     {
         private static bool _started;
@@ -28,7 +25,7 @@ namespace KMHServerAddon.Features.Discord
             bus.SiteChanged     += OnSiteChanged;
             bus.QuestApproved   += OnQuestApproved;
             bus.GuildChanged    += OnGuildChanged;
-            ServerLog.Info("Discord: event publisher subscribed to the KMH event bus");
+            ServerLog.Diag("Discord: event publisher subscribed to the Colony Nexus event bus");
         }
 
         // Guarded because Ready re-fires on every reconnect, which would announce the server online again.
@@ -41,10 +38,7 @@ namespace KMHServerAddon.Features.Discord
             if (ch == 0) { _announcedStart = true; return; }
 
             _announcedStart = true;
-            string name = string.IsNullOrEmpty(cfg.Branding?.DisplayName) ? "The server" : cfg.Branding.DisplayName;
-            DiscordBridge.PostEmbedToChannel(ch,
-                KmhEmbedBuilder.Base(cfg, "🟢 Server online", $"**{name}** is up and accepting connections."),
-                DiscordIcons.Logo);
+            DiscordBridge.PostToChannel(ch, $"🟢 **{DiscordText.SafeName(KmhEmbedBuilder.ServerName(cfg))}** is up and accepting connections.");
         }
 
         private static void OnMarketplacePost(MarketplacePostEvent e)
@@ -55,16 +49,10 @@ namespace KMHServerAddon.Features.Discord
                 if (!MarketEventsOn(cfg)) return;
                 // A guild-only listing must not leak into a channel the whole server can read.
                 if (!string.Equals(e.Visibility, "public", StringComparison.OrdinalIgnoreCase)) return;
-                ulong ch = cfg.MarketplaceChannelId;
-                if (ch == 0) return;
-
-                EmbedBuilder eb = KmhEmbedBuilder.Base(cfg, "🛒 New listing")
-                    .AddField("Item",   $"{e.Qty}× {DiscordText.Escape(ItemLabelCache.LabelFor(e.ItemDefName))}", true)
-                    .AddField("Price",  $"{SilverFmt.Format(e.UnitPriceSilver)}/ea", true)
-                    .AddField("Seller", Name(e.SellerUsername), true);
-                DiscordBridge.PostEmbedToChannel(ch, eb, DiscordIcons.Marketplace);
+                DiscordActivityLog.Add(cfg.MarketplaceChannelId, DiscordActivityLog.Listed(DateTime.UtcNow, e.SellerUsername, e.Qty,
+                                       ItemLabelCache.LabelFor(e.ItemDefName), e.UnitPriceSilver));
             }
-            catch (Exception ex) { ServerLog.Verbose($"Discord: marketplace-post embed failed: {ex.Message}"); }
+            catch (Exception ex) { ServerLog.Verbose($"Discord: marketplace-post line failed: {ex.Message}"); }
         }
 
         private static void OnMarketplaceBuy(MarketplaceBuyEvent e)
@@ -73,16 +61,10 @@ namespace KMHServerAddon.Features.Discord
             {
                 DiscordConfig cfg = DiscordBridge.Config;
                 if (!MarketEventsOn(cfg)) return;
-                ulong ch = cfg.MarketplaceChannelId;
-                if (ch == 0) return;
-
-                EmbedBuilder eb = KmhEmbedBuilder.Base(cfg, "🪙 Item sold")
-                    .AddField("Item",  $"{e.QtyBought}× {DiscordText.Escape(ItemLabelCache.LabelFor(e.ItemDefName))}", true)
-                    .AddField("Total", SilverFmt.Format(e.TotalSilverPaid), true)
-                    .AddField("Buyer → Seller", $"{Name(e.BuyerUsername)} → {Name(e.SellerUsername)}", true);
-                DiscordBridge.PostEmbedToChannel(ch, eb, DiscordIcons.Marketplace);
+                DiscordActivityLog.Add(cfg.MarketplaceChannelId, DiscordActivityLog.Bought(DateTime.UtcNow, e.BuyerUsername, e.QtyBought,
+                                       ItemLabelCache.LabelFor(e.ItemDefName), e.TotalSilverPaid, e.SellerUsername));
             }
-            catch (Exception ex) { ServerLog.Verbose($"Discord: marketplace-buy embed failed: {ex.Message}"); }
+            catch (Exception ex) { ServerLog.Verbose($"Discord: marketplace-buy line failed: {ex.Message}"); }
         }
 
         private static void OnSiteChanged(SiteChangedEvent e)
@@ -97,28 +79,26 @@ namespace KMHServerAddon.Features.Discord
 
                 if (e.Reason == "removed")
                 {
-                    DiscordBridge.PostEmbedToChannel(ch, KmhEmbedBuilder.Base(cfg, "🏚️ Site removed",
-                        $"A site on tile **{e.Tile}** (owner **{Name(e.OwnerUsername)}**) was removed."),
-                        DiscordIcons.SiteDestroyed);
+                    DiscordActivityLog.Add(ch, DiscordActivityLog.Removed(DateTime.UtcNow, e.OwnerUsername, e.Tile));
                     return;
                 }
 
                 // The unfiltered lookup, since a visibility-scoped one hides a guild site from an empty caller.
-                string produces = "";
+                string owner = e.OwnerUsername, what = "a site";
                 try
                 {
                     SiteEntry s = SiteStore.GetForApi(e.Tile);
-                    if (s != null) produces = $"{s.BaseAmountPerCycle}× {DiscordText.Escape(ItemLabelCache.LabelFor(s.ItemDefName))}";
+                    if (s != null)
+                    {
+                        string controller = SiteOwnership.ControllerLabel(s);
+                        if (!string.IsNullOrWhiteSpace(controller)) owner = controller;
+                        what = DiscordActivityLog.SiteWhat(s.SiteName, ItemLabelCache.LabelFor(s.ItemDefName), s.BaseAmountPerCycle);
+                    }
                 }
-                catch { /* lookup is decoration only */ }
-
-                EmbedBuilder eb = KmhEmbedBuilder.Base(cfg, "🏗️ New site built")
-                    .AddField("Owner", Name(e.OwnerUsername), true)
-                    .AddField("Tile",  e.Tile.ToString(), true);
-                if (!string.IsNullOrEmpty(produces)) eb.AddField("Produces", produces, true);
-                DiscordBridge.PostEmbedToChannel(ch, eb, DiscordIcons.SiteCreated);
+                catch { /* the lookup is decoration only */ }
+                DiscordActivityLog.Add(ch, DiscordActivityLog.Built(DateTime.UtcNow, owner, what));
             }
-            catch (Exception ex) { ServerLog.Verbose($"Discord: site embed failed: {ex.Message}"); }
+            catch (Exception ex) { ServerLog.Verbose($"Discord: site line failed: {ex.Message}"); }
         }
 
         private static void OnQuestApproved(QuestApprovedEvent e)
@@ -127,15 +107,10 @@ namespace KMHServerAddon.Features.Discord
             {
                 DiscordConfig cfg = DiscordBridge.Config;
                 if (!ServerEventsOn(cfg)) return;
-                ulong ch = cfg.AnnouncementsChannelId;
-                if (ch == 0) return;
-
-                EmbedBuilder eb = KmhEmbedBuilder.Base(cfg, "✅ Quest completed",
-                        $"**{Name(e.ClaimerUsername)}** completed a quest for **{Name(e.PosterUsername)}**.")
-                    .AddField("Bounty", SilverFmt.Format(e.BountyPaidSilver), true);
-                DiscordBridge.PostEmbedToChannel(ch, eb, DiscordIcons.Quest);
+                DiscordActivityLog.Add(cfg.AnnouncementsChannelId,
+                    DiscordActivityLog.QuestDone(DateTime.UtcNow, e.ClaimerUsername, e.PosterUsername, e.BountyPaidSilver));
             }
-            catch (Exception ex) { ServerLog.Verbose($"Discord: quest embed failed: {ex.Message}"); }
+            catch (Exception ex) { ServerLog.Verbose($"Discord: quest line failed: {ex.Message}"); }
         }
 
         private static void OnGuildChanged(GuildChangedEvent e)
@@ -145,14 +120,9 @@ namespace KMHServerAddon.Features.Discord
                 if (e.Reason != "created") return;
                 DiscordConfig cfg = DiscordBridge.Config;
                 if (!ServerEventsOn(cfg)) return;
-                ulong ch = cfg.AnnouncementsChannelId;
-                if (ch == 0) return;
-
-                DiscordBridge.PostEmbedToChannel(ch, KmhEmbedBuilder.Base(cfg, "🏰 New guild",
-                    $"**{Name(e.Actor)}** founded the guild **{Name(e.GuildName)}**."),
-                    DiscordIcons.Guild);
+                DiscordActivityLog.Add(cfg.AnnouncementsChannelId, DiscordActivityLog.GuildFounded(DateTime.UtcNow, e.Actor, e.GuildName));
             }
-            catch (Exception ex) { ServerLog.Verbose($"Discord: guild embed failed: {ex.Message}"); }
+            catch (Exception ex) { ServerLog.Verbose($"Discord: guild line failed: {ex.Message}"); }
         }
 
         private static bool MarketEventsOn(DiscordConfig cfg)
@@ -160,8 +130,5 @@ namespace KMHServerAddon.Features.Discord
 
         private static bool ServerEventsOn(DiscordConfig cfg)
             => cfg != null && cfg.IsEnabled && cfg.PostServerEvents;
-
-        // Escaped because these names land in markdown-rendered embed text.
-        private static string Name(string s) => DiscordText.Escape(string.IsNullOrEmpty(s) ? "?" : s);
     }
 }

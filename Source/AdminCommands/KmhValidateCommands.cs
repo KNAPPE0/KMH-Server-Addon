@@ -36,10 +36,20 @@ namespace KMHServerAddon.AdminCommands
             Features.Economy.EconomyConfig ec = Features.Economy.EconomyConfig.Current;
             if (string.Equals(ec.EconomyMode ?? "Standard", "Standard", StringComparison.OrdinalIgnoreCase))
                 reply("  [REVIEW] EconomyMode=Standard - remote off-map wealth; Balanced/Localized/Hardcore are safer for public servers.");
-            bool restrictive = !string.Equals(ec.PersonalTreasuryAccessMode, "Remote", StringComparison.OrdinalIgnoreCase)
-                            || !string.Equals(ec.GuildTreasuryAccessMode, "Remote", StringComparison.OrdinalIgnoreCase);
+            // Configured and effective side by side: reporting only one is what makes a config look ignored.
+            Features.Economy.EconomyPolicy pol = ec.ResolvePolicy();
+            bool restrictive = !string.Equals(pol.PersonalAccess, "Remote", StringComparison.OrdinalIgnoreCase)
+                            || !string.Equals(pol.GuildAccess, "Remote", StringComparison.OrdinalIgnoreCase);
             if (restrictive)
-                reply($"  [INFO] Treasury access personal={ec.PersonalTreasuryAccessMode}, guild={ec.GuildTreasuryAccessMode}. Passive income (site rewards, marketplace/auction/want payouts) still accrues into the vault; players withdraw once they meet the access rule (Disabled = accrues but not withdrawable until re-enabled).");
+                reply($"  [INFO] Treasury access (effective) personal={pol.PersonalAccess}, guild={pol.GuildAccess}. Passive income (site rewards, marketplace/auction/want payouts) still accrues into the vault; players withdraw once they meet the access rule (Disabled = accrues but not withdrawable until re-enabled).");
+
+            bool personalDiffers = !string.Equals(ec.Custom.PersonalAccess, pol.PersonalAccess, StringComparison.OrdinalIgnoreCase);
+            bool guildDiffers    = !string.Equals(ec.Custom.GuildAccess, pol.GuildAccess, StringComparison.OrdinalIgnoreCase);
+            if (personalDiffers || guildDiffers)
+                reply($"  [INFO] EconomyMode={pol.Mode} decides access, so the Custom block is not in force: "
+                    + $"Custom.PersonalAccess={ec.Custom.PersonalAccess}, Custom.GuildAccess={ec.Custom.GuildAccess}. "
+                    + "Set EconomyMode=Custom to use them, or DisablePersonalTreasury/DisableGuildTreasury to "
+                    + "switch a treasury off in any mode.");
         }
 
         private static void Catalog(Action<string> reply)
@@ -120,12 +130,7 @@ namespace KMHServerAddon.AdminCommands
             foreach (Features.PlayerStats.Dto.ColonistEntry c in all)
             {
                 if (c == null) continue;
-                int[] sk = { c.SkShooting, c.SkMelee, c.SkMedicine, c.SkCrafting, c.SkConstruction };
-                int over20 = 0, at20 = 0;
-                foreach (int s in sk) { if (s > 20) over20++; if (s >= 20) at20++; }
-                string reason = over20 > 0                 ? $"{over20} tracked skill(s) above the vanilla cap of 20"
-                              : (at20 >= 4 && c.Days < 60) ? $"{at20}/5 tracked skills maxed after only {c.Days} day(s)"
-                              : null;
+                string reason = SkillReviewReason(c);
                 if (reason == null) continue;
                 flagged++;
                 reply($"  [REVIEW] {c.Owner}/{c.Colony}: '{c.Name}' - {reason}.");
@@ -133,6 +138,16 @@ namespace KMHServerAddon.AdminCommands
             reply(flagged == 0
                 ? $"  {all.Count} colonist(s) across all colonies look normal."
                 : $"  {flagged} of {all.Count} colonist(s) flagged for review only (display-only data, never auto-punished or deleted).");
+        }
+
+        internal static string SkillReviewReason(Features.PlayerStats.Dto.ColonistEntry c)
+        {
+            int[] sk = { c.SkShooting, c.SkMelee, c.SkMedicine, c.SkCrafting, c.SkConstruction };
+            int over20 = 0, at20 = 0;
+            foreach (int s in sk) { if (s > 20) over20++; if (s >= 20) at20++; }
+            return over20 > 0                 ? $"{over20} tracked skill(s) above the vanilla cap of 20"
+                 : (at20 >= 4 && c.Days < 60) ? $"{at20}/5 tracked skills maxed after only {c.Days} day(s)"
+                 : null;
         }
     }
 }

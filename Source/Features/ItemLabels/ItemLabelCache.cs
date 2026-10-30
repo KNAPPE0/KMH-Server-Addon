@@ -23,7 +23,16 @@ namespace KMHServerAddon.Features.ItemLabels
         // Used only to consolidate legacy payloads that predate the per-payload mergeable flag.
         private static HashSet<string> _fungible = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        // Saved only when something was new, or an identical re-push on every reconnect would rewrite the file.
+        // A real modpack is a few tens of thousands of defs with short names; anything past that is not a catalog.
+        internal const int MaxEntries = 60_000;
+        internal const int MaxKeyLength = Util.KmhSafe.MaxDefLength;
+
+        internal static bool Acceptable(string key, string value) => Util.KmhSafe.CatalogEntryFits(key, value);
+
+        internal static int LabelCountForTest { get { lock (_lock) return _labels.Count; } }
+
+        // First-seen wins, like values: site rules and Discord listings read these, so a later push cannot rename
+        // a def. Saved only when something was new, or a re-push on every reconnect would rewrite the file.
         public static void Apply(Dictionary<string, string> incoming)
         {
             if (incoming == null || incoming.Count == 0) return;
@@ -32,13 +41,11 @@ namespace KMHServerAddon.Features.ItemLabels
             {
                 foreach (KeyValuePair<string, string> kv in incoming)
                 {
-                    if (string.IsNullOrEmpty(kv.Key) || string.IsNullOrEmpty(kv.Value)) continue;
-                    if (!_labels.TryGetValue(kv.Key, out string existing)
-                        || !string.Equals(existing, kv.Value, StringComparison.Ordinal))
-                    {
-                        _labels[kv.Key] = kv.Value;
-                        added++;
-                    }
+                    if (!Acceptable(kv.Key, kv.Value)) continue;
+                    if (_labels.ContainsKey(kv.Key)) continue;
+                    if (_labels.Count >= MaxEntries) break;
+                    _labels[kv.Key] = kv.Value;
+                    added++;
                 }
             }
             if (added > 0)
@@ -48,7 +55,6 @@ namespace KMHServerAddon.Features.ItemLabels
             }
         }
 
-        // Merge an incoming defName -> base market value set. Last-writer-wins; saves only when something changed.
         public static void ApplyValues(Dictionary<string, long> incoming)
         {
             if (incoming == null || incoming.Count == 0) return;
@@ -57,11 +63,12 @@ namespace KMHServerAddon.Features.ItemLabels
             {
                 foreach (KeyValuePair<string, long> kv in incoming)
                 {
-                    if (string.IsNullOrEmpty(kv.Key) || kv.Value <= 0) continue;
-                    if (_ownerPinned.Contains(kv.Key)) continue;   // owner set this by hand - client can't change it
+                    if (!Acceptable(kv.Key, "v") || kv.Value <= 0) continue;
+                    if (_ownerPinned.Contains(kv.Key)) continue;
                     if (!_values.TryGetValue(kv.Key, out long existing))
                     {
-                        _values[kv.Key] = kv.Value;   // first-seen wins - this becomes the trusted baseline
+                        if (_values.Count >= MaxEntries) continue;
+                        _values[kv.Key] = kv.Value;
                         added++;
                     }
                     else if (existing != kv.Value)
@@ -90,12 +97,11 @@ namespace KMHServerAddon.Features.ItemLabels
             lock (_lock)
             {
                 if (value > 0) { _values[defName] = value; _ownerPinned.Add(defName); }
-                else           { _ownerPinned.Remove(defName); }   // unpin; keep whatever value is there
+                else           { _ownerPinned.Remove(defName); }
             }
             SaveToDisk();
         }
 
-        // (value, pinned) for owner inspection; value 0 means unknown.
         public static (long value, bool pinned) ValueInfo(string defName)
         {
             if (string.IsNullOrEmpty(defName)) return (0, false);
@@ -110,12 +116,11 @@ namespace KMHServerAddon.Features.ItemLabels
             int added = 0;
             lock (_lock)
                 foreach (string d in defNames)
-                    if (!string.IsNullOrEmpty(d) && _fungible.Add(d)) added++;
+                    if (Acceptable(d, "f") && _fungible.Count < MaxEntries && _fungible.Add(d)) added++;
             if (added > 0) SaveToDisk();
             return added > 0;
         }
 
-        // True when a client has vouched this def (bare or composed key) as a plain stackable food/resource.
         public static bool IsFungibleDef(string defName)
         {
             if (string.IsNullOrEmpty(defName)) return false;
@@ -123,7 +128,6 @@ namespace KMHServerAddon.Features.ItemLabels
             lock (_lock) return _fungible.Contains(defName);
         }
 
-        // RimWorld base market value for a defName (bare or composed key), or 0 when no client has reported it yet.
         public static long BaseValue(string defName)
         {
             if (string.IsNullOrEmpty(defName)) return 0;
@@ -137,7 +141,6 @@ namespace KMHServerAddon.Features.ItemLabels
         public static string LabelFor(string defName)
         {
             if (string.IsNullOrEmpty(defName)) return "?";
-            // composed treasury keys (def|stuff|quality) resolve to a full label
             if (defName.IndexOf(Util.ItemKey.Sep) >= 0)
             {
                 Util.ItemKey.Split(defName, out string d, out string st, out int q);
@@ -149,7 +152,6 @@ namespace KMHServerAddon.Features.ItemLabels
             }
         }
 
-        // "Excellent plasteel longsword" from listing-style parts
         public static string LabelFor(string defName, string stuffDefName, int qualityIndex)
         {
             string baseLabel = LabelFor(defName);
@@ -181,16 +183,13 @@ namespace KMHServerAddon.Features.ItemLabels
                     string defName = kv.Key;
                     string label   = kv.Value;
 
-                    // Priority 1: exact label match (case-insensitive).
                     if (string.Equals(label, q, StringComparison.OrdinalIgnoreCase))
                     {
                         if (exactLabel == null) exactLabel = new List<string>();
                         exactLabel.Add(defName);
-                        continue; // an exact label hit doesn't also need
-                                  // bucketing as a substring hit
+                        continue;
                     }
 
-                    // Priority 2: exact defName match (set the flag once).
                     if (exactDef == null
                         && string.Equals(defName, q, StringComparison.OrdinalIgnoreCase))
                     {
@@ -245,7 +244,6 @@ namespace KMHServerAddon.Features.ItemLabels
             get { lock (_lock) { return _labels.Count; } }
         }
 
-        // Every known (defName, label, value) - used to build the server-authoritative site output catalog.
         public static List<(string DefName, string Label, long Value)> AllForCatalog()
         {
             List<(string, string, long)> result = new List<(string, string, long)>();
@@ -260,7 +258,6 @@ namespace KMHServerAddon.Features.ItemLabels
             return result;
         }
 
-        // Random deliver-quest target: value in [min,max], sane def; null until the catalog has candidates.
         public static (string defName, string label, long value)? RandomDeliverable(long minValue, long maxValue, Random rng)
         {
             List<(string, string, long)> pool = new List<(string, string, long)>();
@@ -306,7 +303,6 @@ namespace KMHServerAddon.Features.ItemLabels
             return result;
         }
 
-
         public static void LoadFromDisk()
         {
             if (JsonFileStore.TryLoad(KmhDataPaths.ItemLabelsFile, out PersistedState state) && state?.Labels != null)
@@ -321,21 +317,23 @@ namespace KMHServerAddon.Features.ItemLabels
                     if (state.Pinned != null)
                         _ownerPinned = new HashSet<string>(state.Pinned, StringComparer.OrdinalIgnoreCase);
                 }
-                ServerLog.Info($"ItemLabels: loaded {state.Labels.Count} label(s), {state.Values?.Count ?? 0} value(s) from disk");
+                ServerLog.Diag($"ItemLabels: loaded {state.Labels.Count} label(s), {state.Values?.Count ?? 0} value(s) from disk");
             }
         }
 
         public static void SaveToDisk()
         {
             PersistedState state = new PersistedState();
+            long seq;
             lock (_lock)
             {
                 state.Labels = new Dictionary<string, string>(_labels, StringComparer.OrdinalIgnoreCase);
                 state.Values = new Dictionary<string, long>(_values, StringComparer.OrdinalIgnoreCase);
                 state.Fungible = new List<string>(_fungible);
                 state.Pinned = new List<string>(_ownerPinned);
+                seq = JsonFileStore.NextSequence();
             }
-            JsonFileStore.Save(KmhDataPaths.ItemLabelsFile, state);
+            JsonFileStore.Save(KmhDataPaths.ItemLabelsFile, state, seq);
         }
 
         private class PersistedState

@@ -3,7 +3,7 @@ using KMHServerAddon.Diagnostics;
 
 namespace KMHServerAddon.Transactions
 {
-    // The row naming the instances is written after the take, so at boot the row decides ownership - never a guess about where the crash landed.
+    // The row naming the instances is written after the take, so at boot the row decides ownership, never a guess.
     internal static class KmhPayloadTakeRecovery
     {
         public static void RecoverOnBoot()
@@ -13,7 +13,10 @@ namespace KMHServerAddon.Transactions
 
             var named = new HashSet<string>(System.StringComparer.Ordinal);
             foreach (KmhTransaction t in KmhTransactionRepository.All())
+            {
                 if (!string.IsNullOrEmpty(t?.TakeMarker)) named.Add(t.TakeMarker);
+                if (t?.ExtraTakeMarkers != null) foreach (string m in t.ExtraTakeMarkers) if (!string.IsNullOrEmpty(m)) named.Add(m);
+            }
 
             int returned = 0, adopted = 0, stuck = 0;
             foreach (Features.Treasury.Dto.PendingTake p in pending)

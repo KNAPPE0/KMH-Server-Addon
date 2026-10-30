@@ -49,6 +49,9 @@ namespace KMHServerAddon.Features.Chat
             Diagnostics.ServerLog.Info($"chat[{msg.Channel}] {from}: {msg.Body}");
             Broadcast(msg);
             Features.Discord.KmhChatDiscordBridge.RelayOutbound(msg);
+            // Only lines typed here: relaying a bridged line would echo it back out through the other bridge.
+            if (msg.Origin == "ingame" && msg.Channel == ChatChannels.Server)
+                Features.Discord.KmhWorldChatDiscordBridge.IngestInGame(from, msg.Body);
             RaisePosted(msg);
         }
 
@@ -73,7 +76,7 @@ namespace KMHServerAddon.Features.Chat
         {
             string user = client?.GetData<UserFile>()?.Username;
             if (string.IsNullOrEmpty(user)) return;
-            if (!ChatConfig.Current.BlockingEnabled) { KmhRouter.Notify(client, "negative", "Blocking is disabled on this server."); return; }
+            if (!ChatConfig.Current.Blocking.Enabled) { KmhRouter.Notify(client, "negative", "Blocking is disabled on this server."); return; }
             string target = env?.GetString("username") ?? "";
             bool on = env?.GetBool("on") ?? true;
             if (string.IsNullOrEmpty(target)) return;
@@ -172,6 +175,6 @@ namespace KMHServerAddon.Features.Chat
 
         private static void SendModerationTo(ServerClient client, string user)
             => KmhRouter.SendTo(client, KmhProtocol.Kind.ChatModeration,
-                new { blocked = ChatModerationStore.BlockedBy(user), blocking_enabled = ChatConfig.Current.BlockingEnabled });
+                new { blocked = ChatModerationStore.BlockedBy(user), blocking_enabled = ChatConfig.Current.Blocking.Enabled });
     }
 }

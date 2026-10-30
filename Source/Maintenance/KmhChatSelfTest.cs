@@ -16,7 +16,7 @@ namespace KMHServerAddon.Maintenance
             string clamped = ChatStore.Normalize(new string('x', ChatStore.MaxMessageLength + 40));
             r.Add(("Chat: overlong message clamped", clamped.Length == ChatStore.MaxMessageLength, $"{clamped.Length}/{ChatStore.MaxMessageLength}"));
 
-            string norm = ChatStore.Normalize("a\tb\nc");   // \t is a control char -> stripped, \n kept
+            string norm = ChatStore.Normalize("a\tb\nc");
             r.Add(("Chat: control stripped, \\n kept", norm == "ab\nc", $"'{norm}'"));
 
             r.Add(("Chat: blank normalizes to empty", ChatStore.Normalize("   ") == "", ""));
@@ -97,7 +97,7 @@ namespace KMHServerAddon.Maintenance
             var filtered = ChatModerationStore.FilterOut(feed, blocked);
             r.Add(("Chat: blocked sender filtered from history", filtered.Count == 2 && !filtered.Exists(m => m.Id == 2), $"kept {filtered.Count}"));
 
-            // Every request rebuilds a whole snapshot under a store lock, so the cap is what stops one client stalling everyone.
+            // Each request rebuilds a snapshot under a store lock, so the cap stops one client stalling everyone.
             r.Add(("Router: snapshot requests count toward the flood cap",
                    SubProtocol.KmhRouter.CountsTowardInboundCap(SubProtocol.KmhProtocol.Kind.TreasuryRequest)
                    && SubProtocol.KmhRouter.CountsTowardInboundCap(SubProtocol.KmhProtocol.Kind.MarketplaceRequest)
@@ -126,7 +126,10 @@ namespace KMHServerAddon.Maintenance
             // The ceiling bounds the list's size but not one name being toggled forever, rewriting the file each time.
             var churn = new Util.KmhRateWindow();
             long churnAt = System.DateTime.UtcNow.Ticks;
-            var churnCfg = new ChatConfig { MaxBlockChangesPerWindow = 20, BlockChangeWindowSeconds = 60 };
+            var churnCfg = new ChatConfig
+            {
+                Blocking = new ChatBlocking { MaxChangesPerWindow = 20, ChangeWindowSeconds = 60 },
+            };
             int refused = 0;
             for (int i = 0; i < 30; i++)
                 if (ChatModerationStore.RefuseForChurn(churn, "griefer", true, churnAt, churnCfg)) refused++;
@@ -144,20 +147,35 @@ namespace KMHServerAddon.Maintenance
             r.Add(("Chat: a no-op block change is never charged", noOpRefusals == 0
                    && !ChatModerationStore.RefuseForChurn(quiet, "amy", true, churnAt, churnCfg), $"{noOpRefusals} refused"));
 
-            var cfg = new ChatConfig { MaxMessageLength = 100000, MaxSendsPerWindow = 0, SendWindowSeconds = -5, RetentionHours = 99999,
-                                       MaxBlockChangesPerWindow = 0, BlockChangeWindowSeconds = 99999 };
+            var cfg = new ChatConfig
+            {
+                Limits = new ChatLimits { MaxMessageLength = 100000, MaxSendsPerWindow = 0,
+                                          SendWindowSeconds = -5, RetentionHours = 99999 },
+                Blocking = new ChatBlocking { MaxChangesPerWindow = 0, ChangeWindowSeconds = 99999 },
+            };
             cfg.Clamp();
             r.Add(("Chat: block-churn limits clamped too",
-                   cfg.MaxBlockChangesPerWindow >= 1 && cfg.BlockChangeWindowSeconds <= 3600,
-                   $"{cfg.MaxBlockChangesPerWindow}/{cfg.BlockChangeWindowSeconds}s"));
-            bool clampOk = cfg.MaxMessageLength <= 4000 && cfg.MaxSendsPerWindow >= 1 && cfg.SendWindowSeconds >= 1 && cfg.RetentionHours <= 720;
-            r.Add(("Chat: config limits clamped to sane range", clampOk, $"len={cfg.MaxMessageLength} rate={cfg.MaxSendsPerWindow}/{cfg.SendWindowSeconds}s ret={cfg.RetentionHours}h"));
+                   cfg.Blocking.MaxChangesPerWindow >= 1 && cfg.Blocking.ChangeWindowSeconds <= 3600,
+                   $"{cfg.Blocking.MaxChangesPerWindow}/{cfg.Blocking.ChangeWindowSeconds}s"));
+            bool clampOk = cfg.Limits.MaxMessageLength <= 4000 && cfg.Limits.MaxSendsPerWindow >= 1
+                        && cfg.Limits.SendWindowSeconds >= 1 && cfg.Limits.RetentionHours <= 720;
+            r.Add(("Chat: config limits clamped to sane range", clampOk,
+                   $"len={cfg.Limits.MaxMessageLength} rate={cfg.Limits.MaxSendsPerWindow}/{cfg.Limits.SendWindowSeconds}s ret={cfg.Limits.RetentionHours}h"));
 
             bool relayGuard =
                    KmhChatDiscordBridge.ShouldRelayOutbound(new ChatMessage { Origin = "ingame", Channel = ChatChannels.Server })
-                && !KmhChatDiscordBridge.ShouldRelayOutbound(new ChatMessage { Origin = "discord", Channel = ChatChannels.Server })   // loop guard
-                && !KmhChatDiscordBridge.ShouldRelayOutbound(new ChatMessage { Origin = "ingame", Channel = ChatChannels.Guild("W") }); // server-only
+                && !KmhChatDiscordBridge.ShouldRelayOutbound(new ChatMessage { Origin = "discord", Channel = ChatChannels.Server })
+                && !KmhChatDiscordBridge.ShouldRelayOutbound(new ChatMessage { Origin = "ingame", Channel = ChatChannels.Guild("W") });
             r.Add(("Chat: Discord outbound loop guard (ingame server only)", relayGuard, ""));
+
+            string simLine, personLine;
+            using (Features.Simulation.SimulatedAccounts.UseForTest(new Features.Simulation.SimulatedAccountsFile { Accounts = new List<string> { "SimWren" } }))
+            {
+                simLine = KmhChatDiscordBridge.LineFor("simwren", "hello");
+                personLine = KmhChatDiscordBridge.LineFor("Ada", "hello");
+            }
+            r.Add(("Chat: a simulated playtest account says so in its Discord line; a person's line is unchanged",
+                   simLine.Contains("[SIM]") && !personLine.Contains("[SIM]") && personLine.EndsWith(": hello"), $"'{simLine}' / '{personLine}'"));
 
             var win = new KMHServerAddon.Util.KmhRateWindow();
             long t0 = DateTime.UtcNow.Ticks;

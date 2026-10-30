@@ -10,6 +10,17 @@ namespace KMHServerAddon.AdminCommands
         // Printer is a global singleton, so two concurrent runs would tangle each other's capture.
         private static readonly object _lock = new object();
 
+        // Only Discord runs commands through here, so whatever it reaches was not typed at this machine's console.
+        [ThreadStatic] private static bool _remote;
+        internal static bool Remote => _remote;
+
+        internal static void AsRemote(Action run)
+        {
+            bool was = _remote;
+            _remote = true;
+            try { run(); } finally { _remote = was; }
+        }
+
         public static string Run(string commandLine)
         {
             if (string.IsNullOrWhiteSpace(commandLine)) return "(empty command)";
@@ -31,7 +42,7 @@ namespace KMHServerAddon.AdminCommands
                     p.OnError   = (o, m) => { Cap(o); oErr?.Invoke(o, m); };
                     p.OnTitle   = (o, m) => { Cap(o); oTitle?.Invoke(o, m); };
 
-                    Dispatch(commandLine.Trim());
+                    AsRemote(() => Dispatch(commandLine.Trim()));
                 }
                 catch (Exception ex)
                 {

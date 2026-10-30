@@ -48,12 +48,6 @@ namespace KMHServerAddon.Features.Media
         internal static bool TryAdmit(string ip) => _limiter.TryAdmit(ip ?? "");
         internal static void ReleaseAdmit(string ip) => _limiter.Release(ip ?? "");
 
-        private static string IpOf(TcpClient c)
-        {
-            try { return (c?.Client?.RemoteEndPoint as IPEndPoint)?.Address?.ToString() ?? ""; }
-            catch { return ""; }
-        }
-
         // Shared by default: a second port is one an owner must know about, open and forward, and silently fails if not.
         private static bool _sharesApiPort;
 
@@ -64,8 +58,8 @@ namespace KMHServerAddon.Features.Media
         public static void Start()
         {
             MediaConfig cfg = MediaConfig.Current;
-            if (!cfg.VideoServerEnabled || Running) return;
-            ConfigureLimits(cfg.VideoMaxConnections, cfg.VideoMaxConnectionsPerIp);
+            if (!cfg.Video.ServerEnabled || Running) return;
+            ConfigureLimits(cfg.Video.MaxConnections, cfg.Video.MaxConnectionsPerIp);
             if (!KmhVideoHelper.Available)
             {
                 ServerLog.Info($"Video server: off - {KmhVideoHelper.MissingTools()} not found. Run "
@@ -78,12 +72,12 @@ namespace KMHServerAddon.Features.Media
             // The KMH transport is the only port KMH ever opens; video rides it rather than asking for a second.
             if (!Transport.KmhApiServer.Running)
             {
-                ServerLog.Warn("Video server: the KMH API transport is not listening, so there is no port to serve video on. "
+                ServerLog.Warn("Video server: the Colony Nexus API transport is not listening, so there is no port to serve video on. "
                              + "Enable EnableKmhApiTransport in Config/Transport.json.");
                 return;
             }
             _sharesApiPort = true;
-            ServerLog.Info($"Video server: serving on the KMH transport port {Transport.KmhApiServer.Port} - no extra port to open.");
+            ServerLog.Info($"Video server: serving on the Colony Nexus transport port {Transport.KmhApiServer.Port} - no extra port to open.");
         }
 
         public static void Stop()
@@ -274,7 +268,12 @@ namespace KMHServerAddon.Features.Media
                 return true;
             }
             if (!long.TryParse(lo, out from) || from < 0 || from >= length) { from = 0; return false; }
-            if (hi.Length > 0 && long.TryParse(hi, out long end)) to = Math.Min(end, length - 1);
+            if (hi.Length > 0 && long.TryParse(hi, out long end))
+            {
+                // An end before the start is malformed: the whole file, as for a bad start.
+                if (end < from) { from = 0; return false; }
+                to = Math.Min(end, length - 1);
+            }
             return true;
         }
 

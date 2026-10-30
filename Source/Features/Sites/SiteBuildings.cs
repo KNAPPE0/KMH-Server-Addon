@@ -57,8 +57,8 @@ namespace KMHServerAddon.Features.Sites
         }
 
         // Additive and bounded on purpose - another multiplier on top of tier x workers x skill would compound.
-        public const double ProductionBonusPerLevel = 0.10;   // +10% per level of the single production building
-        public const double MaxBuildingBonus        = 0.30;   // hard ceiling regardless of level
+        public const double ProductionBonusPerLevel = 0.10;
+        public const double MaxBuildingBonus        = 0.30;
 
         public static double ProductionBonus(SiteEntry s)
         {
@@ -66,13 +66,16 @@ namespace KMHServerAddon.Features.Sites
             double bonus = 0;
             foreach (SiteBuilding b in s.Buildings)
             {
-                if (b == null) continue;
-                if (!string.Equals(b.Kind, SiteBuilding.KindProduction, System.StringComparison.OrdinalIgnoreCase)) continue;
-                if (!string.Equals(b.State, SiteBuilding.StateOperational, System.StringComparison.OrdinalIgnoreCase)) continue;
+                if (!IsOperational(b, SiteBuilding.KindProduction)) continue;
                 bonus += ProductionBonusPerLevel * (b.Level < 1 ? 1 : b.Level);
             }
             return bonus > MaxBuildingBonus ? MaxBuildingBonus : bonus;
         }
+
+        private static bool IsOperational(SiteBuilding b, string kind)
+            => b != null
+               && string.Equals(b.Kind, kind, System.StringComparison.OrdinalIgnoreCase)
+               && string.Equals(b.State, SiteBuilding.StateOperational, System.StringComparison.OrdinalIgnoreCase);
 
         // Bounded because held goods are off-map wealth, and an unbounded warehouse is an unbounded raid shelter.
         public const int UnitsPerStorage = 100;
@@ -83,11 +86,12 @@ namespace KMHServerAddon.Features.Sites
             int n = 0;
             if (s?.Buildings == null) return 0;
             foreach (SiteBuilding b in s.Buildings)
-                if (b != null
-                    && string.Equals(b.Kind, SiteBuilding.KindStorage, System.StringComparison.OrdinalIgnoreCase)
-                    && string.Equals(b.State, SiteBuilding.StateOperational, System.StringComparison.OrdinalIgnoreCase))
-                    n += UnitsPerStorage;
-            return n > MaxStorageUnits ? MaxStorageUnits : n;
+                if (IsOperational(b, SiteBuilding.KindStorage)) n += UnitsPerStorage;
+            // The perk scales the cap too, or a full warehouse would show a bonus it never gets.
+            double perk = SiteArchetypeRegistry.StoragePerk(s.Archetype);
+            int cap = (int)(MaxStorageUnits * perk);
+            n = (int)(n * perk);
+            return n > cap ? cap : n;
         }
 
         public static int StoredUnits(SiteEntry s)
@@ -113,10 +117,7 @@ namespace KMHServerAddon.Features.Sites
             int n = 0;
             if (s?.Buildings == null) return 0;
             foreach (SiteBuilding b in s.Buildings)
-                if (b != null
-                    && string.Equals(b.Kind, SiteBuilding.KindHousing, System.StringComparison.OrdinalIgnoreCase)
-                    && string.Equals(b.State, SiteBuilding.StateOperational, System.StringComparison.OrdinalIgnoreCase))
-                    n += WorkersPerHousing;
+                if (IsOperational(b, SiteBuilding.KindHousing)) n += WorkersPerHousing;
             return n > MaxHousingBonus ? MaxHousingBonus : n;
         }
     }

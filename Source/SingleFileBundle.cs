@@ -6,7 +6,7 @@ using System.Text;
 
 namespace KMHServerAddon
 {
-    // Parses the Microsoft.NET.HostModel bundle layout; the field order below follows that format, not our choosing.
+    // Parses the Microsoft.NET.HostModel bundle layout; the field order below is that format's.
     internal static class SingleFileBundle
     {
         private static readonly byte[] Signature =
@@ -47,7 +47,7 @@ namespace KMHServerAddon
                 return Count(targetDir);
             }
 
-            // Purged, not merged: a stale server assembly would make generation detection key off a file RWT no longer ships.
+            // Purged, not merged: a stale server assembly would key generation detection off a file RWT no longer ships.
             PurgeStaleCache(targetDir, marker);
 
             byte[] data = File.ReadAllBytes(exePath);

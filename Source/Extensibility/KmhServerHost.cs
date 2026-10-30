@@ -63,7 +63,7 @@ namespace KMHServerAddon.Extensibility
             {
                 ServerLog.Warn(
                     $"[ext:{_extensionName}] refused to register reserved kind '{kind}'. " +
-                    $"The '{ReservedKindPrefix}' namespace belongs to KMH core - namespace your own " +
+                    $"The '{ReservedKindPrefix}' namespace belongs to Colony Nexus core - namespace your own " +
                     $"kinds under your extension name (e.g. '{SafePrefix()}.{kind}').");
                 return;
             }
@@ -73,7 +73,7 @@ namespace KMHServerAddon.Extensibility
             {
                 ServerLog.Warn(
                     $"[ext:{_extensionName}] refused to register kind '{kind}' - already claimed by " +
-                    $"KMH or another extension. Pick a kind unique to your extension.");
+                    $"Colony Nexus or another extension. Pick a kind unique to your extension.");
                 return;
             }
 

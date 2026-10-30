@@ -1,5 +1,5 @@
-﻿KMH Server Addon - setup
-========================
+﻿Colony Nexus server addon (KMH Server Addon) - setup
+====================================================
 
 Extract this zip into your server folder, next to the RWT server:
 
@@ -15,67 +15,97 @@ Then run KMHServerAddon.exe (NOT the RWT server).
 There are two downloads per platform, and which one you took decides what is in
 the zip:
 
-  KMHServerAddon-v1.3.0-<platform>.zip
-    One KMHServerAddon.exe with everything inside it. Needs .NET 8 on the host.
+  KMH-ColonyNexus-ServerAddon-v1.3.1-<platform>.zip
+    One KMHServerAddon.exe with everything inside it. Needs .NET 10 on the host.
 
-  KMHServerAddon-v1.3.0-<platform>-selfcontained.zip
-    Carries .NET 8 with it, so nothing to install - but it is a folder of files,
+  KMH-ColonyNexus-ServerAddon-v1.3.1-<platform>-selfcontained.zip
+    Carries .NET 10 with it, so nothing to install - but it is a folder of files,
     and KMHServerAddon.exe is only a small launcher that will not start without
     them. Extract the whole thing and keep it together.
 
-Either way it works with the RWT server you put next to it, adds the KMH
+Either way it works with the RWT server you put next to it, adds the Colony Nexus
 features, and starts the server. It detects which server version it sits next to
 and uses the matching build automatically, identifying that server by what the
 file actually contains rather than by its name - so a renamed or panel-mangled
 server file is still found.
 
-Supported RWT releases (all verified for this version):
-  26.8.31.1, 26.8.16.1 (1), 26.8.16.1, 26.8.9.1, 26.7.25.1,
-  26.6.23.1, 26.6.9.1, 26.6.8.1, 26.5.24.1
-26.5.24.1 is the OLDEST supported release. RWT moved a core network type below
-that point, so 26.4.18.1 and older are a different generation and are not
-supported - on those KMH refuses to start and says so, leaving RWT running.
+RWT releases for this version:
+  26.10.20.1 - a RimWorld 1.7 server
+  26.10.15.1 - a RimWorld 1.6 server
+RWT moved a core network type below 26.5.24.1, so 26.4.18.1 and older are a
+different generation - on those Colony Nexus refuses to start and says so,
+leaving RWT running.
 
-On RWT 26.6.23.1 and newer, RWT chat is not a reliable KMH carrier -
-keep the KMH API transport enabled (the default since v1.2.0); it's the
+On RWT 26.6.23.1 and newer, RWT chat is not a reliable Colony Nexus carrier -
+keep the Colony Nexus API transport enabled (the default since v1.2.0); it's the
 recommended/required path there.
 On first run it creates KMH-Data/ (configs + state), kmh-extensions/, and a
 small .rwt-runtime/ cache next to itself.
 
 Requirement
 -----------
-The .NET 8 runtime installed on the server:
-    https://dotnet.microsoft.com/download/dotnet/8.0
-(KMH patches RWT with Harmony, which needs the JIT from a normally-installed
+The .NET 10 runtime installed on the server:
+    https://dotnet.microsoft.com/download/dotnet/10.0
+Keep it patched: 10.0.13 or newer, and each .NET 10 security release after it. The
+runtime also runs RWT's server, and it is what answers the network. .NET 10 is a
+long-term release, supported until November 2028. The -selfcontained zips carry 10.0.13.
+(Colony Nexus patches RWT with Harmony, which needs the JIT from a normally-installed
 runtime - it can't reach the one baked inside the self-contained GameServer.exe.
 That's the one thing the owner installs once.)
 
-If no RWT server is in the folder, KMH says so and stops. It prints every file
+If no RWT server is in the folder, Colony Nexus says so and stops. It prints every file
 name it looked for, which one it picked, and why it skipped the others - so a
 "not found" is always explainable.
 
-After an RWT update KMH re-reads the server automatically; its .rwt-runtime/
+After an RWT update Colony Nexus re-reads the server automatically; its .rwt-runtime/
 cache is keyed to the exact server file, so a stale cache can't survive an
 upgrade. Deleting .rwt-runtime/ is always safe - it is rebuilt on next start.
 
-Updating to 1.3.0
+Updating to 1.3.1
 -----------------
-Update EVERY player's KMH-Patch mod to 1.3.0 alongside the server. The wire
-protocol is v2, the same as 1.2.x, so the two generations talk and a 1.2.x
-client is NOT locked out - it connects, KMH turns on, and it simply does not
-show the 1.3.0 features, because each side advertises what it can do rather
-than checking a version number. That is deliberate, but it means an old client
-looks healthy while quietly missing the new screens, so nobody will report it.
-Update the server first, then players; back up KMH-Data before the first 1.3.0
-boot (the server also auto-backs-up on boot by default) and run
-'kmh validate all' afterward.
+Update EVERY player's Colony Nexus mod (KMH: Colony Nexus) to 1.3.1 alongside the
+server. This release moves the wire protocol from v2 to v3, and unlike the
+1.2.x -> 1.3.0 step that is a HARD BREAK: a 1.3.0-or-older client connecting to a
+1.3.1 server shows its own (older) message
 
-The "KMH disabled: server protocol vX vs your vY" notice only appears if the
-protocol number itself ever changes, which it has not since 1.2.0.
+    KMH version mismatch. This server requires KMH Protocol v3; your client is
+    using Protocol v2. Update KMH-Patch to match the server.
 
-No .NET 8 on your host, or no internet on it to go and get one? Managed panels
+and Colony Nexus stays off for that session. The same happens in reverse.
+
+That is the point of the bump. v1.3.1 changes when enforcement happens, who
+decides mod settings, and how a config apply commits - behaviour a v2 client
+cannot take part in, but which it would have looked perfectly healthy ignoring.
+An old client that silently misses half a release is worse than one that says so.
+
+Plan for it: update the server and tell players to update the mod at the same
+time. If Config Enforcement is ON, an out-of-date client is disconnected with
+that message rather than admitted; with Enforcement off it can still play RWT
+normally, just without Colony Nexus.
+
+Back up KMH-Data before the first 1.3.1 boot (the server also auto-backs-up on
+boot by default) and run 'kmh validate all' afterward.
+
+Your tunable configs are REGENERATED from the v1.3.1 defaults on that first boot,
+not carried forward - every value you set in Economy, Sites, World, Chat, Media,
+Mail and the rest is replaced. The originals are copied first into a
+'premigration-config' folder under KMH-Data-Backups, verified, and the upgrade
+refuses to run at all if that copy cannot be made. Global.json, Staff.json and
+Discord/DiscordConfig.json are never regenerated. Afterwards, re-apply the tuning
+you still want from that backup; 'kmh config' shows what differs from the
+defaults. Later 1.3.1 builds only top files up with new fields - rel-267 also
+renames one World.json key (the quest activity window, now in minutes) and
+carries your value across.
+
+Four version numbers, deliberately separate - don't read one from another:
+  Public version        1.3.1        what the release is called
+  Build tag             rel-NNN      the exact binary, for a bug report
+  Wire protocol         v3           which clients this server talks to
+  RWT compatibility     its own list (above) - unrelated to all three
+
+No .NET 10 on your host, or no internet on it to go and get one? Managed panels
 often pin an older runtime. Grab the "-selfcontained" zip for your platform
-instead - it carries .NET 8 inside it, so there is nothing to install and
+instead - it carries .NET 10 inside it, so there is nothing to install and
 nothing to download on the server itself. Every architecture has one:
 win-x64, win-x86, win-arm64, linux-x64, linux-arm and linux-arm64.
 
@@ -110,7 +140,15 @@ run KMHServerAddon.exe. Two ways to fix it:
     KMH never mistakes itself for the server - it checks what each file
     contains, not what it is called or how big it is - so the swap is safe.
     Redo the two renames after any RWT update - it restores the stock launcher.
-    On a host without .NET 8, use the -selfcontained zip for this.
+    On a host without .NET 10, use the -selfcontained zip for this.
+
+Stopping: KMH starts itself a second time with ReadyToRun off, and that second
+process is the server. Stop the one you started - from the panel, Task Manager
+or 'docker stop' - and the server follows it out, writing KMH's data on the way.
+On Linux, a stop signal sent to the server process itself (systemd's default
+sends one to every process in the service) ends it without that final write.
+Run 'kmh save' first - in systemd, as the unit's ExecStop - so the last minutes
+of chat and stats are kept.
 
 KMH API transport - security & public setup
 -------------------------------------------
@@ -130,8 +168,8 @@ Public setup (remote players):
 Local-only instead? Set BindAddress=127.0.0.1. Chat fallback keeps KMH working
 either way on RWT versions that still carry it.
 
-Required-by-default safety (all tunable in Transport.json, all clamped so a bad
-edit can't disable a guard): RequireKmhApiAuth, MaxConnections,
+Required-by-default safety (all clamped so a bad edit can't disable a guard):
+RequireKmhApiAuth, and in Transport.json's Advanced block MaxConnections,
 MaxConnectionsPerIp, AuthTimeoutSeconds, IdleTimeoutSeconds, MaxFrameKb,
 FailedAuthPerIp/WindowSeconds/BlockSeconds. If you disable auth or expose the
 port unsafely the server prints a loud warning at boot - public bind + auth off
@@ -156,59 +194,70 @@ advertises none at all.
 
 Client debug uplink (diagnosing player-side issues)
 ---------------------------------------------------
-Players can enable "Send debug logs to the server" in the mod options; every KMH
-log line from their game then lands in KMH-Data/Debug/<user>_<timestamp>.txt
-(one file per player session, every line arrival-timestamped). To turn it on for
-EVERYONE automatically, set DebugLogging=true in Config/Transport.json - the
-handshake tells connecting clients to start uplinking (verbose logging is forced
-on for their session; their saved setting is untouched). Abuse-bounded: 300
-lines/min and 10 MB per player, lines truncated at 400 chars, files pruned after
-14 days, folder excluded from backups.
+A player who shares their KMH log has every line from their game land in
+KMH-Data/Debug/<user>_<timestamp>.txt (one file per player session, every line
+arrival-timestamped). The player decides, never the server: in the mod options
+they pick Never, Ask me each server, or Automatically share. Setting
+DebugLogging=true in Config/Transport.json only ASKS connecting clients to share -
+a player on Ask sees a prompt for that session, a player on Never is not asked,
+and nothing is sent without that choice. Sharing shows an indicator in game and
+can be stopped from Advanced & Tools at any time. Abuse-bounded: 300 lines/min and
+10 MB per player, lines truncated at 400 chars, files pruned after 14 days,
+folder excluded from backups.
 
 Living world - on by default since v1.2.0
 -----------------------------------------
-World events and global quests now run by themselves so the server feels alive
-without any owner setup:
+World events and global quests run by themselves so the server feels alive
+without any owner setup. Config/World.json has two blocks, Events and
+WorldQuests, and every duration in it is in minutes:
   - World events auto-roll: considered every 4h with a 40% chance (~one event
     per 10h on average, so timing feels organic, not scheduled), lasting 3h by
-    default. Types: tax holiday, market boom/crash, resource shortage, double
-    worker XP, house stipend, bounty target, global weather - weights and
-    allowed types are owner-tunable.
+    default (Events.RollEveryMinutes, Events.RollChance, Events.DefaultMinutes).
+    Types: tax holiday, market boom/crash, resource shortage, double worker XP,
+    house stipend, bounty target, global weather - Events.AllowedTypes and
+    Events.Weights are yours to tune.
   - Global weather: a rolled event applies a real GameCondition (aurora,
     eclipse, cold snap, heat wave by default) to EVERY colony for the duration.
-    Fully data-driven via World.json WeatherConditionDefs entries of
+    Fully data-driven via Events.Weather.ConditionDefs entries of
     "GameConditionDef|Title|Description" - add any vanilla or modded condition
     def, no code needed. Fire one manually: kmh event world_weather [minutes]
     [0] [DefName].
-  - Global quests auto-generate: considered every 12h, up to 2 active, 24h
-    duration. Rewards are real silver from the house pool (seeded once on new
-    servers), scale with the live economy, and are floored/capped
-    (QuestMinReward/QuestRewardMaxReward) so quests never spam worthless or
-    economy-breaking payouts.
+  - Global quests auto-generate: considered every 12h, up to 2 active, each
+    running 48h by default (WorldQuests.AutoGen.EveryMinutes, AutoGen.MaxActive,
+    AutoGen.DefaultMinutes, kept between AutoGen.MinMinutes and MaxMinutes -
+    24h to 72h). Rewards come from the house pool (seeded once on new servers),
+    scale with the live economy, and are floored and capped (WorldQuests.Rewards.Min
+    and Rewards.Max). When the pool cannot cover the floor, Rewards.AllowMinted
+    (on by default) adds only the shortfall; set it false for pool-only rewards.
   - Everything announces once in-game and (if configured) to the Discord
     Announcements channel when it fires/completes - no periodic spam.
 
   - Generated content: by default 60% of auto-generated quests are synthesized
     from YOUR server's live item catalog (items + prices reported by clients) -
     "Shortage: cloth", "Supply Run: steel" - instead of the premade templates.
-    Tune with GeneratedQuestChance (0 = templates only), the value band
-    (GeneratedItemMinValue/MaxValue) and GeneratedQuestGoalValue.
-  - Global-quest balance (v1.2.0): hunt/build goals now SCALE with active players
-    so a quiet server isn't asked for 58 kills. goal = clamp(GlobalQuestBaseTargetCount
-    + activePlayers * GlobalQuestTargetsPerActivePlayer * difficulty, Min, Max)
-    (GlobalQuestMinTargetCount/MaxTargetCount, GlobalQuestDifficultyMultiplier). Set
-    GlobalQuestScaleByActivePlayers=false for the old fixed 20-60 goal. Default
-    duration is now GlobalQuestDefaultDurationHours=48 (clamped 24-72). Auto-gen is
-    skipped below GlobalQuestMinActivePlayers, and the same target isn't reused within
-    GlobalQuestRepeatTargetCooldownHours. Reward pool adds GlobalQuestRewardPerTarget
-    per goal unit; co-op payout is split BY CONTRIBUTION (you earned 12 of 58 -> ~12/58
-    of the pool). Kill counting is fixed: a direct kill counts ONCE, and a target that
-    bleeds out after recent colonist damage now counts (predator/weather deaths don't).
-  - Weather can be
-    auto-discovered too: clients report every GameConditionDef in their game
-    (mods included) into Catalog/WeatherDefs.json; set AutoDiscoverWeather=true
-    to roll those as well (ExcludedWeatherDefs blocks colony-wreckers like
-    toxic fallout - extend it for harsh modded conditions).
+    Tune with AutoGen.FromCatalogPercent (0 = templates only), the per-unit value
+    band (AutoGen.CatalogItemMinValue and CatalogItemMaxValue) and
+    AutoGen.CatalogGoalValue.
+  - Global-quest balance: hunt/build goals SCALE with active players so a quiet
+    server isn't asked for 58 kills. goal = clamp(Scaling.BaseTargetCount +
+    activePlayers * Scaling.TargetsPerActivePlayer * Scaling.DifficultyMultiplier / hardness,
+    Scaling.MinTargetCount, Scaling.MaxTargetCount), all under WorldQuests, where hardness is
+    1.5 for big or dangerous game (thrumbo, bear, mechs), 1.25 for large livestock and 0.75
+    for small game, so a hunt asks for fewer of the animals that are harder to find. Active
+    players are everyone online plus everyone seen within Scaling.ActivityWindowMinutes
+    (2880 = 48h), never fewer than are online now; set Scaling.OnlinePlayersOnly=true
+    to count only who is connected, or Scaling.ByActivePlayers=false for the old fixed
+    goal between AutoGen.GoalMin and GoalMax. Auto-gen is skipped below
+    Scaling.MinActivePlayers, and the same target isn't reused within
+    AutoGen.RepeatCooldownMinutes. The reward adds Rewards.PerTarget per goal unit;
+    co-op payout is split BY CONTRIBUTION (you earned 12 of 58 -> ~12/58 of the
+    pool). Kill counting: a direct kill counts ONCE, and a target that bleeds out
+    after recent colonist damage counts (predator/weather deaths don't).
+  - Weather can be auto-discovered too: clients report every GameConditionDef in
+    their game (mods included) into Catalog/WeatherDefs.json; set
+    Events.Weather.AutoDiscover=true to roll those as well
+    (Events.Weather.ExcludedDefs blocks colony-wreckers like toxic fallout -
+    extend it for harsh modded conditions).
 
 How quests verify themselves (no admin approval needed):
   - hunt:    the client counts kills of the target def (persistent tally, saved
@@ -216,31 +265,32 @@ How quests verify themselves (no admin approval needed):
              AFTER the quest went live count.
   - build:   the client counts standing player-faction structures of the target
              def and auto-reports growth; pre-existing buildings never count.
-  - deliver: deliberate by design - players click Deliver on the quest board and
-             the goods leave their colony/caravan. If the quest ends mid-delivery
-             the items are deposited to their treasury instead of being lost.
+  - deliver: players click Deliver on the quest board and the goods are taken
+             from their KMH treasury, so the server only ever counts goods it
+             actually holds. Only what the objective still needs is taken; the
+             rest stays in the treasury.
+  Hunt and build progress is the client's own count, so those quests still run
+  and announce but pay nothing unless you set WorldQuests.PayForSelfReported=true.
   Progress reports are cumulative and resend-safe (the server keeps each
   player's max), and world snapshots are pushed to every connected player on
   change - nobody has to open a menu for their progress to count.
 
 Per-item control (keep some, disable others) - all in Config/World.json:
-  - One event type:      remove it from AllowedEventTypes, or set its Weight*
-                         to 0 to stop auto-rolls but keep manual firing.
-  - One weather kind:    remove its line from WeatherConditionDefs (and add its
-                         defName to ExcludedWeatherDefs if discovery is on).
-  - One quest objective: remove hunt/build/deliver from AllowedObjectives.
-  - One quest template:  delete its line from QuestTemplates.
-  - Generated quests:    GeneratedQuestChance=0.
-Quieter server overall? Set AutoRollEvents=false and/or AutoGenerateQuests=false
-(manual `kmh event` / `kmh worldquest` still work), or turn the whole system off
-with LivingWorld=false in Config/Features.json.
+  - One event type:      remove it from Events.AllowedTypes, or set its entry in
+                         Events.Weights to 0 to stop auto-rolls but keep manual
+                         firing.
+  - One weather kind:    remove its line from Events.Weather.ConditionDefs (and
+                         add its defName to Events.Weather.ExcludedDefs if
+                         discovery is on).
+  - One quest objective: remove hunt/build/deliver from WorldQuests.AllowedObjectives.
+  - One quest template:  delete its line from WorldQuests.Templates.
+  - Generated quests:    AutoGen.FromCatalogPercent=0.
+Quieter server overall? Set Events.AutoRoll=false and/or
+WorldQuests.AutoGen.Enabled=false (manual `kmh event` / `kmh worldquest` still
+work), or turn the whole system off with LivingWorld=false in Config/Features.json.
 
-Updating from 1.1.x: these recommended defaults are applied ONCE by a marker-
-gated migration. Values you customized are preserved; everything the migration
-touches is logged at boot ("Defaults upgrade:" lines) and summarized in a
-must-read notice ~5s after startup (also posted to your Discord Admin channel
-if one is configured). If you re-disable something afterwards it stays off -
-the migration never re-runs.
+Updating from an older release: v1.3.1 regenerates World.json (with every other
+tunable config) from these defaults once - see "Updating to 1.3.1" above.
 
 Frontier, sites & roadworks - new in v1.3.0
 --------------------------------------------
@@ -323,6 +373,28 @@ Communications - chat, mail & presence - new in v1.3.0
     side independently configurable. Linked accounts post under their verified
     in-game name; a relayed message can never masquerade as native chat.
 
+Chat image previews
+-------------------
+On for a new server. A preview only ever loads from a host on
+ImageHostAllowList in Config/Chat.json - Discord's CDN, Tenor, Giphy and Imgur
+ship in that list - and only when the player clicks to load it, so nothing
+reaches out on its own. Turn the whole thing off with AllowImagePreviews: false.
+
+v1.3.1 REGENERATES Chat.json from defaults rather than keeping your value, so
+image previews come back on unless you turn them off again afterwards. Your
+previous file is in the premigration-config backup under KMH-Data-Backups.
+
+Two separate lists, because two different machines make the request:
+
+  Chat.json    ImageHostAllowList   where a PLAYER's game may load an image from
+  Media.json   SourceHostAllowList  where the SERVER may fetch one to convert
+
+Both ship the same starting set. Leaving SourceHostAllowList empty means "any
+https host" for the server's own fetch - still https-only, still refused for
+any private or loopback address, still re-checked on every redirect, but wide.
+A new server gets the list rather than the blank, so widen it deliberately if
+you need to rather than starting there.
+
 In-game video - optional, off until you add two tools
 -----------------------------------------------------
 Players can watch a video link without leaving the game. Your server resolves
@@ -355,8 +427,35 @@ ffmpeg.exe". No config edit either way. KMH checks these, beside the executable
 and then again inside KMH-Data: the folder itself; Tools, plus any folder inside
 Tools and that folder's bin; bin; and any <folder>/bin. Unzip an ffmpeg archive
 straight into Tools and it will be found - no need to dig the binary out. Point
-at copies you already have with VideoHelperPath and FfmpegPath in
+at copies you already have with Video.HelperPath and Video.FfmpegPath in
 Config/Media.json.
+
+POINTING AT YOUR OWN COPY. Both settings take the FULL PATH TO THE EXECUTABLE -
+the file, including yt-dlp.exe, not the folder it sits in. JSON also treats a
+backslash as an escape character, so every one has to be doubled. Both sit in
+the "Video" block:
+
+    "Video": {
+      "HelperPath": "C:\\Program Files\\GameServer\\ToolsForKMH-Patch\\yt-dlp.exe",
+      "FfmpegPath": "C:\\Program Files\\GameServer\\ToolsForKMH-Patch\\ffmpeg.exe",
+      ...
+    }
+
+Leave either blank to use the automatic search above; that is the normal case
+and nothing is lost by it. If you do set one and it is wrong - a folder instead
+of the file, a typo, a drive that is not mounted - the boot log says which of
+those it was, then falls back to searching. It does not fail the server, and it
+does not go quiet either.
+
+Relative paths resolve against whatever folder the server was started from, which
+is not always the folder it lives in. Use a full path.
+
+SEVERAL SERVERS, ONE COPY OF THE TOOLS. Supported, and nothing needs to be
+duplicated: KMH only ever runs these programs, so any number of KMH or RimWorld
+Together servers can point at the same yt-dlp.exe and ffmpeg.exe. Downloaded
+video and converted images stay per-server in that server's own
+KMH-Data/MediaCache, so they never collide. What each server does need is its own
+copy of the PATH SETTING - they are per-server config files.
 
 NO INTERNET ON THE SERVER? Common on a locked-down host, and not a problem. Run
 the script on a machine that has internet, tell it which platform you are
@@ -374,39 +473,72 @@ and no setting that would ask you to.
 Config (KMH-Data/Config/)
 -------------------------
   Economy.json          marketplace/auction/want tax, caps, price floors. Deposits are
-                        client-trusted, so MaxSilverDepositPerTx / MaxItemDepositQtyPerTx
-                        reject an absurd single deposit (anti-mint). Keep them generous -
-                        the client removes the goods before sending, so a legit deposit at
-                        or under the cap must never be rejected. 0 disables a cap.
+                        client-trusted, so Treasury.MaxSilverDepositPerTx (1,000,000) and
+                        Treasury.MaxItemDepositQtyPerTx (5,000) reject an absurd single
+                        deposit (anti-mint). Keep them generous - the client removes the
+                        goods before sending, so a legit deposit at or under the cap must
+                        never be rejected. 0 disables a cap.
 
-                        ECONOMY / TREASURY ACCESS MODES. A new server generates
-                        EconomyMode=Balanced; an existing config keeps whatever it has.
-                        EconomyMode is a preset:
+                        ANTI-CHEAT (the AntiCheat block). A client decides what its colony
+                        holds, so a memory editor such as Cheat Engine can create goods.
+                        These bound what one account can bank, not the cheat itself:
+                          AntiCheat.DailyDepositLimit (200,000) - silver-equivalent value
+                            one account may deposit in any 24 hours.
+                          AntiCheat.NewPlayerDailyDepositLimit (25,000) - the same for an
+                            account with fewer than AntiCheat.NewPlayerHours (10) hours
+                            connected this season, as the server measures it.
+                          AntiCheat.AlertStaff (true) - limit hits and freezes also go to
+                            the Discord admin channel; they are always logged.
+                        0 turns a limit off. A deposit past the limit is refused before
+                        anything leaves the colony. Items count at their catalog value
+                        ('kmh catalog <def> <silver>' pins one); an item with no value
+                        counts 10 each. Simulated accounts are never limited.
+                        Staff: 'kmh deposit-limit <user> [extra] [hours]' shows an
+                        account's room or raises it for a while; 'kmh freeze <user>
+                        [reason]' stops its deposits, trades and transfers (chat and
+                        reports still work), takes it off the boards and pauses its
+                        listings and auctions; 'kmh freeze <user> undo dry|confirm' takes
+                        back its guild donations still in guild vaults and runs
+                        wipe-economy; 'kmh unfreeze <user>' and 'kmh frozen'.
+
+                        Treasury.AccessFeeSilver (default 0 = off) is a flat charge to
+                        OPEN a treasury session, not a per-transaction fee: one debit
+                        buys ten minutes, and refreshing, reconnecting or reopening the
+                        window inside that time costs nothing. Taken from the vault being
+                        opened, and waived while that vault is empty. Site/office
+                        discounts do not apply - this prices access, not a trade.
+
+                        ECONOMY / TREASURY ACCESS MODES. EconomyMode is generated as
+                        Balanced (v1.3.1 regenerates it too). EconomyMode is a preset:
                           Standard  - remote treasury, no cooldowns/fees/caps.
                           Balanced  - remote, light 5s cooldowns + 1% deposit/withdraw fee
                                       (the generated default).
-                          Localized - PersonalTreasuryAccessMode=ColonyOnly, item moves need
-                                      a caravan, treasury blocked during raids.
+                          Localized - personal treasury at your colony, guild vault at a
+                                      guild hall, item moves need a caravan, treasury
+                                      blocked during raids, 5s cooldowns, no fees.
                           Hardcore  - CaravanOnly, block during raids AND hostile map events,
                                       10s cooldowns + 2% fees.
                           Custom    - uses the granular fields below verbatim.
-                        Granular fields (used when EconomyMode=Custom):
-                          PersonalTreasuryAccessMode = Remote | ColonyOnly | CaravanOnly |
-                                                       Disabled
+                        Granular fields, in the Custom block (used only when
+                        EconomyMode=Custom):
+                          Custom.PersonalAccess = Remote | ColonyOnly | CaravanOnly |
+                                                  Disabled
                             (TreasurySiteRequired is reserved - Treasury Sites do not
                              exist yet, so it is accepted but not enforced and behaves
                              as Remote. The server warns once at boot if you set it.)
-                          GuildTreasuryAccessMode    = Remote | GuildHallRequired |
-                                                       CaravanNearGuildHall | Disabled
-                          TreasuryDeposit/WithdrawCooldownSeconds (0 = none)
-                          TreasuryDeposit/WithdrawFeePercent (0..50; silver-only
+                          Custom.GuildAccess    = Remote | GuildHallRequired |
+                                                  CaravanNearGuildHall | Disabled
+                          Custom.DepositCooldownSeconds / WithdrawCooldownSeconds (0 = none)
+                          Custom.DepositFeePercent / WithdrawFeePercent (0..50; silver-only
                             service fee -> the house pool, same sink as marketplace
                             tax. Deposit fee credits only when the pending deposit
                             commits; withdraw fee on success. Item deposits/withdraws
                             pay no fee. Balanced=1/1, Hardcore=2/2, others 0.)
-                          MaxPersonal/GuildTreasurySilver (0 = no cap)
-                          RequireCaravanForItemDeposit / ...Withdraw
-                          BlockTreasuryDuringRaid / BlockTreasuryDuringHostileMapEvent
+                          Custom.MaxPersonalSilver / MaxGuildSilver (0 = no cap)
+                          Custom.RequireCaravanForItemDeposit / RequireCaravanForItemWithdraw
+                          Custom.BlockDuringRaid / BlockDuringHostileMapEvent
+                        DisablePersonalTreasury / DisableGuildTreasury switch a treasury
+                        off in every mode, Custom or not.
                         The client reports context (colony/caravan/raid/hostile-event/near-
                         guild-hall) with each treasury/guild action; the server enforces per
                         mode. TreasurySiteRequired still fails gracefully (behaves as Remote +
@@ -423,20 +555,22 @@ Config (KMH-Data/Config/)
                         intentional (earned value is never dropped); 'kmh validate configs' prints
                         an [INFO] line whenever a non-Remote mode is set so it's never a surprise.
 
-                        GUILD HALL RULES (P8; ALL disabled by default - standard guilds
+                        GUILD HALL RULES (ALL disabled by default - standard guilds
                         unchanged). A guild's hall is a world-tile record stored ON the guild
                         (so it can't be orphaned or inherited by a reused name; disband/season
                         reset drop it with the guild). An admin sets it from the Guild Hall
-                        dialog ("Set Hall here" = their current colony/caravan tile). Fields:
-                          RequireGuildHallToCreateGuild          (create needs a hall tile)
-                          RequireGuildHallForGuildTreasury       (guild vault needs a hall)
-                          RequireGuildHallForGuildContributions  (contributing needs a hall)
-                          GuildHallAccessRadiusTiles = 10        ("near" = within N tiles)
-                          RequireCaravanNearGuildHallForContribution
-                          RequireMemberNearGuildHallToJoin
-                          AllowRemoteGuildInvites = true         (false = invite near the hall)
-                        These integrate with P7: GuildTreasuryAccessMode=GuildHallRequired /
-                        CaravanNearGuildHall now enforce via the client's near-hall check.
+                        dialog ("Set Hall here" = their current colony/caravan tile). Fields,
+                        in the GuildHall block:
+                          GuildHall.RequireToCreateGuild           (create needs a hall tile)
+                          GuildHall.RequireForTreasury             (guild vault needs a hall)
+                          GuildHall.RequireForContributions        (contributing needs a hall)
+                          GuildHall.AccessRadiusTiles = 10         ("near" = within N tiles)
+                          GuildHall.RequireCaravanForContribution
+                          GuildHall.RequireMemberNearHallToJoin
+                          GuildHall.AllowRemoteInvites = true      (false = invite near the hall)
+                        Guild access GuildHallRequired / CaravanNearGuildHall (the Localized and
+                        Hardcore presets, or Custom.GuildAccess) enforce via the client's
+                        near-hall check.
                         COMPATIBILITY: a guild with NO hall is never blocked by proximity (so
                         pre-P8 guilds keep working); the Require* flags are what force a hall to
                         exist first. Proximity is client-computed against the server-owned hall
@@ -446,38 +580,48 @@ Config (KMH-Data/Config/)
                         scale with amount/cycle (client can't fake amount) so an under-
                         reported item value can't buy a cheap high-output site. The server
                         uses its TRUSTED catalog value (not the client's) for build cost and
-                        logs suspicious under-reports. Anti-spam caps:
-                        MaxSitesPerPlayer/PerGuild/ServerWide, MaxWorkerSitesPerPlayer,
-                        BuildCooldownMinutes. Worker skill from the client is advisory only;
-                        server-owned site XP is authoritative. Lower CustomSiteMaxRewardAmount
-                        or set AllowCustomSites=false to bound further.
+                        logs suspicious under-reports. Anti-spam caps, in the Limits block:
+                        Limits.PerPlayer / PerGuild / ServerWide, Limits.WorkerSitesPerPlayer,
+                        Limits.WorkersPerPlayerPerSite, Limits.BuildCooldownMinutes.
+                        WORKERS ARE COLONISTS, not accounts (new in v1.3.1): one player
+                        can staff a site with several different colonists, up to the
+                        site's capacity and Limits.WorkersPerPlayerPerSite (3). More
+                        colonists make the site faster and raise its output; the SHARE
+                        split stays per player, so this cannot mint anything. Existing
+                        sites re-key themselves on first boot and keep their XP. Worker
+                        skill from the client is advisory only; server-owned site XP is
+                        authoritative. Lower Output.CustomMaxRewardAmount or set
+                        AllowCustomSites=false to bound further.
 
-                        OUTPUT TIERS (server-authoritative; UseSiteOutputTiers=true):
+                        OUTPUT TIERS (server-authoritative; Output.UseTiers=true):
                         every output is classified into a tier that decides allow/block, the
                         per-cycle amount cap, cost/cycle multipliers, and how far workers can
-                        scale it. Unknown/rare/tech items land in Tier 4 (DefaultUnknownOutputTier
-                        =4), which ships DISABLED - so a site can NEVER print weapons, apparel,
-                        tech/techprints, bionics, ammo, genes, relics, drugs, or minified
-                        buildings. Tiers: 1 Basic (wood/raw/hay/meat), 2 Refined
-                        (steel/cloth/blocks/meals), 3 Advanced (plasteel/uranium/gold/components),
-                        4 Crafted/Rare/Tech (off). Each tier in OutputTiers[] has the same fields:
-                        Enabled, Name, MaxAmount, CostMultiplier, CycleMultiplier,
-                        MaxSpeedMultiplier, MaxOutputMultiplier, AllowAutoClassifiedItems,
-                        Allowed/BlockedDefNames, Allowed/BlockedKeywords (Blocked* always win).
-                        MaxAllowedSiteOutputTier caps the highest usable tier server-wide.
-                        WORKERS = SPEED, SKILL = AMOUNT, each capped by the tier (Tier 4 never
-                        multiplies output). An over-limit build amount is REJECTED (not silently
-                        clamped) and the treasury isn't charged. AutoAddOwnerAsSiteWorker=true
-                        makes the owner count as a worker so a solo/private site produces (0
-                        workers = Paused). To allow a specific extra item, add its defName to a
-                        tier's AllowedDefNames; to allow Tier 4, set OutputTiers[3].Enabled=true.
-                        There is no payout timer to set: each site's own cycle time
-                        (CycleMinutesPerRewardUnit, divided by worker speed) decides when it pays.
-                        With UseSiteOutputTiers=false a site falls back to plain stackables only -
-                        widen that with ExtraSimpleResourceDefs, or set
-                        AllowUnsafeLegacySiteOutputs=true for the old unrestricted all-def
-                        behaviour (admin/dev only; the server warns at boot when it is on). Old
-                        Sites.json loads and gets a tier computed.
+                        scale it. Unknown/rare/tech items land in Tier 4
+                        (Output.DefaultUnknownTier=4), which ships DISABLED - so a site can
+                        NEVER print weapons, apparel, tech/techprints, bionics, ammo, genes,
+                        relics, drugs, or minified buildings. Tiers: 1 Basic
+                        (wood/raw/hay/meat), 2 Refined (steel/cloth/blocks/meals), 3 Advanced
+                        (plasteel/uranium/gold/components), 4 Crafted/Rare/Tech (off). Each
+                        tier in Output.Tiers[] has the same fields: Enabled, Name, MaxAmount,
+                        CostMultiplier, CycleMultiplier, MaxSpeedMultiplier, MaxOutputMultiplier,
+                        AllowAutoClassifiedItems, Allowed/BlockedDefNames, Allowed/BlockedKeywords
+                        (Blocked* always win). Output.MaxAllowedTier caps the highest usable
+                        tier server-wide.
+                        Workers set the speed and skill sets the amount, each capped by the tier
+                        (Tier 4 never multiplies output). An over-limit build amount is REJECTED
+                        (not silently clamped) and the treasury isn't charged.
+                        Workers.AutoAddOwner=true makes the owner count as a worker so a
+                        solo/private site produces (0 workers = Paused). To allow a specific
+                        extra item, add its defName to a tier's AllowedDefNames; to allow Tier
+                        4, set Output.Tiers[3].Enabled=true. There is no payout timer to set:
+                        each site's own cycle time (Output.CycleMinutesPerRewardUnit, divided by
+                        worker speed) decides when it pays. With Output.UseTiers=false a site
+                        falls back to plain stackables only - widen that with
+                        Output.ExtraSimpleResourceDefs, or set Output.AllowUnsafeLegacy=true for
+                        the old unrestricted all-def behaviour (admin/dev only; the server warns
+                        at boot when it is on). Output.FamilyOverrides takes "defName=family"
+                        corrections for an item the classifier misreads; 'kmh site-catalog
+                        <defName>' shows how one is classified.
   (Treasury items)      Complex items (weapons/apparel/minified/comp/modded) are stored
                         with full state (Treasury.json item_payloads) so a deposit->withdraw
                         round-trip never cleans taint, repairs damage, rerolls quality, or
@@ -491,7 +635,8 @@ Config (KMH-Data/Config/)
   World.json            server event + global-quest scheduler / reward tuning
                         (auto-roll + auto-generate ON by default since v1.2.0)
   Features.json         turn major systems on/off (treasury, marketplace, guilds,
-                        quests, auctions, want board, world, standings). All on by
+                        quests, auctions, want board, world, standings, and Reports -
+                        the in-game bug report / suggestion button). All on by
                         default; off blocks that system server-side and clients show
                         it as disabled. Stored data is kept - re-enable to restore it.
   Chat.json             KMH chat: retention, rate limits, blocking, the image/video
@@ -507,7 +652,8 @@ Config (KMH-Data/Config/)
                         for source/output size, pixels, frames, decoded memory and timeouts
                         all live here; the outbound fetch is https-only, allow-list checked
                         on every redirect, and refused for any private address.
-  Staff.json            who is shown as staff and how the badges look. Admin is not a list
+  Staff.json            who is shown as staff and how the badges look (each role's Label
+                        and Color in the Badges block). Admin is not a list
                         to maintain - RWT already knows its admins; list someone under
                         Admins only to badge a person RWT does not consider one.
   Mail.json             player-to-player mail: attachment limits, optional send fee,
@@ -538,14 +684,78 @@ Config (KMH-Data/Config/)
                         Set Roles.SyncGuildRoles=true to give linked players a Discord role
                         named "<Guild> (<Rank>)" that tracks their KMH guild + rank (needs
                         the bot to have Manage Roles + its role above the ones it creates).
+                        Nothing is posted as an embed. Channels.Leaderboard gets one image per
+                        board per day (Live.LeaderboardBoards, default auto + guilds), edited
+                        every Live.LeaderboardEveryMinutes=15 and finished when the day turns
+                        over at Live.DayStartsAtUtcHour=0 (UTC). Channels.Marketplace gets a
+                        live market board (Live.MarketBoardEveryMinutes=10, 0 = off) and, with
+                        Channels.SiteEvents and Channels.Announcements, a daily activity log of
+                        one line per event. Channels.Admin gets a live server status
+                        (Events.Status) and plain-text alerts (Events.Alerts); set
+                        Events.AlertsPingModerators=true to mention Roles.Moderators in them.
+  Federation.json       Guild Federation on this server: Benefits, the ceilings
+                        MaxSiteOutputBonusPercent / MaxRoadworksBonusPercent (3, and never
+                        higher), ObjectiveRewards and RewardScale for the local supply
+                        caches, and ReportContributions.
+  Mods.json             which mods RWT already lists are Required or Optional, and
+                        ExpansionsOptional. Anything outside that list is refused by RWT.
+                        RimWorldVersion is the RimWorld version this world is played on:
+                        1.7 on RimWorld Together 26.10.20.1 and later (it admits only 1.7,
+                        so a lower value there is read as 1.7), 1.6 before. It is listed
+                        on Global, and a player on another version is refused at join.
+  Global.json           Colony Nexus Global: Enabled (off until 'kmh global setup'),
+                        BackendIdentity (the private identity Guild Federation uses, on),
+                        Visibility, PublicHost, AllowOperatorConsole (off), ForwardReports
+                        (off: player reports stay on this server; 'kmh reports forward on'
+                        sends new ones to Global too), and the Listing block - what players
+                        see on Colony Nexus: Description, Tagline, Region, Languages, Tags,
+                        PlayStyle (PvE/PvP/PvPvE), NewPlayersWelcome, Whitelist + ApplyUrl,
+                        RulesUrl, DiscordUrl, WebsiteUrl, WorkshopCollection, Announcement,
+                        MaintenanceMessage + MaintenanceUntilUtc. Every Listing field is
+                        optional; links must be https. Never regenerated. What Global
+                        assigned (the server id, generation and heartbeat sequence) lives in
+                        KMH-Data/Identity/global-state.json, not here.
   (Transport and Discord have their own on/off switch in their files above.)
-All are generated with defaults on first boot, and an upgrade tops each file up with
-any field a new version added, keeping every value already set. Reload config live
-(in-game chat or server console):  kmh reload <area|all>
+All are generated with defaults on first boot, and a later update tops each file up
+with any field it added, keeping every value already set. When a release moves a
+setting (rel-274 grouped Global's listing, Transport's limits and the staff badges),
+your value moves with it and 'kmh migration-report' lists each move.
+Not sure everything is right? Run  kmh doctor  : every health check in one list,
+worst first, each with what to do about it. Boot ends with a one-line summary. The one exception is the
+first boot of v1.3.1 itself, which regenerates the tunable files (see "Updating to
+1.3.1"). Reload config live (in-game chat or server console):  kmh reload <area|all>
 `kmh config` lists what you have changed from the shipped defaults, per area; for
 economy it also prints the policy actually IN FORCE, because the granular fee,
 cooldown, cap and raid fields apply only under EconomyMode=Custom.
 (The older reload-economy / reload-world / ... commands still work.)
+
+Player reports - new in v1.3.1
+------------------------------
+Players can send a bug report or a suggestion from the Colony Nexus tab, from
+Advanced & tools, or from a "Report this problem" button on a KMH window that
+failed to draw. They see the screenshot and the diagnostics before anything is
+sent, and the window tells them who received it. Each report is kept on this
+server in KMH-Data/Reports (the newest 300, for 90 days):
+  kmh reports                     list them, newest first
+  kmh reports show <id>           read one (the first four letters of the id are enough)
+  kmh reports delete <id>         remove one from this server
+  kmh reports forward <on|off>    also send new reports to Colony Nexus Global, where the
+                                  KMH developers read them (off by default; it sets
+                                  ForwardReports in Global.json). The copy Global gets keeps only the
+                                  console's warnings, errors and the reporter's own lines.
+  kmh reports retry               send kept or failed reports to Global again
+Players are limited to 3 reports in 10 minutes and 15 a day. Turn the button off
+entirely with Reports=false in Config/Features.json. 'kmh setup info' describes
+exactly which report fields Global would receive.
+
+Performance
+-----------
+  kmh perf                frames and bytes sent and received, compression saved,
+                          send queues, slow players dropped, scheduler jobs, memory
+A player who stops reading no longer slows anyone else down: each connection has
+its own send queue, and one that falls 8 MB behind is dropped (the game
+reconnects on its own). Players see their own frame rate, game speed and what
+KMH costs each frame under Advanced & tools.
 
 Backups & recovery
 ------------------
@@ -553,7 +763,9 @@ KMH backs up KMH-Data/ on every boot (into a sibling KMH-Data-Backups/ folder)
 and scans it for problems at startup. Owner commands (console or /kmh server):
   kmh verify              read-only integrity scan
   kmh backup [reason]     snapshot KMH-Data now    |  kmh backups   list them
-  kmh restore <name|latest|before:<time>>   roll KMH-Data back to a backup
+  kmh restore <name|latest|before:<time>>   roll KMH-Data back to a backup (owner or console only;
+                          the live bans, network bans and economy freezes are kept, so rolling
+                          back a cheat never lifts the ban that followed it)
   kmh inspect <system>    dump auctions/wants/quests/... with ids
   kmh cancel <auction|want|quest> <id>   refund + remove a stuck entry
   kmh ledger [user]       recent economy audit-trail entries
@@ -608,8 +820,10 @@ Seasons
                       Guilds (membership + perks), Discord links, and the season
                       archive are KEPT. Backs up first, so it's reversible with
                       'kmh restore <that backup>'.
-The 'confirm' word is required (it's a full economy wipe). Pair reset with a fresh
-RWT scenario at season start so colony wealth also begins near zero.
+The 'confirm' word is required (it's a full economy wipe), and only the owner (Staff.json
+Owners) or the server console can run it. Deliveries already owed to colonies are kept:
+those goods left KMH before the reset. Pair reset with a fresh RWT scenario at season
+start so colony wealth also begins near zero.
 
 Anti-cheat & enforcement
 ------------------------
@@ -619,23 +833,101 @@ safe-mods list. Turn it on with 'kmh enforce on'. This needs the patch on the
 client - stock RWT clients can't be enforced.
 
 Scenario / custom-scenario enforcement is NOT implemented yet. KMH can't force a
-required scenario or block custom scenarios in v1.3.0; treat that as planned.
+required scenario or block custom scenarios in v1.3.1 either; treat it as planned.
 Until then, agree a scenario out-of-band and watch for odd starting wealth.
 
 Save-reset economy: KMH-Data outlives a player's RimWorld save, so someone can
 deposit starting resources into their treasury, reset their save, and repeat.
-Two ways to handle it:
-  - Automatic: set ResetEconomyOnNewSave=true in Config/Economy.json. When a
-    player starts a new save/scenario, KMH clears their personal treasury AND a
-    solo guild's vault (a 1-member guild is otherwise a shelter). Off by default;
-    multi-member guild vaults are untouched.
-  - Manual: kmh treasury-reset <user>   clear one player's personal (+ solo guild) treasury
-            kmh treasury-reset all       clear every personal treasury
-Both back up KMH-Data first and log what was cleared. Keep a backup before any
-reset. The reset also purges the player's open marketplace listings, auctions,
-and want orders (escrow lives outside the treasury and would otherwise shelter
-value across a save reset); other players' bids on the reset player's auctions
-are refunded. Run 'kmh audit' to spot orphaned or solo-guild vaults.
+  - Automatic: set ResetEconomyOnNewSave=true in Config/Economy.json (off by default).
+    When a player's colony reports a new save id, KMH runs the same economy reset
+    as wipe-economy below. The save id comes from the client, so treat it as
+    evidence, not proof: a modified client can claim a new save (at most one reset
+    per player per 6 hours) or hide one.
+  - Manual (all take 'dry' or 'confirm', back up KMH-Data first and say what they did):
+      kmh reset-preview <user>             what a reset would clear (read-only)
+      kmh wipe-economy <user> <dry|confirm>   (alias reset-player-economy) the economy only
+      kmh treasury-reset <user> <dry|confirm> the same as wipe-economy
+      kmh treasury-reset all <dry|confirm>    every personal vault and nothing else (owner/console)
+      kmh wipe-player <user> <dry|confirm>    the economy plus mailbox, guild membership,
+                                              standings, reputation, notices and Discord link
+      kmh reset-cleanup <user> <dry|confirm>  audit, wipe-economy, then rebuild standings
+What a reset clears for that player: the personal treasury and a solo guild's vault;
+their listings, auctions, leading bids, want posts, quest bounties, mail attachments
+and roadworks escrow (burned, not refunded); owned sites and worker slots; recovery
+records; deliveries owed to the old colony; and payouts or refunds written down but
+not yet paid. Other players are made whole: bids on the player's auctions, attachments
+others sent them, and the other side of any unfinished trade are returned or finished,
+and a delivery quest whose goods already reached a reset poster pays its claimer.
+A guild Owner removed by wipe-player passes the guild to its senior member first.
+Kept: the username, guild membership (except wipe-player), donations already in a
+multi-member guild vault, the ledger history, and anything already paid to others.
+A reset is written down step by step: a crash or a full disk pauses the economy
+and the reset finishes on the next retry or boot, never twice. Nothing reports it
+done until every step is saved. RimWorld Together's own player reset does not run
+a Colony Nexus reset - run wipe-economy too. Run 'kmh audit' to spot orphaned or
+solo-guild vaults. 'kmh maintenance off' only lifts a 'kmh maintenance on'; a hold
+a reset or restore owns lifts when that finishes.
+
+KMH Global - linking, and unlinking
+-----------------------------------
+'kmh global setup' at the server console links this server to your KMH account
+and lists it in the in-game server browser. Three commands undo that, and they
+do different things:
+
+  kmh global disable          A PAUSE. Stops heartbeating, so the listing drops
+                              out of the browser. Keeps the server id, the
+                              signing key and the registration. 'kmh global
+                              setup' is not needed to come back - re-enable and
+                              it resumes where it left off.
+
+  kmh global unlink confirm   A LOCAL FORGET. This installation forgets its
+                              registration and owner link. It keeps the server id
+                              and the signing key, because Global knows the server
+                              by them, and it does NOT revoke anything on Global.
+                              Afterwards 'kmh global setup' links this same
+                              identity again.
+
+  Revoke, from the owner panel in your browser
+                              ENDS THE REGISTRATION on Global, for good. The key
+                              stops authenticating anywhere, the listing is gone,
+                              the server's guilds leave their federations, and the
+                              id can never be registered again.
+                              Deliberately not a console command: a machine that
+                              has lost its key, or someone who has taken a copy
+                              of it, must not be able to end your registration.
+
+'kmh global status' shows both sides - what this server holds, and what Global
+says about it. That second line is the one that tells a revoked registration
+apart from a network problem.
+
+KMH Global - changing the signing key
+-------------------------------------
+KMH-Data/Identity holds the key Global knows this server by. Back it up with
+your saves: restoring a newer copy is always the simplest fix. When that is not
+possible, three commands change the key and keep the server id:
+
+  kmh global rotate           Replaces a key that still works - after a
+                              suspected leak, say. Shows what will happen;
+                              'kmh global rotate confirm' starts it.
+  kmh global recover          Replaces a key you no longer have, or one Global
+                              refuses (KMH-SRV-303, 309 or 317). Shows what will
+                              happen; 'kmh global recover confirm' starts it.
+  kmh global rebind <code>    For a server with no owner whose id another key
+                              holds, or that the operator revoked. Ask the
+                              Colony Nexus Global operator for a rebind code;
+                              read them the key this prints before they apply it.
+
+rotate and recover print a link and a code; approve it in your browser, signed
+in with Steam as this server's owner, and the server finishes on its own, even
+across a restart. The new key is saved before Global is asked and installed only
+after Global accepted it; the old one is kept as global-signing.previous.key.
+'kmh global <command> cancel' abandons a change that has not reached Global.
+
+Afterwards each federated guild needs an officer (Admin or Owner rank) to press
+"Prove this server's link again" in its Federation window.
+
+An owner's own revocation is final: no command and no operator can bring that
+server id back.
 
 Extensions
 ----------
@@ -655,5 +947,5 @@ then run:  .\deploy.ps1   -> Deploy\ folder + zip in Releases\.
 
 deploy.ps1 without -SelfContained produces the framework-dependent layout: one
 KMHServerAddon.exe with the payloads, Newtonsoft, Harmony and the SDK inside it.
-With -SelfContained it produces a folder instead - .NET 8 alongside a launcher
+With -SelfContained it produces a folder instead - .NET 10 alongside a launcher
 stub and KMHServerAddon.dll, which is why that zip has to be kept together.

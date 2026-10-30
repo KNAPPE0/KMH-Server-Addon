@@ -18,6 +18,26 @@ namespace KMHServerAddon.Maintenance
 
         private static int TxnCount(string who) => TreasuryStore.GetSnapshotFor(who)?.RecentTransactions?.Count ?? 0;
 
+        private static IDisposable FailWrites(string file)
+            => JsonFileStore.FailWritesForTest(p => p == file ? "injected: disk full" : null);
+
+        private static byte[] ReadOrNull(string path)
+        {
+            try { return System.IO.File.Exists(path) ? System.IO.File.ReadAllBytes(path) : null; }
+            catch (Exception) { return null; }
+        }
+
+        // Null means the file was absent before the probe, so leaving one behind would seed a fake identity.
+        private static void RestoreOrDelete(string path, byte[] was)
+        {
+            try
+            {
+                if (was != null) System.IO.File.WriteAllBytes(path, was);
+                else if (System.IO.File.Exists(path)) System.IO.File.Delete(path);
+            }
+            catch (Exception) { }
+        }
+
         public static List<(string, bool, string)> Run()
         {
             var r = new List<(string, bool, string)>();
@@ -47,6 +67,87 @@ namespace KMHServerAddon.Maintenance
                 return (!during && after, $"during={during} after={after} (expected false then true)");
             });
 
+            // Returning silver to a guild vault is the one value path with no recovery hold behind it: the
+            // vault is already debited, so a compensation that cannot be written destroys the silver outright.
+            Check("Guild vault: a return that cannot be written is reported, not swallowed", () =>
+            {
+                string guild = "selftest_guild_" + Guid.NewGuid().ToString("N").Substring(0, 8);
+                string founder = "selftest_gf_" + Guid.NewGuid().ToString("N").Substring(0, 8);
+                // A vault is credited only while its guild lives, so the fixture is a real guild.
+                if (!Features.Guilds.GuildStore.CreateGuildAndJoinAsAdmin(founder, guild, out _)
+                    || !TreasuryStore.DepositGuildSilver(guild, 500, "seed", "selftest seed"))
+                    return (false, "could not seed the guild vault");
+
+                bool returned, degraded;
+                using (FailWrites(KmhDataPaths.TreasuryFile))
+                {
+                    returned = TreasuryStore.ReturnGuildSilver(guild, 100, "someone", "selftest return");
+                    degraded = Maintenance.KmhMaintenanceGate.PersistenceDegraded;
+                }
+                JsonFileStore.ClearFailureStateForTest();
+                Features.Guilds.GuildStore.Leave(founder, out _);
+                TreasuryStore.PurgeOwnerForTest(founder);
+                TreasuryStore.PurgeOwnerForTest(guild);
+
+                // A silent false lets the silver vanish with nobody told.
+                return (!returned && degraded, !returned && degraded
+                    ? "refused and persistence degraded"
+                    : $"returned={returned} degraded={degraded}");
+            });
+
+            Check("Site catalog: a save that fails stays dirty, so it is tried again", () =>
+            {
+                using (FailWrites(KmhDataPaths.SiteCatalogFile)) Features.Sites.SiteCatalogStore.SaveToDisk();
+                bool stillDirty = Features.Sites.SiteCatalogStore.Dirty;
+                JsonFileStore.ClearFailureStateForTest();
+                Features.Sites.SiteCatalogStore.SaveIfDirty();
+                bool clean = !Features.Sites.SiteCatalogStore.Dirty;
+                return (stillDirty && clean, $"dirty after the failed write={stillDirty}, clean after the retry={clean}");
+            });
+
+            Check("Linked accounts: a re-link that cannot be saved keeps the link the disk still holds", () =>
+            {
+                string who = "selftest_relink_" + Guid.NewGuid().ToString("N").Substring(0, 8);
+                ulong first = 800_000_000_000_000_000UL + (ulong)(Guid.NewGuid().GetHashCode() & 0x7fffffff);
+                if (!Features.LinkedAccounts.LinkedAccountsStore.SetLink(who, "first#0001", first, out string seedWhy))
+                    return (false, "could not seed the link: " + seedWhy);
+
+                bool relinked;
+                using (FailWrites(KmhDataPaths.LinkedAccountsFile))
+                    relinked = Features.LinkedAccounts.LinkedAccountsStore.SetLink(who, "second#0002", first + 1, out _);
+                JsonFileStore.ClearFailureStateForTest();
+
+                Features.LinkedAccounts.LinkedAccountsStore.TryGetLink(who, out string shown);
+                ulong id = Features.LinkedAccounts.LinkedAccountsStore.DiscordIdFor(who);
+                Features.LinkedAccounts.LinkedAccountsStore.Unlink(who);
+                bool ok = !relinked && shown == "first#0001" && id == first;
+                return (ok, $"relinked={relinked} shown={shown ?? "(none)"} id kept={id == first}");
+            });
+
+            Check("Mail: a purge that cannot be saved pays no return until it is written, then pays it once", () =>
+            {
+                string from = "selftest_mpurge_s_" + Guid.NewGuid().ToString("N").Substring(0, 8);
+                string to = "selftest_mpurge_r_" + Guid.NewGuid().ToString("N").Substring(0, 8);
+                if (!TreasuryStore.DepositSilver(from, 1000, "selftest seed")) return (false, "could not seed the sender");
+                long id = Features.Mail.MailStore.Send(from, to, "s", "b", 300, null, null, out _, out _, out string why);
+                if (id == 0) return (false, "send: " + why);
+                long sent = TreasuryStore.GetPersonalSilver(from);
+
+                using (FailWrites(KmhDataPaths.MailFile)) Features.Mail.MailStore.PurgeUser(to);
+                long unsaved = TreasuryStore.GetPersonalSilver(from);
+                JsonFileStore.ClearFailureStateForTest();
+
+                // The next successful write, then the boot, twice.
+                Features.Mail.MailStore.SaveToDisk();
+                Features.Mail.MailStore.RecoverPendingPayouts();
+                Features.Mail.MailStore.RecoverPendingPayouts();
+                long booted = TreasuryStore.GetPersonalSilver(from);
+                TreasuryStore.PurgeOwnerForTest(from);
+                TreasuryStore.PurgeOwnerForTest(to);
+                bool ok = unsaved == sent && booted == sent + 300;
+                return (ok, $"sender {sent} after sending, {unsaved} after the unsaved purge, {booted} after the boot");
+            });
+
             Check("Treasury: a withdrawal that cannot be saved is not granted", () =>
             {
                 string who = "selftest_durability_" + Guid.NewGuid().ToString("N").Substring(0, 8);
@@ -54,7 +155,7 @@ namespace KMHServerAddon.Maintenance
                 long seeded = TreasuryStore.GetPersonalSilver(who);
 
                 bool granted;
-                using (JsonFileStore.FailWritesForTest(p => p == KmhDataPaths.TreasuryFile ? "injected: disk full" : null))
+                using (FailWrites(KmhDataPaths.TreasuryFile))
                     granted = TreasuryStore.WithdrawSilver(who, 100, "selftest withdraw");
 
                 long afterFail = TreasuryStore.GetPersonalSilver(who);
@@ -73,7 +174,7 @@ namespace KMHServerAddon.Maintenance
                 long seeded = TreasuryStore.GetPersonalSilver(who);
 
                 bool ok;
-                using (JsonFileStore.FailWritesForTest(p => p == KmhDataPaths.TreasuryFile ? "injected: disk full" : null))
+                using (FailWrites(KmhDataPaths.TreasuryFile))
                     ok = TreasuryStore.DepositSilver(who, 250, "selftest deposit");
 
                 long after = TreasuryStore.GetPersonalSilver(who);
@@ -92,7 +193,7 @@ namespace KMHServerAddon.Maintenance
                 int seeded = ItemCount(who, "Steel");
 
                 bool granted;
-                using (JsonFileStore.FailWritesForTest(p => p == KmhDataPaths.TreasuryFile ? "injected: disk full" : null))
+                using (FailWrites(KmhDataPaths.TreasuryFile))
                     granted = TreasuryStore.WithdrawItem(who, "Steel", 20, "selftest withdraw");
 
                 int after = ItemCount(who, "Steel");
@@ -105,14 +206,18 @@ namespace KMHServerAddon.Maintenance
             Check("Treasury: a guild withdrawal that cannot be saved is not granted", () =>
             {
                 string guild = "selftest_guild_" + Guid.NewGuid().ToString("N").Substring(0, 8);
-                if (!TreasuryStore.DepositGuildSilver(guild, 800, "selftest", "selftest seed")) return (false, "could not seed the vault");
+                string founder = "selftest_gf_" + Guid.NewGuid().ToString("N").Substring(0, 8);
+                if (!Features.Guilds.GuildStore.CreateGuildAndJoinAsAdmin(founder, guild, out _)
+                    || !TreasuryStore.DepositGuildSilver(guild, 800, "selftest", "selftest seed")) return (false, "could not seed the vault");
                 long seeded = TreasuryStore.GetGuildSilver(guild);
 
                 bool granted;
-                using (JsonFileStore.FailWritesForTest(p => p == KmhDataPaths.TreasuryFile ? "injected: disk full" : null))
+                using (FailWrites(KmhDataPaths.TreasuryFile))
                     granted = TreasuryStore.WithdrawGuildSilver(guild, 300, "selftest", "selftest withdraw");
 
                 long after = TreasuryStore.GetGuildSilver(guild);
+                Features.Guilds.GuildStore.Leave(founder, out _);
+                TreasuryStore.PurgeOwnerForTest(founder);
                 TreasuryStore.PurgeOwnerForTest(guild);
                 return (!granted && after == seeded,
                     !granted && after == seeded ? "refused, vault intact"
@@ -125,7 +230,7 @@ namespace KMHServerAddon.Maintenance
                 if (!TreasuryStore.DepositSilver(who, 1000, "selftest seed")) return (false, "could not seed the vault");
                 int before = TxnCount(who);
 
-                using (JsonFileStore.FailWritesForTest(p => p == KmhDataPaths.TreasuryFile ? "injected: disk full" : null))
+                using (FailWrites(KmhDataPaths.TreasuryFile))
                     TreasuryStore.WithdrawSilver(who, 100, "selftest withdraw");
 
                 int after = TxnCount(who);
@@ -141,7 +246,7 @@ namespace KMHServerAddon.Maintenance
 
                 long id;
                 string reason;
-                using (JsonFileStore.FailWritesForTest(p => p == KmhDataPaths.MarketplaceFile ? "injected: disk full" : null))
+                using (FailWrites(KmhDataPaths.MarketplaceFile))
                     id = Features.Marketplace.MarketplaceStore.Post(who, "Steel", 40, 5, "public", 0, out reason);
 
                 int stillHeld = ItemCount(who, "Steel");
@@ -163,7 +268,7 @@ namespace KMHServerAddon.Maintenance
                 int afterPost = ItemCount(who, "Steel");
 
                 bool cancelled;
-                using (JsonFileStore.FailWritesForTest(p => p == KmhDataPaths.MarketplaceFile ? "injected: disk full" : null))
+                using (FailWrites(KmhDataPaths.MarketplaceFile))
                     cancelled = Features.Marketplace.MarketplaceStore.Cancel(who, id);
 
                 int afterCancel = ItemCount(who, "Steel");
@@ -188,7 +293,7 @@ namespace KMHServerAddon.Maintenance
                 long buyerBefore = TreasuryStore.GetPersonalSilver(buyer);
 
                 bool bought;
-                using (JsonFileStore.FailWritesForTest(p => p == KmhDataPaths.MarketplaceFile ? "injected: disk full" : null))
+                using (FailWrites(KmhDataPaths.MarketplaceFile))
                     bought = Features.Marketplace.MarketplaceStore.Buy(buyer, id, 10, out _, out _, out _);
 
                 long buyerAfter = TreasuryStore.GetPersonalSilver(buyer);
@@ -210,7 +315,7 @@ namespace KMHServerAddon.Maintenance
                 long seeded = Features.Marketplace.MarketplaceStore.HousePoolBalance();
 
                 bool debited;
-                using (JsonFileStore.FailWritesForTest(p => p == KmhDataPaths.MarketplaceFile ? "injected: disk full" : null))
+                using (FailWrites(KmhDataPaths.MarketplaceFile))
                     debited = Features.Marketplace.MarketplaceStore.TryDebitHousePool(200, "selftest debit");
 
                 long after = Features.Marketplace.MarketplaceStore.HousePoolBalance();
@@ -226,7 +331,7 @@ namespace KMHServerAddon.Maintenance
                 if (!TreasuryStore.DepositItem(who, "Steel", 60, "selftest seed")) return (false, "could not seed the vault");
 
                 long id;
-                using (JsonFileStore.FailWritesForTest(p => p == KmhDataPaths.AuctionsFile ? "injected: disk full" : null))
+                using (FailWrites(KmhDataPaths.AuctionsFile))
                     (id, _) = Features.Auctions.AuctionStore.Post(who, "Steel", "", 0, 25, 100, 10, 0, 24, "public");
 
                 int held = ItemCount(who, "Steel");
@@ -244,7 +349,7 @@ namespace KMHServerAddon.Maintenance
                 long seeded = TreasuryStore.GetPersonalSilver(who);
 
                 long id;
-                using (JsonFileStore.FailWritesForTest(p => p == KmhDataPaths.WantsFile ? "injected: disk full" : null))
+                using (FailWrites(KmhDataPaths.WantsFile))
                     (id, _) = Features.WantBoard.WantStore.Post(who, "Steel", 20, 10, 24, "public", 0, "", false, false, false);
 
                 long after = TreasuryStore.GetPersonalSilver(who);
@@ -255,6 +360,40 @@ namespace KMHServerAddon.Maintenance
                                                        : $"id={id}, open={open}, silver {seeded} -> {after} - THIS STRANDS THE BUYER'S ESCROW");
             });
 
+            Check("Global: an identity that cannot be written is reported, not assumed saved", () =>
+            {
+                byte[] cfgWas   = ReadOrNull(KmhDataPaths.GlobalConfigFile);
+                byte[] stateWas = ReadOrNull(KmhDataPaths.GlobalSetupFile);
+                Features.Global.GlobalConfig prevCfg =
+                    Features.Global.GlobalConfig.ApplyForTest(new Features.Global.GlobalConfig { RegisteredServerId = "selftest-srv" });
+                Features.Global.GlobalSetupState prevState =
+                    Features.Global.GlobalSetupState.ApplyForTest(new Features.Global.GlobalSetupState());
+                try
+                {
+                    bool cfgOk = Features.Global.GlobalConfig.Current.Save();
+                    bool stageOk = Features.Global.GlobalSetupState.Current_.Advance(Features.Global.SetupStage.Registered);
+
+                    bool cfgFailed, stageFailed;
+                    using (JsonFileStore.FailWritesForTest(p => p == KmhDataPaths.GlobalConfigFile
+                                                             || p == KmhDataPaths.GlobalSetupFile ? "injected: disk full" : null))
+                    {
+                        cfgFailed   = !Features.Global.GlobalConfig.Current.Save();
+                        stageFailed = !Features.Global.GlobalSetupState.Current_.Advance(Features.Global.SetupStage.Registered);
+                    }
+                    // A ServerId only in memory re-registers on restart, orphaning the identity Global already issued.
+                    bool ok = cfgOk && stageOk && cfgFailed && stageFailed;
+                    return (ok, ok ? "true when written, false when not"
+                                   : $"written={cfgOk}/{stageOk}, refused={cfgFailed}/{stageFailed} - THIS RE-REGISTERS A NEW IDENTITY");
+                }
+                finally
+                {
+                    Features.Global.GlobalConfig.ApplyForTest(prevCfg);
+                    Features.Global.GlobalSetupState.ApplyForTest(prevState);
+                    RestoreOrDelete(KmhDataPaths.GlobalConfigFile, cfgWas);
+                    RestoreOrDelete(KmhDataPaths.GlobalSetupFile, stateWas);
+                }
+            });
+
             Check("Quests: a post that cannot be saved returns the bounty", () =>
             {
                 string who = "selftest_durability_" + Guid.NewGuid().ToString("N").Substring(0, 8);
@@ -262,7 +401,7 @@ namespace KMHServerAddon.Maintenance
                 long seeded = TreasuryStore.GetPersonalSilver(who);
 
                 long id;
-                using (JsonFileStore.FailWritesForTest(p => p == KmhDataPaths.QuestsFile ? "injected: disk full" : null))
+                using (FailWrites(KmhDataPaths.QuestsFile))
                     id = Features.Quests.QuestStore.Post(who, Features.Quests.Dto.QuestEntry.KindDeliverItem,
                                                          Features.Quests.Dto.QuestEntry.VisibilityPublic,
                                                          "selftest quest", "probe", 500, "Steel", 5, 24);
@@ -283,7 +422,7 @@ namespace KMHServerAddon.Maintenance
                 if (!Features.Guilds.GuildStore.AddMember(mate, gname)) return (false, "could not seed a member");
 
                 bool kicked;
-                using (JsonFileStore.FailWritesForTest(p => p == KmhDataPaths.GuildsFile ? "injected: disk full" : null))
+                using (FailWrites(KmhDataPaths.GuildsFile))
                     kicked = Features.Guilds.GuildStore.Kick(owner, mate);
 
                 // Told they were kicked while the disk still says otherwise is an authority rollback on restart.
@@ -304,7 +443,7 @@ namespace KMHServerAddon.Maintenance
                 if (!Features.Guilds.GuildStore.SetMotd(owner, "before")) return (false, "could not seed a motd");
 
                 bool motdOk, joinOk, invited;
-                using (JsonFileStore.FailWritesForTest(p => p == KmhDataPaths.GuildsFile ? "injected: disk full" : null))
+                using (FailWrites(KmhDataPaths.GuildsFile))
                 {
                     motdOk  = Features.Guilds.GuildStore.SetMotd(owner, "after");
                     joinOk  = Features.Guilds.GuildStore.SetOpenJoin(owner, true, out _);
@@ -378,7 +517,7 @@ namespace KMHServerAddon.Maintenance
                 long id;
                 bool queuedForRetry, knownMemoryOnly;
                 // Read inside the scope: disposing the seam clears the failure state it recorded.
-                using (JsonFileStore.FailWritesForTest(p => p == KmhDataPaths.RecoveryFile ? "injected: disk full" : null))
+                using (FailWrites(KmhDataPaths.RecoveryFile))
                 {
                     id = Features.Recovery.RecoveryStore.HoldSilver(who, 700, "selftest", "probe");
                     queuedForRetry  = ExpirySweeper.ShouldRetrySaves;
@@ -401,7 +540,7 @@ namespace KMHServerAddon.Maintenance
                 JsonFileStore.ClearFailureStateForTest();
                 bool quietWhenClean = !ExpirySweeper.ShouldRetrySaves;
                 bool retryArmed, notFrozenYet;
-                using (JsonFileStore.FailWritesForTest(p => p == KmhDataPaths.RecoveryFile ? "injected: disk full" : null))
+                using (FailWrites(KmhDataPaths.RecoveryFile))
                 {
                     Features.Recovery.RecoveryStore.SaveToDisk();
                     // The freeze deliberately still waits for a repeated failure; the retry sweeper must not.
@@ -422,7 +561,7 @@ namespace KMHServerAddon.Maintenance
                 long before = TreasuryStore.GetPersonalSilver(who);
 
                 bool retried;
-                using (JsonFileStore.FailWritesForTest(p => p == KmhDataPaths.RecoveryFile ? "injected: disk full" : null))
+                using (FailWrites(KmhDataPaths.RecoveryFile))
                     retried = Features.Recovery.RecoveryStore.Retry(id, out _);
 
                 long after = TreasuryStore.GetPersonalSilver(who);
@@ -441,19 +580,70 @@ namespace KMHServerAddon.Maintenance
                 string who = "selftest_durability_" + Guid.NewGuid().ToString("N").Substring(0, 8);
                 if (!TreasuryStore.DepositSilver(who, 1000, "selftest seed")) return (false, "could not seed the vault");
                 bool degradedDuring;
-                using (JsonFileStore.FailWritesForTest(p => p == KmhDataPaths.TreasuryFile ? "injected: disk full" : null))
+                using (FailWrites(KmhDataPaths.TreasuryFile))
                 {
                     for (int i = 0; i < 3; i++) TreasuryStore.WithdrawSilver(who, 10, "selftest");
                     degradedDuring = KmhMaintenanceGate.PersistenceDegraded;
                 }
                 bool clearedAfter = !KmhMaintenanceGate.PersistenceDegraded;
                 TreasuryStore.PurgeOwnerForTest(who);
-                // Per-transaction refusal is the fix; the global freeze stays as the owner-facing safety net on top.
+                // Per-transaction refusal is the guard; the global freeze is only the owner-facing safety net on top.
                 return (degradedDuring && clearedAfter,
                     $"degraded during={degradedDuring}, cleared after={clearedAfter}");
             });
 
+            // A store changed mid-write must count its skipped save, or nothing retries it and its freeze lasts until restart.
+            Check("Persistence: a store that changes while being written is retried, and the freeze it raised clears", () =>
+            {
+                JsonFileStore.ClearFailureStateForTest();
+                string path = ScratchFile;
+                byte[] was = ReadOrNull(path);
+                try
+                {
+                    bool failed = !JsonFileStore.Save(path, new ChangingProbe());
+                    bool retryArmed = ExpirySweeper.ShouldRetrySaves;
+                    KmhMaintenanceGate.SetPersistenceDegraded(true);   // what the ledger does when its save fails
+                    bool saved = JsonFileStore.Save(path, new Dictionary<string, int> { { "ok", 1 } });
+                    bool cleared = !ExpirySweeper.ShouldRetrySaves && !KmhMaintenanceGate.PersistenceDegraded;
+                    bool ok = failed && retryArmed && saved && cleared;
+                    return (ok, ok ? "counted, retried, and the next good save lifts the freeze"
+                                  : $"failed={failed}, retryArmed={retryArmed}, saved={saved}, freezeCleared={cleared}"
+                                    + (!cleared ? " - VALUE MOVES STAY FROZEN UNTIL A RESTART" : ""));
+                }
+                finally { RestoreOrDelete(path, was); JsonFileStore.ClearFailureStateForTest(); }
+            });
+
+            Check("Transactions: a row changing while the ledger is copied is copied again, not a failed save", () =>
+            {
+                string who = "selftest_durability_" + Guid.NewGuid().ToString("N").Substring(0, 8);
+                int copies = 0;
+                Transactions.KmhTransactionRepository.BeforeSnapshotForTest = () =>
+                {
+                    if (copies++ == 0) throw new InvalidOperationException("Collection was modified; enumeration operation may not execute.");
+                };
+                Transactions.KmhTransaction tx = Transactions.KmhTransaction.Create(who, "selftest", Transactions.KmhTxType.Withdrawal, "selftest");
+                bool added;
+                try { added = Transactions.KmhTransactionRepository.Add(tx); }
+                finally { Transactions.KmhTransactionRepository.BeforeSnapshotForTest = null; }
+                if (added) Transactions.KmhTransactionRepository.Abort(tx);
+                bool frozen = KmhMaintenanceGate.PersistenceDegraded;
+                bool ok = added && copies >= 2 && !frozen;
+                return (ok, ok ? "copied again and saved"
+                              : $"added={added}, copies={copies}, frozen={frozen}");
+            });
+
             return r;
+        }
+
+        // Serializes the way a collection changed mid-write does.
+        private sealed class ChangingProbe
+        {
+            public IEnumerable<int> Rows => Changing();
+            private static IEnumerable<int> Changing()
+            {
+                yield return 1;
+                throw new InvalidOperationException("Collection was modified; enumeration operation may not execute.");
+            }
         }
     }
 }

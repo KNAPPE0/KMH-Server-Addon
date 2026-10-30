@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Text;
 using System.Threading.Tasks;
 using KMHServerAddon.Diagnostics;
@@ -6,44 +6,23 @@ using KMHServerAddon.Features.Discord;
 
 namespace KMHServerAddon.Maintenance
 {
-    // Describes the recommended defaults set rather than the running build, since only the upgrade raises it.
+    // The Discord half of the regeneration notice; the console half is KmhConfigRegeneration.Announce.
     internal static class KmhOwnerNotice
     {
         public static void ScheduleIfNeeded()
         {
-            if (!KmhDefaultsUpgrade.RanThisBoot) return;
+            if (KmhConfigRegeneration.Regenerated.Count == 0) return;
             Task.Run(async () =>
             {
                 try
                 {
                     await Task.Delay(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
-                    PrintConsole();
                     await TrySendDiscord().ConfigureAwait(false);
                 }
                 catch (Exception ex) { ServerLog.Verbose($"Owner notice failed: {ex.Message}"); }
             });
         }
 
-        private static void PrintConsole()
-        {
-            ServerLog.Warn("============== KMH RECOMMENDED DEFAULTS - PLEASE READ ==============");
-            ServerLog.Warn("Your server was behind KMH's recommended defaults; they have been applied (one-time):");
-            foreach (string c in KmhDefaultsUpgrade.Changed)   ServerLog.Warn($"  changed:   {c}");
-            foreach (string p in KmhDefaultsUpgrade.Preserved) ServerLog.Warn($"  preserved: {p} (your custom value was kept)");
-            if (KmhDefaultsUpgrade.Changed.Count == 0)
-                ServerLog.Warn("  (all targeted settings were owner-customized - nothing was changed)");
-            ServerLog.Warn("Living world is now ON by default: world events auto-roll and global quests");
-            ServerLog.Warn("auto-generate so the server feels alive. Quieter server? In Config/World.json");
-            ServerLog.Warn("set AutoRollEvents/AutoGenerateQuests to false (or Features.json LivingWorld).");
-            ServerLog.Warn("KMH API transport is now enabled by default and public-ready: auth, connection");
-            ServerLog.Warn("caps, failed-auth throttling, timeouts and frame limits are all required by");
-            ServerLog.Warn("default - a public bind never means an unsecured bind. For remote players,");
-            ServerLog.Warn($"forward TCP port {Features.Transport.TransportConfig.Current.KmhApiPort} and verify with 'kmh transport-test'.");
-            ServerLog.Warn("Review KMH-Data/Config/ - your custom settings were preserved. See SETUP.txt.");
-            ServerLog.Warn("===========================================================================");
-        }
-
-        // Post to the Admin channel if the bridge connects with one configured; wait up to ~60s for Ready.
         private static async Task TrySendDiscord()
         {
             DiscordConfig cfg = DiscordBridge.Config;
@@ -57,19 +36,20 @@ namespace KMHServerAddon.Maintenance
             if (DiscordBridge.Client?.ConnectionState != global::Discord.ConnectionState.Connected) return;
 
             StringBuilder sb = new StringBuilder();
-            sb.AppendLine("**KMH applied its recommended defaults to this server** (one-time, custom settings preserved):");
-            foreach (string c in KmhDefaultsUpgrade.Changed) sb.AppendLine($"• {c}");
-            if (KmhDefaultsUpgrade.Changed.Count == 0) sb.AppendLine("• nothing changed - all targeted settings were owner-customized");
+            sb.AppendLine("⚠️ **Colony Nexus regenerated your server configuration**");
+            sb.AppendLine("**Colony Nexus v1.3.1 rebuilt this server's configuration from the current defaults.**");
+            sb.AppendLine("Settings were *not* upgraded field by field - the files below were replaced outright, so any "
+                        + "value you had tuned is back at its default.");
             sb.AppendLine();
-            sb.AppendLine("🌍 **Living world is now on by default** - world events auto-roll and global quests auto-generate. " +
-                          "Disable in `Config/World.json` for a quieter server.");
-            sb.AppendLine("🔌 **KMH API transport is now on by default and public-ready** - auth, caps, throttling and limits " +
-                          $"are required by default; forward TCP {Features.Transport.TransportConfig.Current.KmhApiPort} for remote players and run `kmh transport-test`.");
-            sb.Append("Please review `KMH-Data/Config/` after this update.");
+            sb.AppendLine($"🔁 **Regenerated** - {string.Join(", ", KmhConfigRegeneration.Regenerated.ToArray())}");
+            sb.AppendLine($"🔒 **Kept untouched** (identity and credentials) - {string.Join(", ", KmhConfigRegeneration.Preserved.ToArray())}");
+            sb.AppendLine();
+            sb.AppendLine("📦 Your previous files are in `KMH-Data-Backups` under a `premigration-config` folder.");
+            sb.AppendLine("📖 What each file does is written to `KMH-Data/Config/README.txt`; `kmh config` lists every "
+                        + "setting and its current value.");
+            sb.Append("⚖️ The economy runs on `EconomyMode=Balanced` unless you change it.");
 
-            DiscordBridge.PostEmbedToChannel(cfg.AdminChannelId,
-                KmhEmbedBuilder.Base(cfg, "⚠️ KMH recommended defaults applied", sb.ToString()),
-                DiscordIcons.Warning);
+            await DiscordBridge.PostToChannelAsync(cfg.AdminChannelId, sb.ToString()).ConfigureAwait(false);
         }
     }
 }

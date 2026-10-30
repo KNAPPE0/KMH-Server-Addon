@@ -60,7 +60,6 @@ namespace KMHServerAddon.Features.Sites
             KmhRouter.SendTo(client, KmhProtocol.Kind.SiteQuote, quote);
         }
 
-        // Curated, server-classified output catalog for the client's Site output picker.
         private static void OnCatalogRequest(ServerClient client, KmhEnvelope env)
         {
             string user = client?.GetData<UserFile>()?.Username;
@@ -167,7 +166,9 @@ namespace KMHServerAddon.Features.Sites
         private static void OnLeave(ServerClient client, KmhEnvelope env)
         {
             string user = client?.GetData<UserFile>()?.Username;
-            var (ok, reason) = SiteStore.LeaveWorker(user, env?.GetInt("tile", -1) ?? -1);
+            // Absent on an older client, which reads as -1 and pulls all of theirs.
+            var (ok, reason) = SiteStore.LeaveWorker(user, env?.GetInt("tile", -1) ?? -1,
+                                                     env?.GetInt("pawn_load_id", -1) ?? -1);
             Reply(client, ok, ok ? reason : $"Leave failed: {reason}");
             if (ok) BroadcastSnapshot();
         }
@@ -199,6 +200,12 @@ namespace KMHServerAddon.Features.Sites
 
         // Verified, not interested: an outpost is drawn on the world map without anyone opening Sites.
         internal static void BroadcastSnapshot()
+        {
+            if (SubProtocol.KmhBroadcastBatch.Defer(KmhProtocol.Kind.SiteSnapshot, BroadcastSnapshotNow)) return;
+            BroadcastSnapshotNow();
+        }
+
+        private static void BroadcastSnapshotNow()
             => KmhRouter.BroadcastToVerified(KmhProtocol.Kind.SiteSnapshot, u => SiteStore.BuildSnapshotFor(u));
 
         private static void SendTreasuryTo(ServerClient client)
@@ -208,7 +215,6 @@ namespace KMHServerAddon.Features.Sites
             KmhRouter.SendTo(client, KmhProtocol.Kind.TreasurySnapshot, Treasury.TreasuryStore.GetSnapshotFor(user));
         }
 
-        // Toast the action result: store success messages confirm what happened, failures explain why
         private static void Reply(ServerClient client, bool ok, string text)
             => KmhRouter.Notify(client, ok ? "positive" : "negative", text);
     }

@@ -1,9 +1,7 @@
 namespace KMH.Sdk.Server.Hooks
 {
-    /// <summary>
-    /// A player is trying to create a marketplace listing. It has passed KMH's own validation and nothing is
-    /// escrowed yet, so denying is side-effect-free.
-    /// </summary>
+    /// <summary>A player is trying to create a marketplace listing.</summary>
+    /// <remarks>It passed KMH's own validation and nothing is escrowed yet, so denying is side-effect-free.</remarks>
     public sealed class KmhMarketplaceListingContext
     {
         /// <summary>Seller's KMH username.</summary>
@@ -27,15 +25,9 @@ namespace KMH.Sdk.Server.Hooks
         }
     }
 
-    /// <summary>A listing is about to be shown to <see cref="Viewer"/>. Deny to hide it from that player.</summary>
-    /// <remarks>
-    /// This runs once per listing per viewer, so it must be cheap - no I/O, no network, no locks. It is also
-    /// consulted before a buy, so hiding a listing prevents purchasing it rather than only removing it from the board.
-    /// <para>
-    /// Registering any visibility hook turns off snapshot sharing between players: KMH cannot know a hook answers
-    /// the same way for two viewers, so it fails closed and builds a snapshot per recipient.
-    /// </para>
-    /// </remarks>
+    /// <summary>A listing is about to be shown to <see cref="Viewer"/>; deny to hide it, which also blocks buying it.</summary>
+    /// <remarks>Runs per listing per viewer, so no I/O, network or locks. Any visibility hook turns off snapshot sharing:
+    /// KMH cannot know a hook answers alike for two viewers, so it builds one snapshot per recipient.</remarks>
     public sealed class KmhMarketplaceVisibilityContext
     {
         /// <summary>The player the listing would be shown to.</summary>
@@ -107,10 +99,8 @@ namespace KMH.Sdk.Server.Hooks
         }
     }
 
-    /// <summary>
-    /// A player is trying to withdraw from their treasury to their colony. Only player-initiated withdrawals reach
-    /// a hook - KMH's internal escrow moves never do - and nothing has left the vault, so denying is side-effect-free.
-    /// </summary>
+    /// <summary>A player is withdrawing from their treasury to their colony; KMH's internal escrow moves never reach a hook.</summary>
+    /// <remarks>Nothing has left the vault yet, so denying is side-effect-free.</remarks>
     public sealed class KmhTreasuryWithdrawContext
     {
         /// <summary>Player's KMH username.</summary>

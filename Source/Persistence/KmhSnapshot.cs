@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -24,11 +24,28 @@ namespace KMHServerAddon.Persistence
 
         public static string Season() => "S" + Features.Seasons.SeasonStore.CurrentSeason;
 
+        // Seconds, not minutes, or two snapshots in one minute share a folder and the later overwrites the earlier.
+        public const string LeafFormat       = "yyyy-MM-dd_HH-mm-ss";
+        private const string LegacyLeafFormat = "yyyy-MM-dd_HH-mm";
+
         public static string FolderName(string matchTimestamp)
             => string.IsNullOrWhiteSpace(matchTimestamp)
-                ? DateTime.UtcNow.ToString("yyyy-MM-dd_HH-mm")
+                ? DateTime.UtcNow.ToString(LeafFormat)
                 : SanitizePart(matchTimestamp.Trim());
 
+        // A match timestamp is an identity the caller chose, so only the auto-named path is made unique.
+        internal static string ReserveLeaf(string parent, string baseName, bool named)
+        {
+            Directory.CreateDirectory(parent);
+            string candidate = Path.Combine(parent, baseName);
+            if (named || !Directory.Exists(candidate)) return candidate;
+            for (int i = 2; i < 1000; i++)
+            {
+                string next = Path.Combine(parent, $"{baseName}-{i}");
+                if (!Directory.Exists(next)) return next;
+            }
+            return Path.Combine(parent, $"{baseName}-{Guid.NewGuid().ToString("N").Substring(0, 6)}");
+        }
 
         public static bool SnapshotServer(string matchTimestamp, string sourceSaveTimestamp, out string dir, out string error)
         {
@@ -36,22 +53,32 @@ namespace KMHServerAddon.Persistence
             List<string> warnings = new List<string>();
             try
             {
-                Maintenance.KmhDataFlush.FlushAll();   // flush so on-disk is current
-
                 string folder = FolderName(matchTimestamp);
-                dir = Path.Combine(KmhDataPaths.SnapshotsRoot, Season(), "_server", folder);
+                dir = ReserveLeaf(Path.Combine(KmhDataPaths.SnapshotsRoot, Season(), "_server"),
+                                  folder, !string.IsNullOrWhiteSpace(matchTimestamp));
+
+                // Read under the gate, or a trade landing between reads snapshots a state that never existed.
+                var raw = new List<(string Label, string Json)>();
+                Maintenance.KmhMaintenanceGate.Run(Maintenance.KmhMaintenanceReason.Backup, () =>
+                {
+                    Maintenance.KmhDataFlush.FlushAll();
+                    foreach (KmhDataPaths.DataFile f in KmhDataPaths.KnownDataFiles)
+                    {
+                        try
+                        {
+                            if (!File.Exists(f.Path)) continue;
+                            raw.Add((f.Label, File.ReadAllText(f.Path)));
+                        }
+                        catch (Exception ex) { warnings.Add($"store '{f.Label}' skipped: {ex.Message}"); }
+                    }
+                });
 
                 JObject stores = new JObject();
                 List<string> included = new List<string>();
-                foreach (KmhDataPaths.DataFile f in KmhDataPaths.KnownDataFiles)
+                foreach ((string Label, string Json) s in raw)
                 {
-                    try
-                    {
-                        if (!File.Exists(f.Path)) continue;
-                        stores[f.Label] = JToken.Parse(File.ReadAllText(f.Path));
-                        included.Add(f.Label);
-                    }
-                    catch (Exception ex) { warnings.Add($"store '{f.Label}' skipped: {ex.Message}"); }
+                    try { stores[s.Label] = JToken.Parse(s.Json); included.Add(s.Label); }
+                    catch (Exception ex) { warnings.Add($"store '{s.Label}' skipped: {ex.Message}"); }
                 }
 
                 JObject snap = new JObject
@@ -77,48 +104,47 @@ namespace KMHServerAddon.Persistence
             catch (Exception ex) { error = ex.Message; return false; }
         }
 
-
         // One list, so the writer and its coverage test can never disagree about what a player record contains.
         private static void GatherPlayer(string user, JObject data, List<string> included, List<string> warnings)
         {
-                Gather(data, included, warnings, "standings", () =>
-                    Features.PlayerStats.PlayerStatsStore.BuildSnapshot().Entries.FirstOrDefault(e => Eq(e.Username, user)));
-                Gather(data, included, warnings, "colonist", () => Features.PlayerStats.PlayerStatsStore.GetColonist(user));
-                Gather(data, included, warnings, "roster", () =>
-                    Features.PlayerStats.PlayerStatsStore.BuildColonistRoster().Colonists.Where(c => Eq(c.Owner, user)).ToList());
-                Gather(data, included, warnings, "reputation", () =>
-                    Features.Reputation.ReputationStore.BuildSnapshot().Entries.FirstOrDefault(r => Eq(r.Username, user)));
-                Gather(data, included, warnings, "treasury", () => Features.Treasury.TreasuryStore.GetSnapshotFor(user));
-                Gather(data, included, warnings, "guild", () => Features.Guilds.GuildStore.BuildEnvelopeFor(user));
-                Gather(data, included, warnings, "guild_invites", () => Features.Guilds.GuildStore.InvitesFor(user));
-                Gather(data, included, warnings, "marketplace_listings", () =>
-                    Features.Marketplace.MarketplaceStore.BuildSnapshot(user).Listings.Where(l => Eq(l.SellerUsername, user)).ToList());
-                Gather(data, included, warnings, "auctions", () =>
-                    Features.Auctions.AuctionStore.AllForAdmin().Where(a => Eq(a.SellerUsername, user) || Eq(a.HighBidder, user)).ToList());
-                Gather(data, included, warnings, "wants", () =>
-                    Features.WantBoard.WantStore.AllForAdmin().Where(w => Eq(w.BuyerUsername, user)).ToList());
-                Gather(data, included, warnings, "quests", () =>
-                    Features.Quests.QuestStore.BuildSnapshot(user).Quests.Where(q => Eq(q.PosterUsername, user) || Eq(q.ClaimedByUsername, user)).ToList());
-                Gather(data, included, warnings, "sites", () =>
-                    Features.Sites.SiteStore.AllForApi().Where(s => Eq(s.OwnerUsername, user) || (s.Workers != null && s.Workers.Any(w => Eq(w, user)))).ToList());
-                Gather(data, included, warnings, "roadworks", () => Features.Roadworks.RoadworksStore.ProjectsFor(user));
-                // "notifications" is the offline notice queue, "player_mail" the Mail feature - never merge the keys.
-                Gather(data, included, warnings, "notifications", () => Features.Notifications.NotificationStore.PeekForUser(user));
-                Gather(data, included, warnings, "player_mail", () => Features.Mail.MailStore.BuildView(user));
-                Gather(data, included, warnings, "recovery", () => Features.Recovery.RecoveryStore.ForUser(user));
-                Gather(data, included, warnings, "blocks", () => Features.Chat.ChatModerationStore.BlockedSetFor(user));
-                Gather(data, included, warnings, "linked_account", () =>
-                    Features.LinkedAccounts.LinkedAccountsStore.TryGetLink(user, out string dn)
-                        ? new { linked = true, discord_name = dn, discord_id = Features.LinkedAccounts.LinkedAccountsStore.DiscordIdFor(user).ToString() }
-                        : (object)new { linked = false });
-                Gather(data, included, warnings, "guild_contributions", () =>
-                {
-                    string g = Features.Guilds.GuildStore.CurrentGuildOf(user);
-                    return string.IsNullOrEmpty(g)
-                        ? new List<Features.Guilds.Contributions.KmhGuildContribution>()
-                        : Features.Guilds.Contributions.KmhGuildContributionLedger.ForPlayer(g, user);
-                });
-                Gather(data, included, warnings, "ledger", () => TransactionLedger.ReadRecent(200, user));
+            Gather(data, included, warnings, "standings", () =>
+                Features.PlayerStats.PlayerStatsStore.BuildSnapshot().Entries.FirstOrDefault(e => Eq(e.Username, user)));
+            Gather(data, included, warnings, "colonist", () => Features.PlayerStats.PlayerStatsStore.GetColonist(user));
+            Gather(data, included, warnings, "roster", () =>
+                Features.PlayerStats.PlayerStatsStore.BuildColonistRoster().Colonists.Where(c => Eq(c.Owner, user)).ToList());
+            Gather(data, included, warnings, "reputation", () =>
+                Features.Reputation.ReputationStore.BuildSnapshot().Entries.FirstOrDefault(r => Eq(r.Username, user)));
+            Gather(data, included, warnings, "treasury", () => Features.Treasury.TreasuryStore.GetSnapshotFor(user));
+            Gather(data, included, warnings, "guild", () => Features.Guilds.GuildStore.BuildEnvelopeFor(user));
+            Gather(data, included, warnings, "guild_invites", () => Features.Guilds.GuildStore.InvitesFor(user));
+            Gather(data, included, warnings, "marketplace_listings", () =>
+                Features.Marketplace.MarketplaceStore.BuildSnapshot(user).Listings.Where(l => Eq(l.SellerUsername, user)).ToList());
+            Gather(data, included, warnings, "auctions", () =>
+                Features.Auctions.AuctionStore.AllForAdmin().Where(a => Eq(a.SellerUsername, user) || Eq(a.HighBidder, user)).ToList());
+            Gather(data, included, warnings, "wants", () =>
+                Features.WantBoard.WantStore.AllForAdmin().Where(w => Eq(w.BuyerUsername, user)).ToList());
+            Gather(data, included, warnings, "quests", () =>
+                Features.Quests.QuestStore.BuildSnapshot(user).Quests.Where(q => Eq(q.PosterUsername, user) || Eq(q.ClaimedByUsername, user)).ToList());
+            Gather(data, included, warnings, "sites", () =>
+                Features.Sites.SiteStore.AllForApi().Where(s => Eq(s.OwnerUsername, user) || (s.Workers != null && s.Workers.Any(w => Features.Sites.SiteWorkerKey.IsOwnedBy(w, user)))).ToList());
+            Gather(data, included, warnings, "roadworks", () => Features.Roadworks.RoadworksStore.ProjectsFor(user));
+            // "notifications" is the offline notice queue, "player_mail" the Mail feature - never merge the keys.
+            Gather(data, included, warnings, "notifications", () => Features.Notifications.NotificationStore.PeekForUser(user));
+            Gather(data, included, warnings, "player_mail", () => Features.Mail.MailStore.BuildView(user));
+            Gather(data, included, warnings, "recovery", () => Features.Recovery.RecoveryStore.ForUser(user));
+            Gather(data, included, warnings, "blocks", () => Features.Chat.ChatModerationStore.BlockedSetFor(user));
+            Gather(data, included, warnings, "linked_account", () =>
+                Features.LinkedAccounts.LinkedAccountsStore.TryGetLink(user, out string dn)
+                    ? new { linked = true, discord_name = dn, discord_id = Features.LinkedAccounts.LinkedAccountsStore.DiscordIdFor(user).ToString() }
+                    : (object)new { linked = false });
+            Gather(data, included, warnings, "guild_contributions", () =>
+            {
+                string g = Features.Guilds.GuildStore.CurrentGuildOf(user);
+                return string.IsNullOrEmpty(g)
+                    ? new List<Features.Guilds.Contributions.KmhGuildContribution>()
+                    : Features.Guilds.Contributions.KmhGuildContributionLedger.ForPlayer(g, user);
+            });
+            Gather(data, included, warnings, "ledger", () => TransactionLedger.ReadRecent(200, user));
         }
 
         // Coverage seam. Callers pass a username that cannot exist, so no store is created by asking.
@@ -139,10 +165,13 @@ namespace KMHServerAddon.Persistence
             {
                 string user = username.Trim();
                 JObject data = new JObject();
-                GatherPlayer(user, data, included, warnings);
-
                 bool inGuild = false;
-                try { inGuild = !string.IsNullOrEmpty(Features.Guilds.GuildStore.CurrentGuildOf(user)); } catch { }
+                // The guild comes from a different store again, so both are read while value moves are held.
+                Maintenance.KmhMaintenanceGate.Run(Maintenance.KmhMaintenanceReason.Backup, () =>
+                {
+                    GatherPlayer(user, data, included, warnings);
+                    try { inGuild = !string.IsNullOrEmpty(Features.Guilds.GuildStore.CurrentGuildOf(user)); } catch { }
+                });
 
                 // Legacy/partial item state can't be proven on restore -> require admin review.
                 bool unprovenItems = false;
@@ -170,7 +199,8 @@ namespace KMHServerAddon.Persistence
                 string leaf = SanitizePart(user);
                 if (string.Equals(leaf, "_server", StringComparison.OrdinalIgnoreCase)) leaf += "_p";   // don't collide with the reserved server folder
                 string folder = FolderName(matchTimestamp);
-                dir = Path.Combine(KmhDataPaths.SnapshotsRoot, Season(), leaf, folder);
+                dir = ReserveLeaf(Path.Combine(KmhDataPaths.SnapshotsRoot, Season(), leaf),
+                                  folder, !string.IsNullOrWhiteSpace(matchTimestamp));
 
                 JObject snap = new JObject
                 {
@@ -215,12 +245,26 @@ namespace KMHServerAddon.Persistence
             return written;
         }
 
+        // Typed by an admin: a UNC path would have the host authenticate to another machine, so only folders under Snapshots resolve.
+        internal static string ResolveSnapshotDir(string arg)
+        {
+            string s = (arg ?? "").Trim();
+            if (s.Length == 0 || s.StartsWith(@"\\", StringComparison.Ordinal) || s.StartsWith("//", StringComparison.Ordinal)) return null;
+            string root = Path.GetFullPath(KmhDataPaths.SnapshotsRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string full;
+            try { full = Path.GetFullPath(Path.IsPathRooted(s) ? s : Path.Combine(root, s)); }
+            catch (Exception) { return null; }
+            StringComparison cmp = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+            return full.StartsWith(root + Path.DirectorySeparatorChar, cmp) ? full : null;
+        }
 
-        public static bool Verify(string dir, out string detail)
+        public static bool Verify(string dirArg, out string detail)
         {
             detail = null;
             try
             {
+                string dir = ResolveSnapshotDir(dirArg);
+                if (dir == null) { detail = "only a folder under KMH-Data/Snapshots can be checked"; return false; }
                 if (!Directory.Exists(dir)) { detail = "folder not found"; return false; }
                 string manifestPath = Directory.GetFiles(dir, "*_manifest.json").FirstOrDefault();
                 if (manifestPath == null) { detail = "no manifest"; return false; }
@@ -231,7 +275,8 @@ namespace KMHServerAddon.Persistence
                 {
                     string name = (string)f["name"];
                     string want = (string)f["sha256"];
-                    string p = Path.Combine(dir, name ?? "");
+                    if (string.IsNullOrEmpty(name) || Path.GetFileName(name) != name) { detail = "the manifest names a file outside the snapshot"; return false; }
+                    string p = Path.Combine(dir, name);
                     if (!File.Exists(p)) { detail = $"missing {name}"; return false; }
                     string got = Sha256Hex(File.ReadAllText(p));
                     if (!string.Equals(got, want, StringComparison.OrdinalIgnoreCase)) { detail = $"checksum mismatch on {name}"; return false; }
@@ -242,7 +287,6 @@ namespace KMHServerAddon.Persistence
             }
             catch (Exception ex) { detail = ex.Message; return false; }
         }
-
 
         private static DateTime _lastPrune = DateTime.MinValue;
 
@@ -281,15 +325,21 @@ namespace KMHServerAddon.Persistence
             catch (Exception ex) { ServerLog.Warn($"Snapshot prune skipped: {ex.Message}"); }
         }
 
+        // Retention sorts on this, and a prefix read keeps a uniqueness suffix from dropping it back to mtime.
         private static DateTime LeafTime(string dir)
         {
-            string name = Path.GetFileName(dir);
-            if (DateTime.TryParseExact(name, "yyyy-MM-dd_HH-mm", System.Globalization.CultureInfo.InvariantCulture,
-                    System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal, out DateTime t))
-                return t;
+            string name = Path.GetFileName(dir) ?? "";
+            const System.Globalization.DateTimeStyles Utc =
+                System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal;
+            foreach (string fmt in new[] { LeafFormat, LegacyLeafFormat })
+            {
+                if (name.Length >= fmt.Length
+                    && DateTime.TryParseExact(name.Substring(0, fmt.Length), fmt,
+                        System.Globalization.CultureInfo.InvariantCulture, Utc, out DateTime t))
+                    return t;
+            }
             try { return Directory.GetLastWriteTimeUtc(dir); } catch { return DateTime.UtcNow; }
         }
-
 
         // One request per line: "player <user> [ts]" | "server [ts]" | "all [ts]" (# = comment). Deleted after use.
         public static void ConsumePendingRequests()
@@ -319,12 +369,13 @@ namespace KMHServerAddon.Persistence
             if (done > 0) ServerLog.Info($"Snapshot requests consumed ({done}).");
         }
 
-
-        public static void PreviewPlayer(string dir, Action<string> reply)
+        public static void PreviewPlayer(string dirArg, Action<string> reply)
         {
             try
             {
-                if (string.IsNullOrWhiteSpace(dir)) { reply("Usage: kmh restore-preview-player <snapshot-folder>"); return; }
+                if (string.IsNullOrWhiteSpace(dirArg)) { reply("Usage: kmh restore-preview-player <snapshot-folder>"); return; }
+                string dir = ResolveSnapshotDir(dirArg);
+                if (dir == null) { reply("Only a folder under KMH-Data/Snapshots can be previewed."); return; }
                 string snapPath = Path.Combine(dir, "kmh_player_snapshot.json");
                 if (!File.Exists(snapPath)) { reply($"No kmh_player_snapshot.json in {dir}"); return; }
 
@@ -390,7 +441,6 @@ namespace KMHServerAddon.Persistence
             }
             catch (Exception ex) { reply($"Preview failed: {ex.Message}"); }
         }
-
 
         private static void RaiseCreated(string kind, string playerId, string matchTs, string dir)
         {

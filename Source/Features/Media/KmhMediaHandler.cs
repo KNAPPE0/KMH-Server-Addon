@@ -29,7 +29,7 @@ namespace KMHServerAddon.Features.Media
             if (id.Length == 0 || id.Length > 64) { Fail(client, id, "bad request"); return; }
 
             MediaConfig cfg = MediaConfig.Current;
-            if (cfg == null || !cfg.ServerMediaResolverEnabled) { Fail(client, id, "the server owner has turned off media resolving"); return; }
+            if (cfg == null || !cfg.Images.ResolverEnabled) { Fail(client, id, "the server owner has turned off media resolving"); return; }
 
             KmhMediaCache.Entry cached = KmhMediaCache.Get(id);
             if (cached != null) { Send(client, cached); return; }
@@ -158,12 +158,12 @@ namespace KMHServerAddon.Features.Media
         private static bool AllowResolve(string user, MediaConfig cfg)
         {
             long now = DateTime.UtcNow.Ticks;
-            long window = TimeSpan.FromSeconds(cfg.ResolveWindowSeconds).Ticks;
+            long window = TimeSpan.FromSeconds(cfg.Fetch.ResolveWindowSeconds).Ticks;
             lock (_rateLock)
             {
                 if (!_resolves.TryGetValue(user, out List<long> stamps)) _resolves[user] = stamps = new List<long>();
                 stamps.RemoveAll(t => now - t > window);
-                if (stamps.Count >= cfg.MaxResolvesPerWindow) return false;
+                if (stamps.Count >= cfg.Fetch.MaxResolvesPerWindow) return false;
                 stamps.Add(now);
                 return true;
             }

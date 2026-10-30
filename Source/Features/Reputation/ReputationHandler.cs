@@ -12,12 +12,15 @@ namespace KMHServerAddon.Features.Reputation
         public static void SendSnapshotTo(ServerClient client)
         {
             if (client == null) return;
-            KmhRouter.SendTo(client, KmhProtocol.Kind.ReputationSnapshot, ReputationStore.BuildSnapshot());
+            KmhRouter.SendTo(client, KmhProtocol.Kind.ReputationSnapshot, ClientSnapshot());
         }
+
+        private static Dto.ReputationSnapshot ClientSnapshot()
+            => Leaderboards.LeaderboardEngine.ForClients(ReputationStore.BuildSnapshot(), Leaderboards.LeaderboardEngine.BannedNow());
 
         public static void BroadcastSnapshot()
         {
-            Dto.ReputationSnapshot snap = ReputationStore.BuildSnapshot();
+            Dto.ReputationSnapshot snap = ClientSnapshot();
             foreach (ServerClient c in Network.ServerClients.Keys)
             {
                 if (c == null || !c.IsVerified) continue;

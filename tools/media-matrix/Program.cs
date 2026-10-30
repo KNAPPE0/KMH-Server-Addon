@@ -42,10 +42,10 @@ class Program
     {
         public string Name;
         public string Proxy;        // Discord's re-hosted copy, as an embed would carry it
-        public string Original;     // the site the link came from
+        public string Original;
         public string Typed;        // a url a player typed in game instead
         public bool   KnownImage = true;
-        public string Expect;       // what this row is here to demonstrate
+        public string Expect;
     }
 
     static IEnumerable<Case> Cases()
@@ -53,7 +53,7 @@ class Program
         // Real url shapes taken from relayed chat: an invented fixture passes while real traffic fails.
         yield return new Case {
             Name = "Discord PNG attachment (signature expired - Discord links are time-limited)",
-            Proxy = "https://cdn.discordapp.com/attachments/1379170256672522290/1538634661687984138/"
+            Proxy = "https://cdn.discordapp.com/attachments/111111111111111111/222222222222222222/"
                   + "E5B174A9-1453-493F-A84D-725DA69EF8F8.png",
             Expect = "named HTTP failure, not a decode error" };
 
@@ -128,20 +128,20 @@ class Program
 
         yield return new Case {
             Name = "expired Discord CDN link (signed url past its window)",
-            Proxy = "https://cdn.discordapp.com/attachments/1379170256672522290/1538591956387500082/"
+            Proxy = "https://cdn.discordapp.com/attachments/111111111111111111/222222222222222222/"
                   + "510A6AC6-BE83-40CF-B061-8485532BC137.png?ex=6a833cec&is=6a81eb6c"
-                  + "&hm=83707c6203bee04258d488529b826cf700bc5995ef755b211f9589b49682b914&",
+                  + "&hm=0000000000000000000000000000000000000000000000000000000000000000&",
             Expect = "named HTTP failure, not a decode error" };
 
         yield return new Case {
             Name = "video attachment (mp4)",
-            Proxy = "https://cdn.discordapp.com/attachments/1379170256672522290/1538606765346914456/"
+            Proxy = "https://cdn.discordapp.com/attachments/111111111111111111/222222222222222222/"
                   + "file_example_MP4_480_1_5MG.mp4",
             Expect = "classified as VIDEO - goes to the player, never the image decoder" };
 
         yield return new Case {
             Name = "oversized media (18MB mp4 as an image)",
-            Proxy = "https://cdn.discordapp.com/attachments/1379170256672522290/1538606858275782758/"
+            Proxy = "https://cdn.discordapp.com/attachments/111111111111111111/222222222222222222/"
                   + "file_example_MP4_1920_18MG.mp4",
             Expect = "VIDEO - size cap does not apply, it is never downloaded" };
     }

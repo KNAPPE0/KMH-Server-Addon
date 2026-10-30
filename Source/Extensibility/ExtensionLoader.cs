@@ -29,7 +29,7 @@ namespace KMHServerAddon.Extensibility
                         ExtensionsReadme.Content);
                 }
                 catch { /* lazy folder; not a fatal startup blocker */ }
-                ServerLog.Info("Extensions: kmh-extensions/ folder created (empty).");
+                ServerLog.Diag("Extensions: kmh-extensions/ folder created (empty).");
                 return;
             }
 
@@ -42,7 +42,7 @@ namespace KMHServerAddon.Extensibility
             }
             if (dlls.Length == 0)
             {
-                ServerLog.Info("Extensions: kmh-extensions/ present but empty.");
+                ServerLog.Diag("Extensions: kmh-extensions/ present but empty.");
                 return;
             }
 
@@ -109,7 +109,7 @@ namespace KMHServerAddon.Extensibility
             string name    = string.IsNullOrWhiteSpace(instance.Name)    ? type.FullName : instance.Name;
             string version = string.IsNullOrWhiteSpace(instance.Version) ? "0.0.0"       : instance.Version;
 
-            // Refused up front, because an incompatible extension otherwise half-loads and fails later as a reflection error.
+            // Refused up front: an incompatible extension otherwise half-loads and fails later as a reflection error.
             int contract = instance is KMH.Sdk.Server.IKmhSdkTargeted targeted ? targeted.TargetSdkContract : KmhExtensionCompat.Baseline;
             if (!KmhExtensionCompat.IsCompatible(contract))
             {

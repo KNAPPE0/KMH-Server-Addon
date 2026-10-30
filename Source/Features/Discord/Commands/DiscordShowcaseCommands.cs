@@ -1,19 +1,17 @@
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
-using Discord;
-using Discord.WebSocket;
+using Kmh.Discord.Wire;
 using KMHServerAddon.Diagnostics;
-using KMHServerAddon.Features.LinkedAccounts;
 using KMHServerAddon.Features.Marketplace;
 using KMHServerAddon.Features.Marketplace.Dto;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // The embed is edited in place rather than re-posted, so a showcase does not spam the channel.
+    // The message is edited in place rather than re-posted, so a showcase does not spam the channel.
     internal static class DiscordShowcaseCommands
     {
-        public static async Task<bool> TryHandleAsync(SocketMessage raw, string cmd, string[] parts)
+        public static async Task<bool> TryHandleAsync(KmhDiscordMessage raw, string cmd, string[] parts)
         {
             switch (cmd)
             {
@@ -27,15 +25,25 @@ namespace KMHServerAddon.Features.Discord
             }
         }
 
-        private static async Task HandleShowcase(SocketMessage raw, string[] parts)
+        private static async Task HandleShowcase(KmhDiscordMessage raw, string[] parts)
         {
-            string caller = ResolveLinkedUsername(raw);
+            string caller = DiscordCommandUtil.LinkedUsername(raw);
             if (string.IsNullOrEmpty(caller))
             {
                 await raw.Channel.SendMessageAsync(
                     "Link your Discord first to publish a showcase. " +
                     "In-game: `/kmh link`, then here: `!kmh-link <code>`.")
                     .ConfigureAwait(false);
+                return;
+            }
+            if (Features.Moderation.BanGate.IsBannedAccount(caller))
+            {
+                await raw.Channel.SendMessageAsync("Your Colony Nexus account is banned on this server.").ConfigureAwait(false);
+                return;
+            }
+            if (Features.Moderation.KmhEconomyGuard.IsFrozen(caller))
+            {
+                await raw.Channel.SendMessageAsync(Features.Moderation.KmhEconomyGuard.FrozenRefusal).ConfigureAwait(false);
                 return;
             }
 
@@ -75,31 +83,23 @@ namespace KMHServerAddon.Features.Discord
             }
         }
 
-        private static async Task HandleUpdate(SocketMessage raw, string caller, ulong showcaseChannel)
+        private static async Task HandleUpdate(KmhDiscordMessage raw, string caller, ulong showcaseChannel)
         {
-            // Caller-scoped, so their own non-public listings are already included.
-            MarketplaceSnapshot snap = MarketplaceStore.BuildSnapshot(caller);
-            List<MarketplaceListing> mine = new List<MarketplaceListing>();
-            if (snap?.Listings != null)
-            {
-                foreach (MarketplaceListing l in snap.Listings)
-                {
-                    if (string.Equals(l.SellerUsername, caller, StringComparison.OrdinalIgnoreCase))
-                        mine.Add(l);
-                }
-            }
+            // The public view: a showcase is posted where the whole server reads it, so guild-only listings stay out.
+            MarketplaceSnapshot snap = MarketplaceStore.BuildSnapshot("");
+            List<MarketplaceListing> mine = DiscordShowcaseBuilder.ListingsBy(snap?.Listings, caller);
 
             DiscordUserState.GetShowcase(caller, out ulong prevChannel, out ulong prevMessage, out string tagline);
 
-            // The old id belongs to a channel we can no longer edit, so it has to be dropped rather than reused.
+            // The old message sits in the previous channel, so its id is dropped rather than edited here.
             if (prevChannel != 0 && prevChannel != showcaseChannel)
             {
                 prevMessage = 0;
             }
 
-            Embed embed = DiscordShowcaseBuilder.Build(caller, tagline, mine);
+            string text = DiscordCompactText.Render(DiscordShowcaseBuilder.Build(caller, tagline, mine));
 
-            ulong newId = await DiscordBridge.PostOrEditEmbedAsync(showcaseChannel, prevMessage, embed)
+            ulong newId = await DiscordBridge.PostOrEditTextAsync(showcaseChannel, prevMessage, text)
                 .ConfigureAwait(false);
             if (newId == 0)
             {
@@ -118,7 +118,7 @@ namespace KMHServerAddon.Features.Discord
                 .ConfigureAwait(false);
         }
 
-        private static async Task HandleDelete(SocketMessage raw, string caller)
+        private static async Task HandleDelete(KmhDiscordMessage raw, string caller)
         {
             DiscordUserState.GetShowcase(caller, out ulong prevChannel, out ulong prevMessage, out _);
             if (prevChannel == 0 || prevMessage == 0)
@@ -135,13 +135,13 @@ namespace KMHServerAddon.Features.Discord
                 .ConfigureAwait(false);
         }
 
-        private static async Task HandleTagline(SocketMessage raw, string caller, string[] parts)
+        private static async Task HandleTagline(KmhDiscordMessage raw, string caller, string[] parts)
         {
             if (parts.Length < 3)
             {
                 await raw.Channel.SendMessageAsync(
                     "Usage: `!kmh-showcase tagline <text>` or `!kmh-showcase tagline clear`\n" +
-                    "The tagline appears italicized at the top of your showcase embed " +
+                    "The tagline appears italicized at the top of your showcase " +
                     "(e.g. \"DM me to negotiate bulk discounts\").")
                     .ConfigureAwait(false);
                 return;
@@ -155,7 +155,7 @@ namespace KMHServerAddon.Features.Discord
                 return;
             }
 
-            string text = JoinFrom(parts, 2).Trim();
+            string text = DiscordCommandUtil.JoinFrom(parts, 2).Trim();
             if (text.Length == 0)
             {
                 await raw.Channel.SendMessageAsync("Tagline can't be empty.").ConfigureAwait(false);
@@ -166,25 +166,6 @@ namespace KMHServerAddon.Features.Discord
             DiscordUserState.SetTagline(caller, text);
             await raw.Channel.SendMessageAsync("Tagline updated. Run `!kmh-showcase` to refresh your post.")
                 .ConfigureAwait(false);
-        }
-
-        private static string JoinFrom(string[] parts, int startIndex)
-        {
-            if (parts == null || startIndex >= parts.Length) return "";
-            System.Text.StringBuilder sb = new System.Text.StringBuilder();
-            for (int i = startIndex; i < parts.Length; i++)
-            {
-                if (i > startIndex) sb.Append(' ');
-                sb.Append(parts[i]);
-            }
-            return sb.ToString();
-        }
-
-        // Id only: a display-name fallback would let someone act as any player whose name they copy.
-        private static string ResolveLinkedUsername(SocketMessage raw)
-        {
-            if (raw?.Author == null) return null;
-            return LinkedAccountsStore.FindUsernameByDiscordId(raw.Author.Id);
         }
     }
 }

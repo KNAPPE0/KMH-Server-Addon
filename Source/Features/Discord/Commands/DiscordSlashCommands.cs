@@ -1,11 +1,9 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
-using Discord;
-using Discord.WebSocket;
+using Kmh.Discord.Wire;
 using KMHServerAddon.AdminCommands;
 using KMHServerAddon.Diagnostics;
 using KMHServerAddon.Features.ItemLabels;
@@ -18,200 +16,108 @@ using KMHServerAddon.Util;
 
 namespace KMHServerAddon.Features.Discord
 {
-    // Slash commands need no MessageContent intent, so these work on a bot that never enabled it.
+    // Nothing here knows whether the caller reached Discord through this process or the fleet coordinator.
     internal static class DiscordSlashCommands
     {
-        public static async Task RegisterAsync(DiscordSocketClient client, DiscordConfig cfg)
+        public static async Task<KmhDiscordCommandResult> ExecuteAsync(KmhDiscordCommandRequest req)
         {
-            if (client == null || cfg == null || cfg.Bot == null || !cfg.Bot.UseSlashCommands) return;
+            if (req == null) return KmhDiscordCommandResult.Error("Empty command.");
+            DiscordConfig cfg = DiscordBridge.Config ?? new DiscordConfig();
+            if (!FromAllowedGuild(req, cfg)) return KmhDiscordCommandResult.Error("This bot does not serve that Discord server.");
             try
             {
-                ApplicationCommandProperties built = BuildTree().Build();
-
-                ulong guildId = ParseId(cfg.Bot.GuildId);
-                if (guildId != 0)
-                {
-                    SocketGuild g = client.GetGuild(guildId);
-                    if (g != null)
-                    {
-                        await g.CreateApplicationCommandAsync(built).ConfigureAwait(false);
-                        ServerLog.Info($"Discord: registered /kmh slash commands to guild {guildId}");
-                        return;
-                    }
-                    ServerLog.Warn($"Discord: Bot.GuildId {guildId} not found - registering /kmh globally instead (up to 1h to appear)");
-                }
-
-                await client.CreateGlobalApplicationCommandAsync(built).ConfigureAwait(false);
-                ServerLog.Info("Discord: registered /kmh slash commands globally (can take up to 1h to appear)");
+                return RedactPublic(AsText(await Route(req, cfg).ConfigureAwait(false)));
             }
             catch (Exception ex)
             {
-                ServerLog.Error("Discord: slash-command registration failed", ex);
+                ServerLog.Error($"Discord: /kmh {req.Path} threw", ex);
+                return KmhDiscordCommandResult.Error("Command failed - see the server log.");
             }
         }
 
-        private static SlashCommandBuilder BuildTree()
+        // Cards are answered as compact text, so no slash reply arrives as an embed, through either gateway.
+        internal static KmhDiscordCommandResult AsText(KmhDiscordCommandResult r)
         {
-            SlashCommandBuilder kmh = new SlashCommandBuilder()
-                .WithName("kmh")
-                .WithDescription("KMH server commands");
-
-            kmh.AddOption(Sub("status",  "Server health + counts"));
-            kmh.AddOption(Sub("players", "Who is online right now"));
-            kmh.AddOption(Sub("help",    "List the KMH Discord commands"));
-            kmh.AddOption(Sub("whois",   "(owner) An online player's IP for moderation - the reply is private to you")
-                .AddOption(Str("player", "In-game name (must be online)", true)));
-
-            SlashCommandOptionBuilder lb = Group("leaderboard", "Top players / guilds / reputation");
-            lb.AddOption(Sub("show", "Show the leaderboard")
-                .AddOption(new SlashCommandOptionBuilder().WithName("board").WithDescription("Which board")
-                    .WithType(ApplicationCommandOptionType.String).WithRequired(false)
-                    .AddChoice("players", "players").AddChoice("guilds", "guilds").AddChoice("rep", "rep"))
-                .AddOption(Str("sort", "Sort key (see /kmh help)", false)));
-            lb.AddOption(Sub("rank", "A player's full stat card")
-                .AddOption(Str("player", "In-game name (blank = your linked account)", false)));
-            lb.AddOption(Sub("post",    "(mod) Post the leaderboard to its channel now"));
-            lb.AddOption(Sub("refresh", "(mod) Re-post the leaderboard now"));
-            kmh.AddOption(lb);
-
-            SlashCommandOptionBuilder mk = Group("market", "Browse the marketplace");
-            mk.AddOption(Sub("list", "Open listings").AddOption(IntOpt("page", "Page number", false)));
-            mk.AddOption(Sub("search", "Search listings").AddOption(Str("query", "Item or seller", true)));
-            kmh.AddOption(mk);
-
-            SlashCommandOptionBuilder st = Group("site", "Custom sites");
-            st.AddOption(Sub("list", "All active sites"));
-            st.AddOption(Sub("info", "One site by world tile").AddOption(IntOpt("tile", "World tile id", true)));
-            st.AddOption(Sub("roads", "Road network built by Roadworks sites"));
-            kmh.AddOption(st);
-
-            SlashCommandOptionBuilder an = Group("announcement", "Server announcements");
-            an.AddOption(Sub("send", "(mod) Post an announcement").AddOption(Str("message", "Text to post", true)));
-            kmh.AddOption(an);
-
-            SlashCommandOptionBuilder dc = Group("discord", "Bot admin");
-            dc.AddOption(Sub("reload", "(mod) Reload Discord config + restart the bridge"));
-            kmh.AddOption(dc);
-
-            SlashCommandOptionBuilder cf = Group("config", "Game config admin");
-            cf.AddOption(Sub("reload", "(mod) Reload Economy + Sites config"));
-            kmh.AddOption(cf);
-
-            SlashCommandOptionBuilder co = Group("console", "Owner console");
-            co.AddOption(Sub("run", "(owner) Run any server console command")
-                .AddOption(Str("command", "e.g. help / players / kmh status / kmh enforce on", true)));
-            kmh.AddOption(co);
-
-            return kmh;
+            if (r?.Embeds == null || r.Embeds.Count == 0) return r;
+            string card = DiscordCompactText.Render(r.Embeds);
+            r.Content = string.IsNullOrEmpty(r.Content) ? card : DiscordCompactText.Cap(r.Content + "\n" + card, DiscordCompactText.MaxChars);
+            r.Embeds = new List<KmhEmbedSpec>();
+            return r;
         }
 
-        private static SlashCommandOptionBuilder Sub(string name, string desc)
-            => new SlashCommandOptionBuilder().WithName(name).WithDescription(desc)
-                .WithType(ApplicationCommandOptionType.SubCommand);
-
-        private static SlashCommandOptionBuilder Group(string name, string desc)
-            => new SlashCommandOptionBuilder().WithName(name).WithDescription(desc)
-                .WithType(ApplicationCommandOptionType.SubCommandGroup);
-
-        private static SlashCommandOptionBuilder Str(string name, string desc, bool required)
-            => new SlashCommandOptionBuilder().WithName(name).WithDescription(desc)
-                .WithType(ApplicationCommandOptionType.String).WithRequired(required);
-
-        private static SlashCommandOptionBuilder IntOpt(string name, string desc, bool required)
-            => new SlashCommandOptionBuilder().WithName(name).WithDescription(desc)
-                .WithType(ApplicationCommandOptionType.Integer).WithRequired(required);
-
-        public static async Task Handle(SocketSlashCommand cmd)
+        // A reply the whole channel sees gets the same redaction as a channel post.
+        internal static KmhDiscordCommandResult RedactPublic(KmhDiscordCommandResult r)
         {
-            try
-            {
-                if (cmd?.Data == null || cmd.Data.Name != "kmh") return;
-                DiscordConfig cfg = DiscordBridge.Config ?? new DiscordConfig();
-
-                SocketSlashCommandDataOption first = cmd.Data.Options?.FirstOrDefault();
-                if (first == null) { await Ephemeral(cmd, "Try `/kmh help`."); return; }
-
-                string group, sub;
-                IReadOnlyCollection<SocketSlashCommandDataOption> args;
-                if (first.Type == ApplicationCommandOptionType.SubCommandGroup)
-                {
-                    group = first.Name;
-                    SocketSlashCommandDataOption s = first.Options?.FirstOrDefault();
-                    sub  = s?.Name ?? "";
-                    args = s?.Options;
-                }
-                else
-                {
-                    group = "";
-                    sub   = first.Name;
-                    args  = first.Options;
-                }
-
-                string path = string.IsNullOrEmpty(group) ? sub : $"{group}.{sub}";
-                await Route(cmd, cfg, path, args).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                ServerLog.Error("Discord: slash handler threw", ex);
-                try { if (!cmd.HasResponded) await cmd.RespondAsync("Command failed - see the server log.", ephemeral: true).ConfigureAwait(false); }
-                catch { /* interaction may have expired */ }
-            }
+            if (r == null) return null;
+            if (!r.Ephemeral) r.Content = DiscordBridge.Redact(r.Content);
+            if (r.Followups != null)
+                foreach (KmhDiscordFollowup f in r.Followups)
+                    if (f != null && !f.Ephemeral) f.Content = DiscordBridge.Redact(f.Content);
+            return r;
         }
 
-        private static async Task Route(SocketSlashCommand cmd, DiscordConfig cfg, string path,
-                                        IReadOnlyCollection<SocketSlashCommandDataOption> args)
+        private static async Task<KmhDiscordCommandResult> Route(KmhDiscordCommandRequest req, DiscordConfig cfg)
         {
-            switch (path)
+            switch (req.Path)
             {
-                case "status":  await DoStatus(cmd, cfg);  return;
-                case "players": await DoPlayers(cmd, cfg); return;
-                case "help":    await DoHelp(cmd, cfg);    return;
+                case "status":  return DoStatus();
+                case "players": return DoPlayers(cfg);
+                case "help":    return DoHelp(cfg);
 
-                case "leaderboard.show": await DoLeaderboard(cmd, cfg, args); return;
-                case "leaderboard.rank": await DoRank(cmd, cfg, args);        return;
+                case "leaderboard.show": return DoLeaderboard(cfg, req);
+                case "leaderboard.rank": return DoRank(req);
                 case "leaderboard.post":
                 case "leaderboard.refresh":
-                    if (!await RequireMod(cmd, cfg)) return;
-                    await DoLeaderboardPost(cmd, cfg); return;
+                {
+                    KmhDiscordCommandResult denied = RequireMod(req, cfg);
+                    return denied ?? await DoLeaderboardPost(cfg).ConfigureAwait(false);
+                }
 
-                case "market.list":   await DoMarket(cmd, cfg, args, search: false); return;
-                case "market.search": await DoMarket(cmd, cfg, args, search: true);  return;
+                case "market.list":   return DoMarket(cfg, req, search: false);
+                case "market.search": return DoMarket(cfg, req, search: true);
 
-                case "site.list": await DoSites(cmd, cfg, -1); return;
-                case "site.info": await DoSites(cmd, cfg, (int)GetInt(args, "tile", -1)); return;
-                case "site.roads": await DoRoads(cmd, cfg); return;
+                case "site.list":  return DoSites(cfg, -1);
+                case "site.info":  return DoSites(cfg, (int)req.OptionInt("tile", -1));
+                case "site.roads": return DoRoads(cfg);
 
                 case "announcement.send":
-                    if (!await RequireMod(cmd, cfg)) return;
-                    await DoAnnounce(cmd, cfg, GetStr(args, "message")); return;
+                {
+                    KmhDiscordCommandResult denied = RequireMod(req, cfg);
+                    return denied ?? DoAnnounce(cfg, req, req.Option("message"));
+                }
 
                 case "discord.reload":
-                    if (!await RequireMod(cmd, cfg)) return;
-                    await DoDiscordReload(cmd); return;
+                {
+                    KmhDiscordCommandResult denied = RequireMod(req, cfg);
+                    return denied ?? DoDiscordReload();
+                }
 
                 case "config.reload":
-                    if (!await RequireMod(cmd, cfg)) return;
-                    await DoConfigReload(cmd); return;
+                {
+                    KmhDiscordCommandResult denied = RequireMod(req, cfg);
+                    return denied ?? DoConfigReload();
+                }
 
-                case "whois":
-                    await DoWhois(cmd, cfg, GetStr(args, "player")); return;
+                case "ban":    return DoBan(cfg, req, alsoAddress: false);
+                case "ipban":  return DoBan(cfg, req, alsoAddress: true);
+                case "unban":  return DoUnban(cfg, req);
+                case "bans":   return DoBanList(cfg, req);
 
-                case "console.run":
-                    await DoConsoleRun(cmd, cfg, GetStr(args, "command")); return;
+                case "whois":       return DoWhois(cfg, req, req.Option("player"));
+                case "console.run": return DoConsoleRun(cfg, req, req.Option("command"));
 
-                default:
-                    await Ephemeral(cmd, "Unknown command - try `/kmh help`."); return;
+                default: return KmhDiscordCommandResult.Error("Unknown command - try `/kmh help`.");
             }
         }
 
-        private static async Task DoStatus(SocketSlashCommand cmd, DiscordConfig cfg)
+        private static KmhDiscordCommandResult DoStatus()
         {
             StringBuilder sb = new StringBuilder();
             KmhServerCommands.Dispatch(new[] { "status" }, isAdmin: false, actorName: "discord", line => sb.AppendLine(line));
-            await RespondBlock(cmd, sb.ToString(), ephemeral: false).ConfigureAwait(false);
+            return Block(sb.ToString(), ephemeral: false);
         }
 
-        private static async Task DoPlayers(SocketSlashCommand cmd, DiscordConfig cfg)
+        private static KmhDiscordCommandResult DoPlayers(DiscordConfig cfg)
         {
             List<string> names = new List<string>();
             foreach (ServerClient c in Network.ServerClients.Keys)
@@ -225,94 +131,177 @@ namespace KMHServerAddon.Features.Discord
             string body = names.Count == 0
                 ? "_Nobody is online right now._"
                 : string.Join("\n", names.Select(n => "• " + n));
-            await cmd.RespondAsync(embed: Brand(cfg, $"Players online ({names.Count})", body).Build()).ConfigureAwait(false);
+            return KmhDiscordCommandResult.Embed(Brand(cfg, $"Players online ({names.Count})", body).Build());
         }
 
-        // Built directly rather than through DiscordBridge.Redact, so the real IP reaches the admin but never the channel.
-        private static async Task DoWhois(SocketSlashCommand cmd, DiscordConfig cfg, string player)
+        // Admin channel only, like the console: a public ban names the player, and an address ban their address.
+        private static KmhDiscordCommandResult DoBan(DiscordConfig cfg, KmhDiscordCommandRequest req, bool alsoAddress)
         {
-            if (!await RequireConsole(cmd, cfg)) return;
-            player = (player ?? "").Trim();
-            if (player.Length == 0) { await Ephemeral(cmd, "Usage: `/kmh whois <player>`"); return; }
+            KmhDiscordCommandResult denied = RequireModeration(req, cfg);
+            if (denied != null) return denied;
 
-            ServerClient match = null;
+            string player = (req.Option("player") ?? "").Trim();
+            if (player.Length == 0)
+                return KmhDiscordCommandResult.Error($"Usage: `/kmh {(alsoAddress ? "ipban" : "ban")} <player> [reason] [days]`");
+
+            string reason = (req.Option("reason") ?? "").Trim();
+            long days = req.OptionInt("days", 0);
+            long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            long expires = days > 0 ? now + days * 86400L : 0;
+
+            ServerClient online = FindOnline(player);
+            string ip = alsoAddress ? (online?.IP ?? "") : "";
+            if (alsoAddress && string.IsNullOrEmpty(ip))
+                return KmhDiscordCommandResult.Error(
+                    $"`{player}` isn't online, so there is no address to ban. Use `/kmh ban {player}` for a name ban.");
+
+            bool added = Features.Moderation.BanStore.Add(new Features.Moderation.BanEntry
+            {
+                Username = player, Ip = ip, Reason = reason,
+                By = req.UserName ?? "discord", AtUnix = now, ExpiresUnix = expires,
+            }, out bool saved);
+            if (!added) return KmhDiscordCommandResult.Error("Nothing to ban - give a player name.");
+
+            if (online != null) online.Listener?.MarkForDisconnect();
+
+            string how = alsoAddress ? "name and address" : "name";
+            string when = days > 0 ? $"for {days} day(s)" : "permanently";
+            ServerLog.Warn($"Discord: {req.UserName} banned {player} by {how} {when}"
+                         + (reason.Length == 0 ? "." : $" - {reason}")
+                         + (saved ? "" : " NOT SAVED: Bans.json could not be written; the next flush retries."));
+            return KmhDiscordCommandResult.Text(
+                $"Banned **{player}** by {how}, {when}." + (online != null ? " They were disconnected." : "")
+                + (saved ? "" : " **The ban could not be saved yet.** It holds now and Colony Nexus keeps retrying, but a restart before that succeeds would lift it."),
+                ephemeral: true);
+        }
+
+        private static KmhDiscordCommandResult DoUnban(DiscordConfig cfg, KmhDiscordCommandRequest req)
+        {
+            KmhDiscordCommandResult denied = RequireModeration(req, cfg);
+            if (denied != null) return denied;
+
+            string subject = (req.Option("player") ?? "").Trim();
+            if (subject.Length == 0) return KmhDiscordCommandResult.Error("Usage: `/kmh unban <player or address>`");
+
+            int removed = Features.Moderation.BanStore.Remove(subject, out bool saved);
+            if (!saved)
+                return KmhDiscordCommandResult.Error(
+                    $"The server could not record lifting the ban on `{subject}`, so it is still in place. Try again shortly.");
+            if (removed == 0) return KmhDiscordCommandResult.Text($"`{subject}` was not banned.", ephemeral: true);
+
+            ServerLog.Warn($"Discord: {req.UserName} lifted {removed} ban entr(y/ies) for {subject}.");
+            return KmhDiscordCommandResult.Text($"Lifted {removed} ban entr(y/ies) for **{subject}**.", ephemeral: true);
+        }
+
+        private static KmhDiscordCommandResult DoBanList(DiscordConfig cfg, KmhDiscordCommandRequest req)
+        {
+            KmhDiscordCommandResult denied = RequireModeration(req, cfg);
+            if (denied != null) return denied;
+
+            long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            List<Features.Moderation.BanEntry> bans = Features.Moderation.BanStore.Active(now);
+            if (bans.Count == 0) return KmhDiscordCommandResult.Text("Nobody is banned.", ephemeral: true);
+
+            StringBuilder sb = new StringBuilder();
+            int shown = 0;
+            foreach (Features.Moderation.BanEntry b in bans)
+            {
+                if (shown++ >= 25) break;
+                sb.Append("• ");
+                sb.Append(string.IsNullOrEmpty(b.Username) ? "(no name)" : b.Username);
+                if (!string.IsNullOrEmpty(b.Ip)) sb.Append(" + address");
+                if (b.ExpiresUnix != 0) sb.Append(" _(expires)_");
+                if (!string.IsNullOrEmpty(b.Reason)) sb.Append(" - ").Append(b.Reason);
+                sb.AppendLine();
+            }
+            if (bans.Count > shown) sb.Append($"_…and {bans.Count - shown} more._");
+            return KmhDiscordCommandResult.Text(sb.ToString(), ephemeral: true);
+        }
+
+        private static ServerClient FindOnline(string player)
+        {
             foreach (ServerClient c in Network.ServerClients.Keys)
             {
                 if (c?.IsVerified != true) continue;
-                if (string.Equals(c.GetData<UserFile>()?.Username, player, StringComparison.OrdinalIgnoreCase)) { match = c; break; }
+                if (string.Equals(c.GetData<UserFile>()?.Username, player, StringComparison.OrdinalIgnoreCase)) return c;
             }
+            return null;
+        }
+
+        // The real IP reaches the admin and never the channel, so this reply is always private.
+        private static KmhDiscordCommandResult DoWhois(DiscordConfig cfg, KmhDiscordCommandRequest req, string player)
+        {
+            KmhDiscordCommandResult denied = RequireModeration(req, cfg);
+            if (denied != null) return denied;
+
+            player = (player ?? "").Trim();
+            if (player.Length == 0) return KmhDiscordCommandResult.Error("Usage: `/kmh whois <player>`");
+
+            ServerClient match = FindOnline(player);
             if (match == null)
-            {
-                await Ephemeral(cmd, $"`{player}` isn't online. This shows live connection IPs only - for offline players use the local server console / `banlist`.");
-                return;
-            }
+                return KmhDiscordCommandResult.Error(
+                    $"`{player}` isn't online. This shows live connection IPs only - for offline players use the local server console / `banlist`.");
 
             string name = match.GetData<UserFile>()?.Username ?? player;
             string ip   = string.IsNullOrEmpty(match.IP) ? "(unknown)" : match.IP;
-            await cmd.RespondAsync($"**{name}** (online)\nIP: `{ip}`", ephemeral: true).ConfigureAwait(false);
-            ServerLog.Info($"Discord: whois {name} by {cmd.User?.Username} (ephemeral reply)");
+            ServerLog.Info($"Discord: whois {name} by {req.UserName} (private reply)");
+            return KmhDiscordCommandResult.Text($"**{name}** (online)\nIP: `{ip}`", ephemeral: true);
         }
 
-        private static async Task DoLeaderboard(SocketSlashCommand cmd, DiscordConfig cfg,
-                                                IReadOnlyCollection<SocketSlashCommandDataOption> args)
+        private static KmhDiscordCommandResult DoLeaderboard(DiscordConfig cfg, KmhDiscordCommandRequest req)
         {
-            string board = GetStr(args, "board", "players").ToLowerInvariant();
-            string sort  = GetStr(args, "sort", "");
-            int topN     = Clamp(cfg.LeaderboardTopCount, 1, 25);
+            string board = req.Option("board", "players").ToLowerInvariant();
+            string sort  = req.Option("sort", "");
 
-            Embed e;
+            string key;
             if (board == "guilds")
-                e = DiscordLeaderboardBuilder.BuildGuilds(topN,
-                        string.IsNullOrEmpty(sort) ? DiscordLeaderboardBuilder.DefaultGuildSort : DiscordLeaderboardBuilder.NormalizeGuildSort(sort));
+                key = string.IsNullOrEmpty(sort) ? DiscordLeaderboardBuilder.DefaultGuildSort : DiscordLeaderboardBuilder.NormalizeGuildSort(sort);
             else if (board == "rep")
-                e = DiscordLeaderboardBuilder.BuildReputation(topN);
+                key = Leaderboards.LeaderboardCatalog.Reputation;
             else
-                e = DiscordLeaderboardBuilder.Build(topN,
-                        string.IsNullOrEmpty(sort) ? DiscordLeaderboardBuilder.DefaultSort : DiscordLeaderboardBuilder.NormalizeSort(sort));
+                key = string.IsNullOrEmpty(sort) ? DiscordLeaderboardBuilder.DefaultSort : DiscordLeaderboardBuilder.NormalizeSort(sort);
 
-            if (e == null) { await Ephemeral(cmd, "No leaderboard data yet."); return; }
-            await cmd.RespondAsync(embed: e).ConfigureAwait(false);
+            // The image where this process holds the gateway; the coordinator carries no files, so it gets the rows.
+            Leaderboards.LeaderboardEngine.Inputs inputs = Leaderboards.LeaderboardEngine.Live();
+            Leaderboards.LeaderboardBoardDto b = Leaderboards.LeaderboardEngine.Build(Leaderboards.LeaderboardCatalog.Find(key), inputs);
+            return DiscordLeaderboardPoster.CommandResult(b, cfg, inputs, files: !DiscordCoordinatorLink.Active)
+                ?? KmhDiscordCommandResult.Error("Nobody is on that board yet - a zero ranks nobody.");
         }
 
-        private static async Task DoRank(SocketSlashCommand cmd, DiscordConfig cfg,
-                                         IReadOnlyCollection<SocketSlashCommandDataOption> args)
+        private static KmhDiscordCommandResult DoRank(KmhDiscordCommandRequest req)
         {
-            string query = GetStr(args, "player", "").Trim();
+            string query = req.Option("player", "").Trim();
             if (query.Length == 0)
             {
-                query = LinkedAccountsStore.FindUsernameByDiscordId(cmd.User.Id);   // id-only; no impersonable display fallback
+                query = LinkedAccountsStore.FindUsernameByDiscordId(req.UserId);   // id-only; no impersonable display fallback
                 if (string.IsNullOrEmpty(query))
-                {
-                    await Ephemeral(cmd, "Give a player name, or link your account (`!kmh-link`) to use it bare.");
-                    return;
-                }
+                    return KmhDiscordCommandResult.Error("Give a player name, or link your account (`!kmh-link`) to use it bare.");
             }
 
-            Embed card = DiscordLeaderboardBuilder.BuildPlayerCard(query, out List<string> matches);
+            KmhEmbedSpec card = DiscordLeaderboardBuilder.BuildPlayerCard(query, out List<string> matches);
             if (card == null)
-            {
-                await Ephemeral(cmd, matches != null && matches.Count > 0
+                return KmhDiscordCommandResult.Error(matches != null && matches.Count > 0
                     ? $"Multiple players match \"{query}\": {string.Join(", ", matches)}"
                     : $"No player named \"{query}\" has been seen on this server.");
-                return;
-            }
-            await cmd.RespondAsync(embed: card).ConfigureAwait(false);
+            return KmhDiscordCommandResult.Embed(card);
         }
 
-        private static async Task DoLeaderboardPost(SocketSlashCommand cmd, DiscordConfig cfg)
+        // Today's live boards update now (and are posted if missing), rather than a second copy appearing beside them.
+        private static Task<KmhDiscordCommandResult> DoLeaderboardPost(DiscordConfig cfg)
         {
             ulong ch = cfg.LeaderboardChannelId;
-            if (ch == 0) { await Ephemeral(cmd, "No leaderboard channel set (Channels.Leaderboard)."); return; }
-            int n = Clamp(cfg.LeaderboardTopCount, 1, 25);
-            Embed e = DiscordLeaderboardBuilder.Build(n, DiscordLeaderboardBuilder.DefaultSort);
-            if (e == null) { await Ephemeral(cmd, "No leaderboard data yet."); return; }
-            Embed g = DiscordLeaderboardBuilder.BuildGuilds(n, DiscordLeaderboardBuilder.DefaultGuildSort);
-            await DiscordBridge.PostOrEditEmbedsAsync(ch, 0, g == null ? new[] { e } : new[] { e, g }).ConfigureAwait(false);
-            await cmd.RespondAsync("Posted the leaderboard.", ephemeral: true).ConfigureAwait(false);
+            if (ch == 0) return Task.FromResult(KmhDiscordCommandResult.Error("No leaderboard channel set (Channels.Leaderboard)."));
+            if (cfg.LiveLeaderboardBoards.Length == 0 || cfg.LeaderboardIntervalMinutes < 1)
+                return Task.FromResult(KmhDiscordCommandResult.Error("The live leaderboard is off (Live.LeaderboardBoards / Live.LeaderboardEveryMinutes)."));
+            Leaderboards.LeaderboardEngine.Inputs inputs = Leaderboards.LeaderboardEngine.Live();
+            Leaderboards.LeaderboardBoardDto b = Leaderboards.LeaderboardEngine.Build(
+                Leaderboards.LeaderboardCatalog.Find(DiscordLeaderboardBuilder.PostedSort(inputs)), inputs);
+            if (b == null || b.Rows.Count == 0) return Task.FromResult(KmhDiscordCommandResult.Error("No leaderboard data yet."));
+            DiscordLive.RefreshBoardsNow();
+            return Task.FromResult(KmhDiscordCommandResult.Text("Updating today's leaderboard now.", ephemeral: true));
         }
 
-        private static async Task DoMarket(SocketSlashCommand cmd, DiscordConfig cfg,
-                                           IReadOnlyCollection<SocketSlashCommandDataOption> args, bool search)
+        private static KmhDiscordCommandResult DoMarket(DiscordConfig cfg, KmhDiscordCommandRequest req, bool search)
         {
             MarketplaceSnapshot snap = MarketplaceStore.BuildSnapshot("");
             List<MarketplaceListing> rows = snap?.Listings ?? new List<MarketplaceListing>();
@@ -320,7 +309,7 @@ namespace KMHServerAddon.Features.Discord
             string title = "Marketplace";
             if (search)
             {
-                string q = GetStr(args, "query", "").Trim();
+                string q = req.Option("query", "").Trim();
                 title = $"Marketplace · \"{q}\"";
                 rows = rows.Where(l =>
                         ItemLabelCache.LabelFor(l.ItemDefName).IndexOf(q, StringComparison.OrdinalIgnoreCase) >= 0
@@ -335,17 +324,16 @@ namespace KMHServerAddon.Features.Discord
                 return byItem != 0 ? byItem : a.UnitPriceSilver.CompareTo(b.UnitPriceSilver);
             });
 
-            EmbedBuilder eb = Brand(cfg, title, null);
+            KmhEmbedSpecBuilder eb = Brand(cfg, title, null);
             if (rows.Count == 0)
             {
                 eb.WithDescription(search ? "_No listings match._" : "_No open listings right now._");
-                await cmd.RespondAsync(embed: eb.Build()).ConfigureAwait(false);
-                return;
+                return KmhDiscordCommandResult.Embed(eb.Build());
             }
 
             const int pageSize = 8;
             int totalPages = Math.Max(1, (rows.Count + pageSize - 1) / pageSize);
-            int page = (int)Clamp(GetInt(args, "page", 1), 1, totalPages);
+            int page = (int)Clamp(req.OptionInt("page", 1), 1, totalPages);
             int skip = (page - 1) * pageSize;
             int end  = Math.Min(skip + pageSize, rows.Count);
             for (int i = skip; i < end; i++)
@@ -356,32 +344,30 @@ namespace KMHServerAddon.Features.Discord
                     inline: false);
             }
             eb.WithFooter(totalPages > 1 ? $"Page {page}/{totalPages} · {rows.Count} listings" : $"{rows.Count} listing(s)");
-            await cmd.RespondAsync(embed: eb.Build()).ConfigureAwait(false);
+            return KmhDiscordCommandResult.Embed(eb.Build());
         }
 
-        private static async Task DoSites(SocketSlashCommand cmd, DiscordConfig cfg, int tile)
+        private static KmhDiscordCommandResult DoSites(DiscordConfig cfg, int tile)
         {
             List<SiteEntry> sites = SiteStore.AllForApi();
 
             if (tile >= 0)
             {
                 SiteEntry s = sites.FirstOrDefault(x => x.Tile == tile);
-                if (s == null) { await Ephemeral(cmd, $"No site at tile {tile}."); return; }
-                EmbedBuilder eb = Brand(cfg, $"Site · tile {s.Tile}", null)
+                if (s == null) return KmhDiscordCommandResult.Error($"No site at tile {tile}.");
+                KmhEmbedSpecBuilder eb = Brand(cfg, $"Site · tile {s.Tile}", null)
                     .AddField("Owner",   DiscordText.SafeName(SiteOwnership.ControllerLabel(s)), true)
                     .AddField("Produces", $"{s.BaseAmountPerCycle}× {DiscordText.Escape(ItemLabelCache.LabelFor(s.ItemDefName))}", true)
                     .AddField("Access",  AccessLabel(s.AccessMode), true)
                     .AddField("Workers", $"{s.Workers?.Count ?? 0}/{s.MaxWorkers}", true);
-                await cmd.RespondAsync(embed: eb.Build()).ConfigureAwait(false);
-                return;
+                return KmhDiscordCommandResult.Embed(eb.Build());
             }
 
-            EmbedBuilder list = Brand(cfg, $"Sites ({sites.Count})", null);
+            KmhEmbedSpecBuilder list = Brand(cfg, $"Sites ({sites.Count})", null);
             if (sites.Count == 0)
             {
                 list.WithDescription("_No custom sites built yet._");
-                await cmd.RespondAsync(embed: list.Build()).ConfigureAwait(false);
-                return;
+                return KmhDiscordCommandResult.Embed(list.Build());
             }
             foreach (SiteEntry s in sites.Take(15))
             {
@@ -391,22 +377,21 @@ namespace KMHServerAddon.Features.Discord
                     inline: false);
             }
             if (sites.Count > 15) list.WithFooter($"Showing 15 of {sites.Count}");
-            await cmd.RespondAsync(embed: list.Build()).ConfigureAwait(false);
+            return KmhDiscordCommandResult.Embed(list.Build());
         }
 
         // Roads are world infrastructure, so this shows the network and never anyone's projects or reserved silver.
-        private static async Task DoRoads(SocketSlashCommand cmd, DiscordConfig cfg)
+        private static KmhDiscordCommandResult DoRoads(DiscordConfig cfg)
         {
             if (!Features.Sites.SitesConfig.Current.AllowRoadworks)
-            { await Ephemeral(cmd, "Roadworks is turned off on this server."); return; }
+                return KmhDiscordCommandResult.Error("Roadworks is turned off on this server.");
 
             List<Features.Roadworks.Dto.RoadSegment> segments = Features.Roadworks.RoadworksStore.AllSegments();
-            EmbedBuilder e = Brand(cfg, $"Roadworks ({segments.Count} segment(s))", null);
+            KmhEmbedSpecBuilder e = Brand(cfg, $"Roadworks ({segments.Count} segment(s))", null);
             if (segments.Count == 0)
             {
                 e.WithDescription("_No roads built yet._");
-                await cmd.RespondAsync(embed: e.Build()).ConfigureAwait(false);
-                return;
+                return KmhDiscordCommandResult.Embed(e.Build());
             }
 
             var byTier  = new Dictionary<string, int>();
@@ -429,161 +414,178 @@ namespace KMHServerAddon.Features.Discord
                 builders.AppendLine($"{DiscordText.SafeName(kv.Key)} · {kv.Value}");
             if (builders.Length > 0) e.AddField("Top builders", builders.ToString(), inline: false);
 
-            await cmd.RespondAsync(embed: e.Build()).ConfigureAwait(false);
+            return KmhDiscordCommandResult.Embed(e.Build());
         }
 
-        private static async Task DoAnnounce(SocketSlashCommand cmd, DiscordConfig cfg, string message)
+        private static KmhDiscordCommandResult DoAnnounce(DiscordConfig cfg, KmhDiscordCommandRequest req, string message)
         {
-            if (string.IsNullOrWhiteSpace(message)) { await Ephemeral(cmd, "Provide a message."); return; }
+            if (string.IsNullOrWhiteSpace(message)) return KmhDiscordCommandResult.Error("Provide a message.");
             ulong ch = cfg.AnnouncementsChannelId;
-            if (ch == 0) { await Ephemeral(cmd, "No announcements channel set (Channels.Announcements)."); return; }
+            if (ch == 0) return KmhDiscordCommandResult.Error("No announcements channel set (Channels.Announcements).");
 
-            EmbedBuilder eb = Brand(cfg, "📢 Announcement", message)
-                .WithFooter(cfg.Branding?.DisplayName ?? "KMH Server")
-                .WithCurrentTimestamp();
-            DiscordBridge.PostEmbedToChannel(ch, eb.Build());
-            ServerLog.Info($"Discord: announcement by {cmd.User?.Username}: {message}");
-            await cmd.RespondAsync("Announcement posted.", ephemeral: true).ConfigureAwait(false);
+            // A moderator's markdown is kept; no mention in it pings, as none did in the embed this replaced.
+            DiscordBridge.PostToChannel(ch, $"📢 **Announcement** · {DiscordText.SafeName(KmhEmbedBuilder.ServerName(cfg))}\n{message.Trim()}");
+            ServerLog.Info($"Discord: announcement by {req.UserName}: {message}");
+            return KmhDiscordCommandResult.Text("Announcement posted.", ephemeral: true);
         }
 
-        private static async Task DoDiscordReload(SocketSlashCommand cmd)
+        // Deferred, because in direct mode the reload tears down the very client that must still deliver this reply.
+        private static KmhDiscordCommandResult DoDiscordReload()
         {
-            // Respond first, because Reload tears down the client handling this very interaction.
-            await cmd.RespondAsync("Reloading the Discord bridge...", ephemeral: true).ConfigureAwait(false);
-            DiscordBridge.Reload();
+            if (!DiscordBridge.TryClaimReload(out TimeSpan wait))
+                return KmhDiscordCommandResult.Text($"The Discord bridge was just reloaded - try again in {Math.Max(1, (int)Math.Ceiling(wait.TotalSeconds))}s.", ephemeral: true);
+            Task.Run(async () =>
+            {
+                await Task.Delay(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+                DiscordBridge.Reload();
+            });
+            return KmhDiscordCommandResult.Text("Reloading the Discord bridge...", ephemeral: true);
         }
 
-        private static async Task DoConfigReload(SocketSlashCommand cmd)
+        private static KmhDiscordCommandResult DoConfigReload()
         {
             Features.Economy.EconomyConfig.Reload();
             Features.Sites.SitesConfig.Reload();
-            await cmd.RespondAsync("Reloaded Economy + Sites config.", ephemeral: true).ConfigureAwait(false);
+            return KmhDiscordCommandResult.Text("Reloaded Economy + Sites config.", ephemeral: true);
         }
 
-        private static async Task DoConsoleRun(SocketSlashCommand cmd, DiscordConfig cfg, string command)
+        private static KmhDiscordCommandResult DoConsoleRun(DiscordConfig cfg, KmhDiscordCommandRequest req, string command)
         {
-            if (!await RequireConsole(cmd, cfg)) return;
-            // ConsoleExecutor.Run is synchronous and can outlast Discord's three-second interaction window.
-            await cmd.DeferAsync(ephemeral: true).ConfigureAwait(false);
+            KmhDiscordCommandResult denied = RequireConsole(req, cfg);
+            if (denied != null) return denied;
+
             string output;
             try { output = ConsoleExecutor.Run(command); }
             catch (Exception ex) { output = $"(command threw) {ex.Message}"; }
-            output = DiscordBridge.Redact(output); // scrub player IPs + host paths from console output before Discord
-            ServerLog.Info($"Discord: console-run by {cmd.User?.Username}: {command}");
-            await FollowupBlocks(cmd, output).ConfigureAwait(false);
+            output = DiscordBridge.Redact(output);
+            ServerLog.Info($"Discord: console-run by {req.UserName}: {command}");
+
+            KmhDiscordCommandResult result = KmhDiscordCommandResult.Text("", ephemeral: true);
+            result.Ephemeral = true;
+            List<string> chunks = SplitForBlocks(string.IsNullOrWhiteSpace(output) ? "(no output)" : output.TrimEnd(), 1900);
+            for (int i = 0; i < chunks.Count && i < KmhDiscordProtocol.MaxFollowups; i++)
+            {
+                string c = chunks[i];
+                if (i == KmhDiscordProtocol.MaxFollowups - 1 && chunks.Count > KmhDiscordProtocol.MaxFollowups)
+                    c += "\n…(truncated)";
+                if (i == 0) result.Content = $"```\n{c}\n```";
+                else result.Followups.Add(new KmhDiscordFollowup { Content = $"```\n{c}\n```", Ephemeral = true });
+            }
+            return result;
         }
 
-        private static async Task DoHelp(SocketSlashCommand cmd, DiscordConfig cfg)
+        private static KmhDiscordCommandResult DoHelp(DiscordConfig cfg)
         {
-            EmbedBuilder eb = Brand(cfg, "KMH Discord commands", null)
+            KmhEmbedSpecBuilder eb = Brand(cfg, "Colony Nexus Discord commands", null)
                 .AddField("Anyone",
-                    "`/kmh status` · `/kmh players` · `/kmh leaderboard show` · `/kmh market list|search` · `/kmh site list|info|roads` · `/kmh help`", false)
+                    "`/kmh status` · `/kmh players` · `/kmh servers` · `/kmh leaderboard show` · `/kmh market list|search` · `/kmh site list|info|roads` · `/kmh help`", false)
                 .AddField("Moderators",
                     "`/kmh leaderboard post|refresh` · `/kmh announcement send` · `/kmh discord reload` · `/kmh config reload`", false)
                 .AddField("Owners",
                     "`/kmh console run <command>` _(gated by the Console block in DiscordConfig.json)_", false)
                 .WithFooter("Account linking still uses /kmh link in-game + !kmh-link here.");
-            await cmd.RespondAsync(embed: eb.Build(), ephemeral: true).ConfigureAwait(false);
+            return KmhDiscordCommandResult.Embed(eb.Build(), ephemeral: true);
         }
 
-        private static async Task<bool> RequireMod(SocketSlashCommand cmd, DiscordConfig cfg)
+        // Returns null when the caller passes; the refusal itself is the result otherwise.
+        private static KmhDiscordCommandResult RequireMod(KmhDiscordCommandRequest req, DiscordConfig cfg)
+            => IsMod(req, cfg) ? null : KmhDiscordCommandResult.Error("That command needs a moderator or admin role.");
+
+        // Same rule as the text commands: with Bot.GuildId set, no other Discord server is served at all.
+        internal static bool FromAllowedGuild(KmhDiscordCommandRequest req, DiscordConfig cfg)
         {
-            if (IsMod(cmd.User, cfg)) return true;
-            await cmd.RespondAsync("That command needs a moderator or admin role.", ephemeral: true).ConfigureAwait(false);
+            if (req.IsDirectMessage) return true;
+            ulong[] allowed = cfg.AllowedGuildIds;
+            if (allowed == null || allowed.Length == 0) return true;
+            foreach (ulong g in allowed) if (g == req.GuildId) return true;
             return false;
         }
 
-        private static bool IsMod(SocketUser user, DiscordConfig cfg)
+        // Administrator and roles mean something only on this server's own Discord, which its channels prove.
+        internal static bool InOwnServer(KmhDiscordCommandRequest req, DiscordConfig cfg)
+            => !req.IsDirectMessage && FromAllowedGuild(req, cfg) && cfg.IsOwnChannel(req.ChannelId);
+
+        internal static bool IsMod(KmhDiscordCommandRequest req, DiscordConfig cfg)
         {
-            if (!(user is SocketGuildUser gu)) return false;
-            if (gu.GuildPermissions.Administrator) return true;
-            foreach (SocketRole r in gu.Roles)
-                if (HasRole(cfg.Roles?.Moderators, r)) return true;
-            return false;
+            if (!InOwnServer(req, cfg)) return false;
+            if (req.IsGuildAdministrator) return true;
+            return HasAnyRole(cfg.Roles?.Moderators, req);
         }
 
-        private static async Task<bool> RequireConsole(SocketSlashCommand cmd, DiscordConfig cfg)
+        // Never Console.Allow's switch, either way; the Admin channel is required since a ban names the player and IP.
+        private static KmhDiscordCommandResult RequireModeration(KmhDiscordCommandRequest req, DiscordConfig cfg)
+        {
+            if (req.IsDirectMessage)
+                return KmhDiscordCommandResult.Error("Moderation commands only work in the server's Admin channel.");
+
+            ulong wantChannel = cfg.AdminChannelId;
+            if (wantChannel == 0)
+                return KmhDiscordCommandResult.Error(
+                    "Set Channels.Admin in DiscordConfig.json first - moderation replies name players and addresses.");
+            if (req.ChannelId != wantChannel || !InOwnServer(req, cfg))
+                return KmhDiscordCommandResult.Error("Moderation commands must be used in the Admin channel.");
+
+            if (req.IsGuildAdministrator) return null;
+            if (HasAnyRole(cfg.Roles?.Moderators, req)) return null;
+            if (HasAnyRole(cfg.Roles?.ConsoleAccess, req)) return null;
+            return KmhDiscordCommandResult.Error("That command needs a moderator role.");
+        }
+
+        internal static KmhDiscordCommandResult RequireConsole(KmhDiscordCommandRequest req, DiscordConfig cfg)
         {
             if (!cfg.AllowConsoleCommands)
-            {
-                await cmd.RespondAsync("Console commands are disabled (Console.Allow = false).", ephemeral: true).ConfigureAwait(false);
-                return false;
-            }
+                return KmhDiscordCommandResult.Error("Console commands are disabled (Console.Allow = false).");
+
             ulong wantChannel = cfg.ConsoleCommandsChannelId;
-            if (wantChannel != 0 && cmd.Channel?.Id != wantChannel)
-            {
-                await cmd.RespondAsync("Console commands must be used in the Admin channel.", ephemeral: true).ConfigureAwait(false);
-                return false;
-            }
-            if (cfg.RequireConsoleRole)
-            {
-                bool ok = false;
-                if (cmd.User is SocketGuildUser gu)
-                    foreach (SocketRole r in gu.Roles)
-                        if (HasRole(cfg.Roles?.ConsoleAccess, r)) { ok = true; break; }
-                if (!ok)
-                {
-                    await cmd.RespondAsync("You need a console-access role for that.", ephemeral: true).ConfigureAwait(false);
-                    return false;
-                }
-            }
-            return true;
+            if (wantChannel == 0)
+                return KmhDiscordCommandResult.Error("Set Channels.Admin in DiscordConfig.json first - console commands run there only.");
+            if (req.ChannelId != wantChannel || !InOwnServer(req, cfg))
+                return KmhDiscordCommandResult.Error("Console commands must be used in the Admin channel.");
+
+            if (cfg.RequireConsoleRole && !HasAnyRole(cfg.Roles?.ConsoleAccess, req))
+                return KmhDiscordCommandResult.Error("You need a console-access role for that.");
+
+            return null;
         }
 
-        private static bool HasRole(string[] cfgRoles, SocketRole role)
+        // Ids only: anyone with Manage Roles can create a role with any name.
+        internal static bool HasAnyRole(string[] cfgRoles, KmhDiscordCommandRequest req)
         {
-            if (cfgRoles == null || role == null) return false;
+            if (cfgRoles == null || req?.RoleIds == null) return false;
             foreach (string s in cfgRoles)
             {
-                if (string.IsNullOrWhiteSpace(s)) continue;
-                string t = s.Trim();
-                if (t == role.Id.ToString()) return true;
-                if (string.Equals(t, role.Name, StringComparison.OrdinalIgnoreCase)) return true;
+                ulong want = DiscordConfig.ParseId(s);
+                // @everyone's id is the guild's, so that id pasted into a role list would admit every member.
+                if (want == 0 || want == req.GuildId) continue;
+                foreach (string id in req.RoleIds)
+                    if (DiscordConfig.ParseId(id) == want) return true;
             }
             return false;
         }
 
-        private static EmbedBuilder Brand(DiscordConfig cfg, string title, string description)
+        private static KmhEmbedSpecBuilder Brand(DiscordConfig cfg, string title, string description)
         {
-            EmbedBuilder eb = new EmbedBuilder().WithTitle(title).WithColor(BrandColor(cfg));
+            KmhEmbedSpecBuilder eb = new KmhEmbedSpecBuilder().WithTitle(title).WithColor(KmhEmbedBuilder.BrandColor(cfg));
             if (!string.IsNullOrEmpty(description)) eb.WithDescription(description);
             return eb;
         }
-
-        private static Color BrandColor(DiscordConfig cfg) => KmhEmbedBuilder.BrandColor(cfg);
 
         private static string AccessLabel(string mode)
             => mode == SiteEntry.AccessPublic ? "Public"
              : mode == SiteEntry.AccessPrivate ? "Private"
              : "Guild + allies";
 
-        private static Task Ephemeral(SocketSlashCommand cmd, string text)
-            => cmd.RespondAsync(text, ephemeral: true);
-
         // Clamped to Discord's 2000-character message ceiling.
-        private static Task RespondBlock(SocketSlashCommand cmd, string text, bool ephemeral)
+        private static KmhDiscordCommandResult Block(string text, bool ephemeral)
         {
             string body = string.IsNullOrWhiteSpace(text) ? "(no output)" : text.TrimEnd();
-            if (body.Length > 1900) body = body.Substring(0, 1900) + "\n…(truncated)";
-            return cmd.RespondAsync($"```\n{body}\n```", ephemeral: ephemeral);
-        }
-
-        // Split across several followups, so a large result arrives in full rather than truncated to one message.
-        private static async Task FollowupBlocks(SocketSlashCommand cmd, string text)
-        {
-            string body = string.IsNullOrWhiteSpace(text) ? "(no output)" : text.TrimEnd();
-            List<string> chunks = SplitForBlocks(body, 1900);
-            const int maxMsgs = 5; // never flood the channel - cap the followups
-            for (int i = 0; i < chunks.Count && i < maxMsgs; i++)
-            {
-                string c = chunks[i];
-                if (i == maxMsgs - 1 && chunks.Count > maxMsgs) c += "\n…(truncated)";
-                await cmd.FollowupAsync($"```\n{c}\n```", ephemeral: true).ConfigureAwait(false);
-            }
+            if (body.Length > KmhDiscordProtocol.MaxContentChars)
+                body = body.Substring(0, KmhDiscordProtocol.MaxContentChars) + "\n…(truncated)";
+            return KmhDiscordCommandResult.Text($"```\n{body}\n```", ephemeral);
         }
 
         // Breaks on newlines where it can, since a single over-long line still has to be hard-split.
-        private static List<string> SplitForBlocks(string text, int cap)
+        internal static List<string> SplitForBlocks(string text, int cap)
         {
             List<string> chunks = new List<string>();
             StringBuilder sb = new StringBuilder();
@@ -598,30 +600,6 @@ namespace KMHServerAddon.Features.Discord
             return chunks;
         }
 
-        private static string GetStr(IReadOnlyCollection<SocketSlashCommandDataOption> args, string name, string def = "")
-        {
-            if (args == null) return def;
-            foreach (SocketSlashCommandDataOption a in args)
-                if (string.Equals(a.Name, name, StringComparison.OrdinalIgnoreCase))
-                    return a.Value?.ToString() ?? def;
-            return def;
-        }
-
-        private static long GetInt(IReadOnlyCollection<SocketSlashCommandDataOption> args, string name, long def)
-        {
-            if (args == null) return def;
-            foreach (SocketSlashCommandDataOption a in args)
-                if (string.Equals(a.Name, name, StringComparison.OrdinalIgnoreCase))
-                {
-                    try { return Convert.ToInt64(a.Value, CultureInfo.InvariantCulture); }
-                    catch { return def; }
-                }
-            return def;
-        }
-
         private static long Clamp(long v, long lo, long hi) => v < lo ? lo : (v > hi ? hi : v);
-        private static int  Clamp(int  v, int  lo, int  hi) => v < lo ? lo : (v > hi ? hi : v);
-
-        private static ulong ParseId(string s) => ulong.TryParse((s ?? "").Trim(), out ulong v) ? v : 0UL;
     }
 }

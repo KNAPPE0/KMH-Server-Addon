@@ -10,7 +10,6 @@ namespace KMHServerAddon.Maintenance
         {
             var r = new List<(string, bool, string)>();
 
-            // Value-moving requests are blockable; reads and infrastructure are not.
             bool mutations =
                 KmhMaintenanceGate.WouldBlock(K.TreasuryDepositSilver) &&
                 KmhMaintenanceGate.WouldBlock(K.TreasuryWithdrawItem)  &&
@@ -31,7 +30,7 @@ namespace KMHServerAddon.Maintenance
                 !KmhMaintenanceGate.WouldBlock(K.ItemLabels);   // catalog push latches client-side; refusing it loses pricing
             r.Add(("Maintenance: infra/handshake pass", infraAllowed, "hello/ping/catalog pass"));
 
-            // These carry no feature key, so classifying by feature let every one of them through a freeze.
+            // These carry no feature key, so classifying by feature would let every one of them through a freeze.
             bool siteRoadBlocked =
                 KmhMaintenanceGate.WouldBlock(K.SiteBuild)          &&
                 KmhMaintenanceGate.WouldBlock(K.SiteBuildingAdd)    &&
@@ -78,21 +77,32 @@ namespace KMHServerAddon.Maintenance
             r.Add(("Maintenance: a disabled feature refuses player ingress too", featureOffRefused,
                    "feature policy and mutation admission stay separate"));
 
-            // ShouldBlock is inert until the gate is entered.
-            KmhMaintenanceGate.Release();   // ensure clean start (idempotent)
+            KmhMaintenanceGate.Release();
             bool inertWhenOff = !KmhMaintenanceGate.ShouldBlock(K.MarketplaceBuy) && !KmhMaintenanceGate.IsActive;
 
             KmhMaintenanceGate.Enter(KmhMaintenanceReason.Migration);
             bool blocksWhenOn = KmhMaintenanceGate.ShouldBlock(K.MarketplaceBuy) && !KmhMaintenanceGate.ShouldBlock(K.MarketplaceRequest);
             r.Add(("Maintenance: gate off inert, on blocks", inertWhenOff && blocksWhenOn, "toggles correctly"));
 
-            // Re-entrant: a nested Enter needs a matching Release before the gate lifts.
             KmhMaintenanceGate.Enter(KmhMaintenanceReason.Restore);
-            KmhMaintenanceGate.Release();                       // inner
-            bool stillActive = KmhMaintenanceGate.IsActive;     // outer still holds
-            KmhMaintenanceGate.Release();                       // outer
+            KmhMaintenanceGate.Release();
+            bool stillActive = KmhMaintenanceGate.IsActive;
+            KmhMaintenanceGate.Release();
             bool nowReleased = !KmhMaintenanceGate.IsActive;
             r.Add(("Maintenance: re-entrant depth", stillActive && nowReleased, "nested release keeps gate until depth 0"));
+
+            // 'off' answers the operator's own 'on'; lifting a reset's hold would reopen the economy mid-purge.
+            var said = new List<string>();
+            KmhMaintenanceGate.Enter(KmhMaintenanceReason.DataRepair);
+            AdminCommands.KmhServerCommands.Dispatch(new[] { "maintenance", "off" }, true, "selftest", said.Add);
+            bool heldThroughOff = KmhMaintenanceGate.IsActive;
+            AdminCommands.KmhServerCommands.Dispatch(new[] { "maintenance", "on" }, true, "selftest", said.Add);
+            AdminCommands.KmhServerCommands.Dispatch(new[] { "maintenance", "off" }, true, "selftest", said.Add);
+            bool stillHeld = KmhMaintenanceGate.IsActive;
+            KmhMaintenanceGate.Release();
+            bool ownLifted = !KmhMaintenanceGate.IsActive;
+            r.Add(("Maintenance: 'maintenance off' lifts only its own 'on', never a reset's hold", heldThroughOff && stillHeld && ownLifted,
+                   $"resetHoldSurvivesOff={heldThroughOff} afterOnOff={stillHeld} ownOnLifted={ownLifted}"));
 
             // Degradation is a condition, not a scope, so an unrelated Release must not cancel it.
             bool freezeOn = MaintenanceConfig.Current.FreezeEconomyOnPersistenceFailure;
@@ -103,11 +113,9 @@ namespace KMHServerAddon.Maintenance
             r.Add(("Maintenance: unwritable data blocks deposits", frozen,
                    freezeOn ? "" : "FreezeEconomyOnPersistenceFailure=false"));
 
-            // Players must still be able to SEE their state while the economy is frozen.
             r.Add(("Maintenance: degraded still allows reads",
                    !KmhMaintenanceGate.ShouldBlock(K.TreasuryRequest), ""));
 
-            // A stray Release must not clear it - only writability coming back does.
             KmhMaintenanceGate.Release();
             r.Add(("Maintenance: Release cannot clear degradation",
                    !freezeOn || KmhMaintenanceGate.IsActive, ""));

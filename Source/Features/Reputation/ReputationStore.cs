@@ -138,7 +138,7 @@ namespace KMHServerAddon.Features.Reputation
                         _entries[e.Username] = e;
                     }
                 }
-                Diagnostics.ServerLog.Info($"Reputation: loaded {state.Entries.Count} entries from disk");
+                Diagnostics.ServerLog.Diag($"Reputation: loaded {state.Entries.Count} entries from disk");
             }
         }
 
@@ -160,7 +160,7 @@ namespace KMHServerAddon.Features.Reputation
         public static void SaveToDisk()
         {
             PersistedState state = new PersistedState();
-            lock (_lock) { state.Entries = new List<Entry>(_entries.Values); }
+            lock (_lock) { state.Entries = KmhDeepCopy.OfList(_entries.Values); }
             JsonFileStore.Save(KmhDataPaths.ReputationFile, state);
         }
 

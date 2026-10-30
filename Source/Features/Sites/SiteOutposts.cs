@@ -7,32 +7,16 @@ namespace KMHServerAddon.Features.Sites
     internal static class SiteOutposts
     {
         public static string NormalizeTemplate(string t)
-        {
-            if (string.IsNullOrWhiteSpace(t)) return SiteEntry.TemplateNone;
-            string k = t.Trim().ToLowerInvariant();
-            foreach (string known in SiteEntry.AllTemplates) if (k == known) return k;
-            return SiteEntry.TemplateNone;   // a template from a newer build must not become a live outpost here
-        }
+            => KmhVocabulary.Canonical(t, SiteEntry.AllTemplates, SiteEntry.TemplateNone);
 
         public static string NormalizeState(string s)
-        {
-            if (string.IsNullOrWhiteSpace(s)) return SiteEntry.OutpostNone;
-            string k = s.Trim().ToLowerInvariant();
-            foreach (string known in SiteEntry.AllOutpostStates) if (k == known) return k;
-            return SiteEntry.OutpostNone;
-        }
+            => KmhVocabulary.Canonical(s, SiteEntry.AllOutpostStates, SiteEntry.OutpostNone);
 
         // The rest exist in the vocabulary so adding one later is not a schema change, and are refused until then.
         public static readonly string[] Spawnable = { SiteEntry.TemplateRuins };
 
-        public static bool IsSpawnable(string template)
-        {
-            string t = NormalizeTemplate(template);
-            foreach (string s in Spawnable) if (t == s) return true;
-            return false;
-        }
+        public static bool IsSpawnable(string template) => Array.IndexOf(Spawnable, NormalizeTemplate(template)) >= 0;
 
-        // The state a freshly established outpost of this template starts in.
         public static string EntryStateFor(string template)
         {
             switch (NormalizeTemplate(template))

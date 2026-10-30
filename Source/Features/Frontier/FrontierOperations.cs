@@ -6,35 +6,20 @@ namespace KMHServerAddon.Features.Frontier
     internal static class FrontierOperations
     {
         public static string NormalizeType(string t)
-        {
-            if (string.IsNullOrWhiteSpace(t)) return ServerQuestDto.OpNone;
-            string k = t.Trim().ToLowerInvariant();
-            foreach (string known in ServerQuestDto.AllOperationTypes) if (k == known) return k;
-            return ServerQuestDto.OpNone;
-        }
+            => Sites.KmhVocabulary.Canonical(t, ServerQuestDto.AllOperationTypes, ServerQuestDto.OpNone);
 
         public static string NormalizeConsequence(string c)
-        {
-            if (string.IsNullOrWhiteSpace(c)) return ServerQuestDto.ConsequenceNone;
-            string k = c.Trim().ToLowerInvariant();
-            foreach (string known in ServerQuestDto.AllConsequences) if (k == known) return k;
-            return ServerQuestDto.ConsequenceNone;
-        }
+            => Sites.KmhVocabulary.Canonical(c, ServerQuestDto.AllConsequences, ServerQuestDto.ConsequenceNone);
 
         // Assault is absent on purpose: it has no resolution mechanic, so generating it would advertise nothing.
         public static readonly string[] Generatable = { ServerQuestDto.OpReclaim };
 
-        public static bool IsGeneratable(string type)
-        {
-            string t = NormalizeType(type);
-            foreach (string g in Generatable) if (t == g) return true;
-            return false;
-        }
+        public static bool IsGeneratable(string type) => System.Array.IndexOf(Generatable, NormalizeType(type)) >= 0;
 
         // A consequence outside this list is refused, so a half-built type cannot quietly resolve into nothing.
         public static readonly string[] Dispatchable = { ServerQuestDto.ConsequenceOutpostClaimable };
 
-        // The self-test walks Generatable through here, so a type added without a dispatchable consequence fails the build.
+        // The self-test walks Generatable through here, so a type with no dispatchable consequence fails the build.
         public static string ConsequenceFor(string operationType)
         {
             switch (NormalizeType(operationType))
@@ -45,11 +30,7 @@ namespace KMHServerAddon.Features.Frontier
         }
 
         public static bool IsDispatchable(string consequence)
-        {
-            string c = NormalizeConsequence(consequence);
-            foreach (string d in Dispatchable) if (c == d) return true;
-            return false;
-        }
+            => System.Array.IndexOf(Dispatchable, NormalizeConsequence(consequence)) >= 0;
 
         public static bool IsWellFormed(ServerQuestDto q, out string problem)
         {

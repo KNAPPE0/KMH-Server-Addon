@@ -6,8 +6,8 @@ License (see LICENSE). It bundles the following third-party components,
 each governed by its own license.
 
 
-SixLabors.ImageSharp 3.1.11
----------------------------
+SixLabors.ImageSharp 4.1.3
+--------------------------
 Copyright (c) Six Labors
 Six Labors Split License, Version 1.0
 https://github.com/SixLabors/ImageSharp/blob/main/LICENSE
@@ -17,17 +17,157 @@ client cannot decode, and to re-encode them as PNG (static) or animated
 GIF (animated) so they can be displayed in game.
 
 The Six Labors Split License grants use under the terms of the Apache
-License 2.0 where the consumer is, among other qualifying categories,
-"a For-profit company/individual with less than 1M USD annual gross
-revenue". KMH is distributed under that clause.
+License 2.0 to open source and source-available software, among other
+qualifying categories. KMH is distributed under that clause. Release
+builds read a free Six Labors Community licence key at build time; the
+key is not part of this distribution.
 
-Version note: the 3.1.x line is pinned deliberately. ImageSharp 4.x
-introduces a build-time license-key requirement (the build fails with
-"No Six Labors license found" unless SixLaborsLicenseKey,
-SixLaborsLicenseFile, or a sixlabors.lic file is supplied). 3.1.x has
-no such requirement and provides the animated-WebP decoding and
-animated-GIF encoding the resolver needs. Do not upgrade this
-dependency to 4.x without first obtaining a license key.
+Security note: 4.1.3 carries the fixes for the October 2026 advisories.
+KMH also restricts ImageSharp to the formats it needs: the resolver
+registers only PNG, JPEG, GIF, WebP and BMP decoders, decodes with
+metadata skipped and ICC profiles never converted, drops any metadata a
+decoder still keeps before re-encoding, never encodes TIFF and never
+runs histogram equalization. It also encodes the leaderboard PNG
+described below; that path only ever encodes an image KMH drew itself
+and decodes nothing.
+
+
+SixLabors.Fonts 3.2.0
+---------------------
+Copyright (c) Six Labors
+Six Labors Split License, Version 1.0
+https://github.com/SixLabors/Fonts/blob/main/LICENSE
+
+SixLabors.ImageSharp.Drawing 3.1.3
+----------------------------------
+Copyright (c) Six Labors
+Six Labors Split License, Version 1.0
+https://github.com/SixLabors/ImageSharp.Drawing/blob/main/LICENSE
+
+SixLabors.PolygonClipper 1.0.2
+------------------------------
+Copyright (c) Six Labors
+Six Labors Split License, Version 1.0
+https://github.com/SixLabors/PolygonClipper/blob/main/LICENSE
+
+Used to draw the daily leaderboard image the server posts to Discord
+(the same layout and the same bytes as Colony Nexus Global's leaderboard
+image). All three are used under the same Split License terms as
+ImageSharp above, and are pinned to the versions Colony Nexus Global
+uses.
+
+
+System.IO.Hashing 8.0.0
+-----------------------
+Copyright (c) .NET Foundation and Contributors
+MIT License
+https://github.com/dotnet/runtime/blob/main/LICENSE.TXT
+
+Pulled in by SixLabors.ImageSharp.
+
+
+Inter (fonts embedded in the server addon)
+------------------------------------------
+Copyright (c) 2016 The Inter Project Authors (https://github.com/rsms/inter)
+SIL Open Font License, Version 1.1
+https://openfontlicense.org
+
+Inter Regular, SemiBold, Bold and ExtraBold are embedded in the addon
+assembly to draw the leaderboard image. The full licence text is
+embedded beside them (KMH.Fonts.Inter-LICENSE.txt) and reproduced here.
+
+Copyright (c) 2016 The Inter Project Authors (https://github.com/rsms/inter)
+
+This Font Software is licensed under the SIL Open Font License, Version 1.1.
+This license is copied below, and is also available with a FAQ at:
+http://scripts.sil.org/OFL
+
+-----------------------------------------------------------
+SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007
+-----------------------------------------------------------
+
+PREAMBLE
+The goals of the Open Font License (OFL) are to stimulate worldwide
+development of collaborative font projects, to support the font creation
+efforts of academic and linguistic communities, and to provide a free and
+open framework in which fonts may be shared and improved in partnership
+with others.
+
+The OFL allows the licensed fonts to be used, studied, modified and
+redistributed freely as long as they are not sold by themselves. The
+fonts, including any derivative works, can be bundled, embedded,
+redistributed and/or sold with any software provided that any reserved
+names are not used by derivative works. The fonts and derivatives,
+however, cannot be released under any other type of license. The
+requirement for fonts to remain under this license does not apply
+to any document created using the fonts or their derivatives.
+
+DEFINITIONS
+"Font Software" refers to the set of files released by the Copyright
+Holder(s) under this license and clearly marked as such. This may
+include source files, build scripts and documentation.
+
+"Reserved Font Name" refers to any names specified as such after the
+copyright statement(s).
+
+"Original Version" refers to the collection of Font Software components as
+distributed by the Copyright Holder(s).
+
+"Modified Version" refers to any derivative made by adding to, deleting,
+or substituting -- in part or in whole -- any of the components of the
+Original Version, by changing formats or by porting the Font Software to a
+new environment.
+
+"Author" refers to any designer, engineer, programmer, technical
+writer or other person who contributed to the Font Software.
+
+PERMISSION AND CONDITIONS
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of the Font Software, to use, study, copy, merge, embed, modify,
+redistribute, and sell modified and unmodified copies of the Font
+Software, subject to the following conditions:
+
+1) Neither the Font Software nor any of its individual components,
+in Original or Modified Versions, may be sold by itself.
+
+2) Original or Modified Versions of the Font Software may be bundled,
+redistributed and/or sold with any software, provided that each copy
+contains the above copyright notice and this license. These can be
+included either as stand-alone text files, human-readable headers or
+in the appropriate machine-readable metadata fields within text or
+binary files as long as those fields can be easily viewed by the user.
+
+3) No Modified Version of the Font Software may use the Reserved Font
+Name(s) unless explicit written permission is granted by the corresponding
+Copyright Holder. This restriction only applies to the primary font name as
+presented to the users.
+
+4) The name(s) of the Copyright Holder(s) or the Author(s) of the Font
+Software shall not be used to promote, endorse or advertise any
+Modified Version, except to acknowledge the contribution(s) of the
+Copyright Holder(s) and the Author(s) or with their explicit written
+permission.
+
+5) The Font Software, modified or unmodified, in part or in whole,
+must be distributed entirely under this license, and must not be
+distributed under any other license. The requirement for fonts to
+remain under this license does not apply to any document created
+using the Font Software.
+
+TERMINATION
+This license becomes null and void if any of the above conditions are
+not met.
+
+DISCLAIMER
+THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT
+OF COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL THE
+COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+INCLUDING ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL
+DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
+OTHER DEALINGS IN THE FONT SOFTWARE.
 
 
 Newtonsoft.Json
@@ -49,3 +189,194 @@ Lib.Harmony (0Harmony)
 Copyright (c) Andreas Pardeike
 MIT License
 https://github.com/pardeike/Harmony/blob/master/LICENSE
+
+
+System.Reactive 6.0.0, System.Interactive.Async 6.0.1, System.Linq.Async 6.0.1
+------------------------------------------------------------------------------
+Copyright (c) .NET Foundation and Contributors
+MIT License
+https://github.com/dotnet/reactive/blob/main/LICENSE
+
+Pulled in by Discord.Net.
+
+
+Microsoft.Bcl.AsyncInterfaces 6.0.0, Microsoft.Extensions.DependencyInjection.Abstractions 6.0.0
+------------------------------------------------------------------------------------------------
+Copyright (c) .NET Foundation and Contributors
+MIT License
+https://github.com/dotnet/runtime/blob/main/LICENSE.TXT
+
+Pulled in by Discord.Net.
+
+
+.NET runtime (self-contained packages only)
+-------------------------------------------
+Copyright (c) .NET Foundation and Contributors
+MIT License
+The self-contained zips carry the .NET runtime; its licence and third-party
+notices ship beside it as DOTNET-RUNTIME-LICENSE.TXT and
+DOTNET-RUNTIME-THIRD-PARTY-NOTICES.TXT.
+
+
+Noto Emoji (icons in KMH-Data/Icons)
+------------------------------------
+Copyright (c) Google Inc.
+Apache License 2.0 - full text in KMH-Data/Icons/LICENSE-Apache-2.0.txt
+See KMH-Data/Icons/CREDITS.txt for which icons they are.
+
+
+==============================================================================
+Licence texts
+==============================================================================
+
+Six Labors Split License (SixLabors.ImageSharp, SixLabors.Fonts,
+SixLabors.ImageSharp.Drawing, SixLabors.PolygonClipper)
+-------------------------------------------------------
+Six Labors Split License
+Version 1.0, June 2022
+Copyright (c) Six Labors
+
+TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+1. Definitions.
+
+   "You" (or "Your") shall mean an individual or Legal Entity exercising permissions granted by this License.
+
+   "Source" form shall mean the preferred form for making modifications, including but not limited to software source
+    code, documentation source, and configuration files.
+
+   "Object" form shall mean any form resulting from mechanical transformation or translation of a Source form, including
+    but not limited to compiled object code, generated documentation, and conversions to other media types.
+
+   "Work" (or "Works") shall mean any Six Labors software made available under the License, as indicated by a
+   copyright notice that is included in or attached to the work.
+
+   "Direct Package Dependency" shall mean any Work in Source or Object form that is installed directly by You.
+
+   "Transitive Package Dependency" shall mean any Work in Object form that is installed indirectly by a third party
+    dependency unrelated to Six Labors.
+
+2. License
+
+   Works in Source or Object form are split licensed and may be licensed under the Apache License, Version 2.0 or a
+   Six Labors Commercial Use License.
+
+   Licenses are granted based upon You meeting the qualified criteria as stated. Once granted,
+   You must reference the granted license only in all documentation.
+
+   Works in Source or Object form are licensed to You under the Apache License, Version 2.0 if.
+
+   - You are consuming the Work in for use in software licensed under an Open Source or Source Available license.
+   - You are consuming the Work as a Transitive Package Dependency.
+   - You are consuming the Work as a Direct Package Dependency in the capacity of a For-profit company/individual with
+     less than 1M USD annual gross revenue.
+   - You are consuming the Work as a Direct Package Dependency in the capacity of a Non-profit organization
+     or Registered Charity.
+
+   For all other scenarios, Works in Source or Object form are licensed to You under the Six Labors Commercial License
+   which may be purchased by visiting https://sixlabors.com/pricing/.
+
+
+Newtonsoft.Json
+---------------
+The MIT License (MIT)
+
+Copyright (c) 2007 James Newton-King
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+
+Lib.Harmony
+-----------
+MIT License
+
+Copyright (c) 2017 Andreas Pardeike
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+System.Reactive, System.Interactive.Async, System.Linq.Async,
+Microsoft.Bcl.AsyncInterfaces, Microsoft.Extensions.DependencyInjection.Abstractions,
+System.IO.Hashing
+------------------------------------------------------------------------------------
+The MIT License (MIT)
+
+Copyright (c) .NET Foundation and Contributors
+
+All rights reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+Discord.Net (MIT License; copyright line as in its entry above)
+---------------------------------------------------------------
+The MIT License (MIT)
+
+Copyright (c) Discord.Net Contributors
+
+All rights reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

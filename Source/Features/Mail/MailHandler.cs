@@ -40,6 +40,8 @@ namespace KMHServerAddon.Features.Mail
             long   silver  = env?.GetInt("attach_silver", 0) ?? 0;
             Dictionary<string, int> items      = env?.GetIntMap("attach_items")       ?? new Dictionary<string, int>();
             Dictionary<string, int> payloadSel = env?.GetIntMap("attach_payload_sel") ?? new Dictionary<string, int>();
+            // Unread mail is kept for good, so mail to a name nobody plays under would only grow the store.
+            if (!RecipientKnown(to)) { KmhRouter.Notify(client, "negative", "Nobody by that name has played on this server."); return; }
 
             var op = new Security.KmhOpClaim("mail.send", from, env);
             if (!op.Begin()) { SendSnapshotToUsername(from); Push(client, from); return; }
@@ -59,7 +61,7 @@ namespace KMHServerAddon.Features.Mail
             KmhRouter.Notify(client, "positive", hasAttach ? $"Mail sent to {to} with {desc} attached." : $"Mail sent to {to}.");
             if (hasAttach) Push(client, from);   // goods escrowed out of the sender's treasury
 
-            string note = $"You have new mail from {from}" + (string.IsNullOrEmpty(subject) ? "." : $": {subject}");
+            string note = NewMailNote(from, subject);
             if (hasAttach) note += $" ({desc} attached - open Mail to accept.)";
             Features.Notifications.KmhNotify.ToUser(to, "neutral", "New mail", note);
 
@@ -81,17 +83,13 @@ namespace KMHServerAddon.Features.Mail
 
         private static void OnMarkRead(ServerClient client, KmhEnvelope env)
         {
-            string user = client?.GetData<UserFile>()?.Username;
-            long id = env?.GetInt("id", 0) ?? 0;
-            if (!string.IsNullOrEmpty(user) && id > 0 && MailStore.MarkRead(user, id))
+            if (UserAndId(client, env, out string user, out long id) && MailStore.MarkRead(user, id))
                 KmhRouter.SendTo(client, KmhProtocol.Kind.MailSnapshot, BuildInboxPayload(user));
         }
 
         private static void OnDelete(ServerClient client, KmhEnvelope env)
         {
-            string user = client?.GetData<UserFile>()?.Username;
-            long id = env?.GetInt("id", 0) ?? 0;
-            if (string.IsNullOrEmpty(user) || id <= 0) return;
+            if (!UserAndId(client, env, out string user, out long id)) return;
             if (!MailStore.Delete(user, id, out MailStore.AttachTotals t, out string sender)) return;
 
             KmhRouter.SendTo(client, KmhProtocol.Kind.MailSnapshot, BuildInboxPayload(user));
@@ -100,9 +98,7 @@ namespace KMHServerAddon.Features.Mail
 
         private static void OnAccept(ServerClient client, KmhEnvelope env)
         {
-            string user = client?.GetData<UserFile>()?.Username;
-            long id = env?.GetInt("id", 0) ?? 0;
-            if (string.IsNullOrEmpty(user) || id <= 0) return;
+            if (!UserAndId(client, env, out string user, out long id)) return;
 
             if (!MailStore.Claim(user, id, out MailStore.AttachTotals t, out string sender, out string reason))
             { KmhRouter.Notify(client, "negative", reason ?? "Nothing to accept."); return; }
@@ -117,9 +113,7 @@ namespace KMHServerAddon.Features.Mail
 
         private static void OnDecline(ServerClient client, KmhEnvelope env)
         {
-            string user = client?.GetData<UserFile>()?.Username;
-            long id = env?.GetInt("id", 0) ?? 0;
-            if (string.IsNullOrEmpty(user) || id <= 0) return;
+            if (!UserAndId(client, env, out string user, out long id)) return;
 
             if (!MailStore.Decline(user, id, out MailStore.AttachTotals t, out string sender, out string reason))
             { KmhRouter.Notify(client, "negative", reason ?? "Nothing to return."); return; }
@@ -131,9 +125,7 @@ namespace KMHServerAddon.Features.Mail
 
         private static void OnRecall(ServerClient client, KmhEnvelope env)
         {
-            string user = client?.GetData<UserFile>()?.Username;
-            long id = env?.GetInt("id", 0) ?? 0;
-            if (string.IsNullOrEmpty(user) || id <= 0) return;
+            if (!UserAndId(client, env, out string user, out long id)) return;
 
             if (!MailStore.Recall(user, id, out MailStore.AttachTotals t, out string recipient, out string reason))
             { KmhRouter.Notify(client, "negative", reason ?? "Nothing to recall."); return; }
@@ -142,6 +134,22 @@ namespace KMHServerAddon.Features.Mail
             Push(client, user);
             SendSnapshotToUsername(user);
             SendSnapshotToUsername(recipient);   // their copy has to stop showing the attachment
+        }
+
+        private static bool UserAndId(ServerClient client, KmhEnvelope env, out string user, out long id)
+        {
+            user = client?.GetData<UserFile>()?.Username;
+            id = env?.GetInt("id", 0) ?? 0;
+            return !string.IsNullOrEmpty(user) && id > 0;
+        }
+
+        internal static bool RecipientKnown(string to) => Features.PlayerStats.PlayerStatsStore.HasPlayer((to ?? "").Trim());
+
+        // The recipient's letter draws markup, so the sender's words are made inert and capped as quest titles are.
+        internal static string NewMailNote(string from, string subject)
+        {
+            string shown = Util.KmhSafe.Cap((subject ?? "").Trim().Replace('<', '(').Replace('>', ')'), 80);
+            return $"You have new mail from {(from ?? "").Replace('<', '(').Replace('>', ')')}" + (shown.Length == 0 ? "." : $": {shown}");
         }
 
         private static void NotifyRefunded(string sender, string actor, MailStore.AttachTotals t, string what)
@@ -176,7 +184,7 @@ namespace KMHServerAddon.Features.Mail
 
         private static object BuildInboxPayload(string user)
         {
-            MailStore.InboxView v = MailStore.BuildView(user);   // one locked pass, not five
+            MailStore.InboxView v = MailStore.BuildView(user);
             return new
             {
                 revision                   = v.Revision,

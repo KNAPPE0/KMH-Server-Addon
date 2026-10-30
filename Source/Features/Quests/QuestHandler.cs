@@ -55,11 +55,16 @@ namespace KMHServerAddon.Features.Quests
             SendTreasurySnapshotTo(client);
         }
 
+        private static bool TryQuestId(ServerClient client, KmhEnvelope env, out string username, out long questId)
+        {
+            username = client?.GetData<UserFile>()?.Username;
+            questId  = (long)(env?.GetInt("quest_id", 0) ?? 0);
+            return questId > 0;
+        }
+
         private static void OnAbandon(ServerClient client, KmhEnvelope env)
         {
-            string username = client?.GetData<UserFile>()?.Username;
-            long   questId  = (long)(env?.GetInt("quest_id", 0) ?? 0);
-            if (questId <= 0) return;
+            if (!TryQuestId(client, env, out string username, out long questId)) return;
 
             if (QuestStore.Abandon(username, questId, out string posterAffected))
             {
@@ -75,13 +80,16 @@ namespace KMHServerAddon.Features.Quests
 
         private static void OnVerify(ServerClient client, KmhEnvelope env)
         {
-            string username = client?.GetData<UserFile>()?.Username;
-            long   questId  = (long)(env?.GetInt("quest_id", 0) ?? 0);
-            if (questId <= 0) return;
+            if (!TryQuestId(client, env, out string username, out long questId)) return;
 
             if (QuestStore.VerifyComplete(username, questId, out string posterAffected))
             {
                 ServerLog.Info($"Quest: {username} auto-verified quest #{questId}");
+                if (QuestStore.PartiesOf(questId).State == Dto.QuestEntry.StatePendingReview)
+                {
+                    KmhRouter.Notify(client, "neutral", "Reported complete - the poster signs off before this bounty is paid.");
+                    NoticeAwaitingReview(questId, username, posterAffected);
+                }
                 BroadcastSnapshot();
                 SendTreasurySnapshotTo(client);
                 SendTreasurySnapshotToUsername(posterAffected);
@@ -91,9 +99,7 @@ namespace KMHServerAddon.Features.Quests
 
         private static void OnSubmitProof(ServerClient client, KmhEnvelope env)
         {
-            string username = client?.GetData<UserFile>()?.Username;
-            long   questId  = (long)(env?.GetInt("quest_id", 0) ?? 0);
-            if (questId <= 0) return;
+            if (!TryQuestId(client, env, out string username, out long questId)) return;
 
             string proofText = env?.GetString("proof_text", "") ?? "";
             string proofUrl  = env?.GetString("proof_image_url", "") ?? "";
@@ -102,6 +108,7 @@ namespace KMHServerAddon.Features.Quests
             {
                 ServerLog.Info($"Quest: {username} submitted proof for quest #{questId}");
                 KmhRouter.Notify(client, "positive", "Proof submitted for review.");
+                NoticeAwaitingReview(questId, username, posterAffected);
                 BroadcastSnapshot();
             }
             else
@@ -113,9 +120,7 @@ namespace KMHServerAddon.Features.Quests
 
         private static void OnReview(ServerClient client, KmhEnvelope env)
         {
-            string username = client?.GetData<UserFile>()?.Username;
-            long   questId  = (long)(env?.GetInt("quest_id", 0) ?? 0);
-            if (questId <= 0) return;
+            if (!TryQuestId(client, env, out string username, out long questId)) return;
 
             bool   approve = env?.GetBool("approve", false) ?? false;
             string note    = env?.GetString("note", "") ?? "";
@@ -123,6 +128,8 @@ namespace KMHServerAddon.Features.Quests
             if (QuestStore.ReviewProof(username, questId, approve, note, out string claimerAffected))
             {
                 ServerLog.Info($"Quest: {username} {(approve ? "approved" : "rejected")} proof for quest #{questId}");
+                if (approve) NoticeApproved(questId, username, claimerAffected);
+                else         NoticeRejected(questId, username, claimerAffected, note);
                 BroadcastSnapshot();
                 SendTreasurySnapshotToUsername(claimerAffected);
             }
@@ -135,32 +142,33 @@ namespace KMHServerAddon.Features.Quests
 
         private static void OnClaim(ServerClient client, KmhEnvelope env)
         {
-            string username  = client?.GetData<UserFile>()?.Username;
-            long   questId   = (long)(env?.GetInt("quest_id", 0) ?? 0);
-            if (questId <= 0) return;
+            if (!TryQuestId(client, env, out string username, out long questId)) return;
 
             if (QuestStore.Claim(username, questId))
             {
                 ServerLog.Info($"Quest: {username} claimed quest #{questId}");
+                NoticeClaimed(questId, username);
                 BroadcastSnapshot();
             }
             else
             {
                 ServerLog.Verbose($"Quest claim rejected for {username} (quest #{questId})");
                 KmhRouter.Notify(client, "negative", "Couldn't claim - the quest may be gone or already taken.");
-                SendSnapshotTo(client); // corrective so the patch UI shows truth
+                SendSnapshotTo(client);
             }
         }
 
         private static void OnSubmit(ServerClient client, KmhEnvelope env)
         {
-            string username  = client?.GetData<UserFile>()?.Username;
-            long   questId   = (long)(env?.GetInt("quest_id", 0) ?? 0);
-            if (questId <= 0) return;
+            if (!TryQuestId(client, env, out string username, out long questId)) return;
 
+            string stateBefore = QuestStore.PartiesOf(questId).State;
             if (QuestStore.Submit(username, questId, out string posterAffected))
             {
                 ServerLog.Info($"Quest: {username} submitted quest #{questId}");
+                // A delivery completes on submit and names its poster; a bounty waits for review - told once, not per re-submit.
+                if (!string.IsNullOrEmpty(posterAffected)) NoticeDelivered(questId, username, posterAffected);
+                else if (stateBefore == Dto.QuestEntry.StateClaimed) NoticeAwaitingReview(questId, username, QuestStore.PartiesOf(questId).Poster);
                 BroadcastSnapshot();
                 SendTreasurySnapshotTo(client);
                 // A DeliverItem auto-complete moves items to the poster as well, and they are not the caller.
@@ -177,9 +185,7 @@ namespace KMHServerAddon.Features.Quests
 
         private static void OnCancel(ServerClient client, KmhEnvelope env)
         {
-            string username  = client?.GetData<UserFile>()?.Username;
-            long   questId   = (long)(env?.GetInt("quest_id", 0) ?? 0);
-            if (questId <= 0) return;
+            if (!TryQuestId(client, env, out string username, out long questId)) return;
 
             if (QuestStore.Cancel(username, questId))
             {
@@ -198,13 +204,12 @@ namespace KMHServerAddon.Features.Quests
         // Bounty only: a DeliverItem quest is treasury-verifiable, so it auto-completes in OnSubmit and never lands here.
         private static void OnApprove(ServerClient client, KmhEnvelope env)
         {
-            string username  = client?.GetData<UserFile>()?.Username;
-            long   questId   = (long)(env?.GetInt("quest_id", 0) ?? 0);
-            if (questId <= 0) return;
+            if (!TryQuestId(client, env, out string username, out long questId)) return;
 
             if (QuestStore.Approve(username, questId, out string claimerAffected))
             {
                 ServerLog.Info($"Quest: {username} approved Bounty quest #{questId}");
+                NoticeApproved(questId, username, claimerAffected);
                 BroadcastSnapshot();
                 // The bounty was escrowed at post time, so it is the claimer's balance that moved, not the approver's.
                 SendTreasurySnapshotToUsername(claimerAffected);
@@ -217,19 +222,99 @@ namespace KMHServerAddon.Features.Quests
             }
         }
 
-        public static string AdminCancel(long id)
+        // Notices are queued, so an absent party reads them on their next join.
+
+        // The title is the poster's own text and a letter renders markup, so it is shown capped and inert.
+        private static string Named(long id, string title)
         {
-            if (!QuestStore.ExpireQuest(id, out string poster))
-                return $"Quest #{id} not found.";
-            ServerLog.Info($"Quest #{id} cancelled by admin (bounty refunded to {poster}).");
-            BroadcastSnapshot();
-            if (!string.IsNullOrEmpty(poster))
+            string t = Util.KmhSafe.Cap((title ?? "").Replace('<', '(').Replace('>', ')'), 80);
+            return t.Length == 0 ? $"#{id}" : $"#{id} '{t}'";
+        }
+
+        internal static void NoticeClaimed(long id, string claimer)
+        {
+            var q = QuestStore.PartiesOf(id);
+            Notifications.KmhNotify.ToUser(q.Poster, "neutral", "Quest claimed",
+                $"{claimer} claimed your quest {Named(id, q.Title)}.");
+        }
+
+        internal static void NoticeAwaitingReview(long id, string claimer, string poster)
+        {
+            var q = QuestStore.PartiesOf(id);
+            int hours = QuestsConfig.Current.ReviewTimeoutHours;
+            string timeout = hours > 0 ? $" If you do not review it, it reopens unpaid in {hours} h." : "";
+            Notifications.KmhNotify.ToUser(string.IsNullOrEmpty(poster) ? q.Poster : poster, "neutral", "Quest awaiting your review",
+                $"{claimer} submitted your quest {Named(id, q.Title)}. Open the quest board to approve it (pays the bounty) or reject it with a note.{timeout}");
+        }
+
+        internal static void NoticeDelivered(long id, string claimer, string poster)
+        {
+            var q = QuestStore.PartiesOf(id);
+            Notifications.KmhNotify.ToUser(poster, "positive", "Quest completed",
+                $"{claimer} delivered your quest {Named(id, q.Title)} - the goods are in your treasury and the bounty was paid.");
+        }
+
+        internal static void NoticeApproved(long id, string poster, string claimer)
+        {
+            var q = QuestStore.PartiesOf(id);
+            Notifications.KmhNotify.ToUser(claimer, "positive", "Quest approved",
+                $"{poster} approved your submission for quest {Named(id, q.Title)} - the bounty is paid to your treasury.");
+        }
+
+        internal static void NoticeRejected(long id, string poster, string claimer, string note)
+        {
+            var q = QuestStore.PartiesOf(id);
+            string why = Util.KmhSafe.Cap((note ?? "").Trim().Replace('<', '(').Replace('>', ')'), 256);
+            Notifications.KmhNotify.ToUser(claimer, "negative", "Quest submission rejected",
+                $"{poster} rejected your submission for quest {Named(id, q.Title)}" + (why.Length > 0 ? $": \"{why}\"" : "")
+                + ". The quest is open again and nothing was paid.");
+        }
+
+        // Named by the caller: an expired quest has already left the board.
+        internal static void NoticeExpired(long id, string title, string poster, string claimer)
+        {
+            Notifications.KmhNotify.ToUser(poster, "neutral", "Quest expired",
+                $"Your quest {Named(id, title)} expired - its escrowed bounty went back to your treasury.");
+            if (!string.IsNullOrEmpty(claimer))
+                Notifications.KmhNotify.ToUser(claimer, "neutral", "Quest expired",
+                    $"Quest {Named(id, title)}, which you had claimed, expired before it was finished. Nothing was paid.");
+        }
+
+        public static string AdminCancel(long id) => AdminSettle(id, "refund", "admin");
+
+        public static string AdminSettle(long id, string action, string admin)
+        {
+            string poster = null, claimer = null, why = null;
+            bool ok;
+            switch (action)
             {
-                SendTreasurySnapshotToUsername(poster);
-                Notifications.KmhNotify.ToUser(poster, "neutral", "Quest cancelled",
-                    "An admin cancelled your posted quest - any escrowed bounty was refunded to your treasury.");
+                case "approve": ok = QuestStore.AdminReview(admin, id, true, out claimer, out poster);  break;
+                case "reject":  ok = QuestStore.AdminReview(admin, id, false, out claimer, out poster); break;
+                case "refund":  ok = QuestStore.AdminRefund(id, admin, out poster, out why);              break;
+                default: return "Usage: kmh quest <approve|reject|refund> <id>";
             }
-            return $"Quest #{id} cancelled - bounty refunded to {(string.IsNullOrEmpty(poster) ? "(poster)" : poster)}.";
+            if (!ok)
+                return action == "refund"
+                    ? $"Quest #{id} was not refunded: {why}."
+                    : $"Quest #{id} is not waiting for review (see 'kmh inspect quests').";
+            ServerLog.Info($"Quest #{id}: {action} by {admin}.");
+            BroadcastSnapshot();
+            SendTreasurySnapshotToUsername(poster);
+            SendTreasurySnapshotToUsername(claimer);
+            switch (action)
+            {
+                case "approve":
+                    Notifications.KmhNotify.ToUser(claimer, "positive", "Quest approved", $"An admin approved your submission for quest #{id} - the bounty is paid.");
+                    Notifications.KmhNotify.ToUser(poster, "neutral", "Quest settled", $"An admin approved the submission for your quest #{id}; its bounty was paid.");
+                    return $"Quest #{id} approved - bounty paid to {claimer}.";
+                case "reject":
+                    Notifications.KmhNotify.ToUser(claimer, "neutral", "Quest reopened", $"An admin turned down your submission for quest #{id}; it is open again.");
+                    return $"Quest #{id} rejected - reopened, escrow still held for {poster}.";
+                default:
+                    Notifications.KmhNotify.ToUser(poster, "neutral", "Quest cancelled",
+                        "An admin cancelled your posted quest - any escrowed bounty was refunded to your treasury.");
+                    return $"Quest #{id} cancelled - bounty refunded to {(string.IsNullOrEmpty(poster) ? "(poster)" : poster)}.";
+            }
         }
 
         // Built for the recipient, so CanDeposit/CanWithdraw reflect their permissions rather than the caller's.

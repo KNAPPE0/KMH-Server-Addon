@@ -31,15 +31,32 @@ namespace KMHServerAddon.Persistence
         public static string ToJson<T>(T value) where T : class => JsonConvert.SerializeObject(value, Settings);
         public static T FromJson<T>(string json) where T : class => JsonConvert.DeserializeObject<T>(json, Settings);
 
-        public static bool TryLoad<T>(string path, out T value) where T : class
+        public static bool TryLoad<T>(string path, out T value) where T : class => TryLoad(path, null, out value);
+
+        // Keys that moved between releases: each old key is read into its new place on every load, the old value
+        // winning over a default backfilled there, so an owner's setting survives no matter which write comes first.
+        public static bool TryLoad<T>(string path, IReadOnlyList<(string From, string To)> moves, out T value) where T : class
         {
             value = null;
             if (string.IsNullOrEmpty(path))      return false;
             if (!File.Exists(path))              return false;
 
+            // A file that cannot be read may be perfectly healthy, so it is never moved aside or written over.
+            string json;
+            try { json = ReadWithRetry(path); }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+            {
+                Unquarantined[path] = 0;
+                ServerLog.Error($"Persistence: {Path.GetFileName(path)} could not be READ ({ex.GetType().Name}: {ex.Message}). "
+                              + "It was left in place and saving to it is blocked - close whatever holds it, then restart.");
+                NoteDamage(path, null, $"it could not be read ({ex.GetType().Name})");
+                return false;
+            }
+
             try
             {
-                string json = File.ReadAllText(path);
+                if (moves != null && moves.Count > 0 && JToken.Parse(json) is JObject doc && ApplyMoves(doc, moves) > 0)
+                    json = doc.ToString(Formatting.None);
                 value = JsonConvert.DeserializeObject<T>(json, Settings);
                 if (value != null) return true;
 
@@ -49,32 +66,121 @@ namespace KMHServerAddon.Persistence
                 ServerLog.Error($"Persistence: {Path.GetFileName(path)} exists but loaded as EMPTY ({size} bytes). " +
                                 "Backing it up and starting this file from defaults - if it held live data, restore " +
                                 "it from KMH-Data-Backups before players reconnect.");
-                TryBackupCorrupt(path);
+                NoteDamage(path, TryBackupCorrupt(path), $"it loaded as empty ({size} bytes)");
                 return false;
             }
             catch (Exception ex)
             {
                 ServerLog.Error($"Persistence: {Path.GetFileName(path)} is CORRUPT and could not be parsed ({ex.Message}). " +
                                 "Backing it up and starting this file from defaults - your other data is unaffected.");
-                TryBackupCorrupt(path);
+                NoteDamage(path, TryBackupCorrupt(path), ex.Message);
                 return false;
             }
         }
 
+        // From/To are dotted paths.
+        internal static int ApplyMoves(JObject doc, IReadOnlyList<(string From, string To)> moves)
+        {
+            int moved = 0;
+            foreach ((string from, string to) in moves)
+            {
+                JToken old = doc.SelectToken(from);
+                if (old == null || !(old.Parent is JProperty prop)) continue;
+                string[] parts = to.Split('.');
+                JObject parent = doc;
+                for (int i = 0; i < parts.Length - 1; i++)
+                {
+                    if (!(parent[parts[i]] is JObject child)) { child = new JObject(); parent[parts[i]] = child; }
+                    parent = child;
+                }
+                parent[parts[parts.Length - 1]] = old.DeepClone();
+                prop.Remove();
+                moved++;
+            }
+            return moved;
+        }
+
+        // A sharing violation from a backup tool or AV scan usually clears in moments.
+        private static string ReadWithRetry(string path)
+        {
+            for (int attempt = 1; ; attempt++)
+            {
+                try
+                {
+                    if (ReadFailureForTest?.Invoke(path) == true) throw new IOException("selftest: simulated sharing violation");
+                    return File.ReadAllText(path);
+                }
+                catch (IOException) when (attempt < ReadAttempts && !(ReadFailureForTest?.Invoke(path) ?? false))
+                { System.Threading.Thread.Sleep(250); }
+            }
+        }
+
+        private const int ReadAttempts = 3;
+
+        // True makes a read of that path fail as a held file would, without holding it, and skips the retry wait.
+        internal static Func<string, bool> ReadFailureForTest;
+
+        // An irreplaceable store that came up as defaults must not be played on as merely empty, and the next boot would
+        // find a clean empty file; so the damage is recorded, and KMH stays non-operational while this file exists.
+        internal static string DamageMarkerPath => DamageMarkerOverrideForTest ?? Path.Combine(KmhDataPaths.Folder, "DAMAGED.txt");
+
+        // The self-test can run on a live server, so it points both of these at files of its own.
+        internal static string DamageMarkerOverrideForTest;
+        internal static Func<string, bool> IrreplaceableOverrideForTest;
+
+        internal static bool DamageReported(out string why)
+        {
+            why = null;
+            try { if (!File.Exists(DamageMarkerPath)) return false; } catch { return false; }
+            why = "KMH-Data is damaged - see " + DamageMarkerPath + ". Restore the listed file(s) from KMH-Data-Backups, "
+                + "then delete DAMAGED.txt and restart";
+            return true;
+        }
+
+        // Null for a file that rebuilds itself, or one KMH does not track.
+        internal static string IrreplaceableLabel(string path)
+        {
+            foreach (KmhDataPaths.DataFile f in KmhDataPaths.KnownDataFiles)
+                if (!f.Regenerable && string.Equals(Path.GetFullPath(f.Path), Path.GetFullPath(path), StringComparison.OrdinalIgnoreCase))
+                    return f.Label;
+            return null;
+        }
+
+        private static void NoteDamage(string path, string movedTo, string what)
+        {
+            string label = IrreplaceableOverrideForTest != null
+                ? (IrreplaceableOverrideForTest(path) ? "selftest store" : null)
+                : IrreplaceableLabel(path);
+            if (label == null) return;
+            try
+            {
+                if (!File.Exists(DamageMarkerPath))
+                    File.WriteAllText(DamageMarkerPath,
+                        "Colony Nexus will not accept player value moves while this file exists.\r\n"
+                      + "Restore each file below from KMH-Data-Backups (the newest backup from before the time shown),\r\n"
+                      + "then delete this file and restart the server.\r\n\r\n");
+                File.AppendAllText(DamageMarkerPath, $"{DateTime.UtcNow:O}  {label} ({Path.GetFileName(path)}): {what}. "
+                                                   + $"The unreadable copy is {(movedTo == null ? "still in place" : Path.GetFileName(movedTo))}.\r\n");
+            }
+            catch (Exception ex) { ServerLog.Error($"Persistence: could not write {DamageMarkerPath}: {ex.Message}"); }
+        }
+
         // Corrupt bytes are moved aside, never discarded: they are the only copy of whatever the file held.
-        private static void TryBackupCorrupt(string path)
+        private static string TryBackupCorrupt(string path)
         {
             try
             {
                 string backup = $"{path}.corrupt-{DateTime.UtcNow:yyyyMMddHHmmss}";
                 File.Move(path, backup);
                 ServerLog.Warn($"Persistence: moved corrupt file aside to {Path.GetFileName(backup)} - recover values from it if needed.");
+                return backup;
             }
             catch (Exception ex)
             {
                 Unquarantined[path] = 0;
                 ServerLog.Error($"Persistence: could not back up corrupt {Path.GetFileName(path)}: {ex.Message}. Saving to it is " +
                                 "BLOCKED so the only copy survives - move the file aside by hand and saving resumes on its own.");
+                return null;
             }
         }
 
@@ -100,7 +206,7 @@ namespace KMHServerAddon.Persistence
             Maintenance.KmhMaintenanceGate.SetPersistenceDegraded(false);
         }
 
-        // Unordered save for low-churn files; strict snapshot ordering should pass a ticket captured under the store lock.
+        // Unordered, for low-churn files; strict snapshot ordering passes a ticket captured under the store lock.
         public static bool Save<T>(string path, T value) where T : class
             => Save(path, value, NextSequence());
 
@@ -113,46 +219,64 @@ namespace KMHServerAddon.Persistence
             {
                 if (File.Exists(path))
                 {
-                    NoteSaveFailed(path, "corrupt file could not be quarantined - refusing to overwrite the only copy");
+                    NoteSaveFailed(path, "the file could not be read or moved aside at load - refusing to overwrite the only copy");
                     return false;
                 }
                 Unquarantined.TryRemove(path, out _);
-                ServerLog.Info($"Persistence: corrupt {Path.GetFileName(path)} was moved aside - saving is allowed again.");
+                ServerLog.Info($"Persistence: {Path.GetFileName(path)} was moved aside - saving is allowed again.");
             }
 
-            // Serialized outside the per-path lock: it is the slow part and touches no file.
-            string json = null;
-            for (int attempt = 0; attempt < 4; attempt++)
+            // Serialized outside the per-path lock: it is the slow part and touches no file. A store hands over a deep
+            // copy taken under its own lock (KmhDeepCopy), so nothing changes underneath the serializer.
+            StoreStats stats = StatsFor(path);
+            long started = System.Diagnostics.Stopwatch.GetTimestamp();
+            string json;
+            try { json = JsonConvert.SerializeObject(value, Settings); }
+            // Counted like a failed write, or nothing retries the store and nothing clears a freeze it caused.
+            catch (InvalidOperationException ex)
             {
-                try { json = JsonConvert.SerializeObject(value, Settings); break; }
-                // Stores hand over LIVE objects, so another thread can restructure a collection mid-serialize.
-                catch (InvalidOperationException) { System.Threading.Thread.Sleep(0); }
-                catch (Exception ex)
-                {
-                    ServerLog.Warn($"Persistence: serialize failed for {Path.GetFileName(path)}: {ex.Message}");
-                    return false;
-                }
-            }
-            if (json == null)
-            {
-                ServerLog.Warn($"Persistence: serialize for {Path.GetFileName(path)} kept racing a concurrent change - skipped this save (the next mutation's save will capture it).");
+                // A collection changed mid-serialize: that store passed a live object instead of its snapshot.
+                System.Threading.Interlocked.Increment(ref _liveObjectRaces);
+                System.Threading.Interlocked.Increment(ref stats.Failures);
+                ServerLog.Error($"Persistence: {Path.GetFileName(path)} changed while being written ({ex.Message}) - that store must save a snapshot. This save was skipped.");
+                NoteSaveFailed(path, "it changed while being written");
                 return false;
             }
+            catch (Exception ex)
+            {
+                System.Threading.Interlocked.Increment(ref stats.Failures);
+                ServerLog.Warn($"Persistence: serialize failed for {Path.GetFileName(path)}: {ex.Message}");
+                NoteSaveFailed(path, "it could not be serialized");
+                return false;
+            }
+            long serialized = System.Diagnostics.Stopwatch.GetTimestamp();
+            stats.NoteSerialize(serialized - started, json.Length);
 
             object gate = SaveGates.GetOrAdd(path, _ => new object());
             string failure = null;
             lock (gate)
             {
                 // A newer snapshot already persisted; letting this older one through would undo it.
-                if (LastWrittenSeq.TryGetValue(path, out long last) && sequence <= last) return true;
+                if (LastWrittenSeq.TryGetValue(path, out long last) && sequence <= last)
+                {
+                    System.Threading.Interlocked.Increment(ref stats.Superseded);
+                    return true;
+                }
                 try
                 {
-                    // A full disk is the failure every value path has to survive, and faking it on demand beats filling the real machine.
+                    // Injected full-disk failure: every value path must survive one, and faking it beats a full disk.
                     string injected = _failWrites?.Invoke(path);
                     if (injected != null) throw new IOException(injected);
                     Directory.CreateDirectory(Path.GetDirectoryName(path));
                     string tmp = path + ".tmp";
-                    File.WriteAllText(tmp, json);
+                    // On disk before the rename: a rename is atomic, but an OS crash can make it point at bytes the
+                    // disk never received, and the file comes back as zeros.
+                    using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
+                    {
+                        byte[] bytes = new System.Text.UTF8Encoding(false).GetBytes(json);
+                        fs.Write(bytes, 0, bytes.Length);
+                        fs.Flush(flushToDisk: true);
+                    }
                     // An OS-level rename, so a crash mid-save never leaves the canonical file half-written or absent.
                     File.Move(tmp, path, overwrite: true);
                     LastWrittenSeq[path] = sequence;
@@ -161,9 +285,66 @@ namespace KMHServerAddon.Persistence
             }
 
             // Outside the per-path lock, so this never takes a second lock while holding one.
-            if (failure == null) { NoteSaveOk(path); return true; }
+            if (failure == null)
+            {
+                stats.NoteWrite(System.Diagnostics.Stopwatch.GetTimestamp() - serialized);
+                NoteSaveOk(path);
+                return true;
+            }
+            System.Threading.Interlocked.Increment(ref stats.Failures);
             NoteSaveFailed(path, failure);
             return false;
+        }
+
+        private static long _liveObjectRaces;
+        // Saves that failed because a store handed over a live object; must stay 0.
+        public static long LiveObjectRaces => System.Threading.Interlocked.Read(ref _liveObjectRaces);
+
+        internal sealed class StoreStats
+        {
+            public string File = "";
+            public long Saves, Bytes, MaxBytes, SerializeTicks, MaxSerializeTicks, WriteTicks, MaxWriteTicks, Failures, Superseded, Coalesced;
+
+            public void NoteSerialize(long ticks, long chars)
+            {
+                System.Threading.Interlocked.Increment(ref Saves);
+                System.Threading.Interlocked.Add(ref Bytes, chars);
+                System.Threading.Interlocked.Add(ref SerializeTicks, ticks);
+                Max(ref MaxBytes, chars);
+                Max(ref MaxSerializeTicks, ticks);
+            }
+
+            public void NoteWrite(long ticks)
+            {
+                System.Threading.Interlocked.Add(ref WriteTicks, ticks);
+                Max(ref MaxWriteTicks, ticks);
+            }
+
+            private static void Max(ref long field, long value)
+            {
+                long seen;
+                while (value > (seen = System.Threading.Interlocked.Read(ref field))
+                       && System.Threading.Interlocked.CompareExchange(ref field, value, seen) != seen) { }
+            }
+        }
+
+        private static readonly ConcurrentDictionary<string, StoreStats> Stats
+            = new ConcurrentDictionary<string, StoreStats>(StringComparer.OrdinalIgnoreCase);
+
+        internal static StoreStats StatsFor(string path)
+            => Stats.GetOrAdd(Path.GetFileName(path) ?? path, name => new StoreStats { File = name });
+
+        // A caller that folds several changes into one write says so, so the count shows what coalescing saved.
+        internal static void NoteCoalesced(string path, long requests)
+        {
+            if (requests > 0) System.Threading.Interlocked.Add(ref StatsFor(path).Coalesced, requests);
+        }
+
+        internal static List<StoreStats> StatsSnapshot()
+        {
+            List<StoreStats> all = new List<StoreStats>(Stats.Values);
+            all.Sort((a, b) => (b.SerializeTicks + b.WriteTicks).CompareTo(a.SerializeTicks + a.WriteTicks));
+            return all;
         }
 
         // One dropped save is survivable; a file that keeps failing loses every later change while memory looks fine.
@@ -174,7 +355,7 @@ namespace KMHServerAddon.Persistence
 
         public static bool AnyStoreUnwritable => !SaveFailures.IsEmpty && Degraded();
 
-        // Retry on the FIRST failure, not the third: the freeze needs repetition to be sure, but a memory-only change is already at risk.
+        // Retry on the FIRST failure: the freeze waits for repeats, but a memory-only change is already at risk.
         public static bool AnyStoreUnsaved => !SaveFailures.IsEmpty;
 
         // One line a support report can quote instead of a reader inferring health from scattered retry warnings.
@@ -314,7 +495,7 @@ namespace KMHServerAddon.Persistence
                 if (schemaVal == null)
                 {
                     if (aliases != null && aliases.Contains(p.Name)) continue;
-                    // An underscore key ("_readme") is an owner-facing note on no DTO - pruning once deleted the shipped instructions on first boot.
+                    // An underscore key ("_readme") is an owner note on no DTO; pruning it deletes the shipped instructions.
                     if (p.Name.StartsWith("_", StringComparison.Ordinal)) continue;
                     existing.Remove(p.Name);
                     removed.Add(prefix + p.Name);

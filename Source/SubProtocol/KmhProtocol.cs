@@ -4,7 +4,7 @@
     internal static class KmhProtocol
     {
         // A mismatch gates KMH off entirely, so a client can never half-use economy semantics it does not implement.
-        public const int CurrentVersion = 2;
+        public const int CurrentVersion = 3;
 
         // Detects a version gap to nudge the player; unlike CurrentVersion it never gates the connection.
         public const string BuildVersion = KmhVersion.Build;
@@ -12,24 +12,28 @@
         public const string SystemUsername = "​[KMH-SYS]"; // server -> client
         public const string ClientUsername = "​[KMH-CLI]"; // client -> server
 
-        // Known packet kinds. Add new ones here only when their handlers are registered.
+        // Add a kind here only once its handler is registered.
         public static class Kind
         {
             public const string Hello        = "kmh.hello";
             public const string HelloAck     = "kmh.hello.ack";
+            // Payload { server_v, client_v, enforced }; additive, so no refusal depends on the peer understanding it.
+            public const string Incompatible = "kmh.hello.incompatible";  // either direction
 
             public const string Ping         = "kmh.ping";
             public const string Pong         = "kmh.pong";
 
             public const string Notice       = "kmh.notice";                  // server -> client
 
-            // Tells the client an op-id request reached a terminal decision, so it can stop treating that action as outstanding.
+            // An op-id request reached a terminal decision, so the client stops treating it as outstanding.
             public const string OpResult     = "kmh.op.result";               // server -> client
 
-            // The client reporting from its own save state that it holds a delivery; carries no amounts, it discharges value rather than creating it.
+            // Carries no amounts: the client's save-state proof of a delivery discharges value, never creates it.
             public const string DeliveryAck  = "kmh.delivery.ack";            // client -> server
 
             public const string NotifyQueued = "kmh.notify.queued";           // server -> client
+            // Payload { ids }: a send only reaches the transport, so queued notices wait for this ack.
+            public const string NotifyAck    = "kmh.notify.ack";              // client -> server
 
             public const string PlayerStatsRequest      = "kmh.player_stats.request";    // client -> server
             public const string PlayerStatsSnapshot     = "kmh.player_stats.snapshot";   // server -> client
@@ -43,6 +47,9 @@
             public const string SeasonArchive           = "kmh.archive.season";            // server -> client
 
             // The caller's vault and guild are resolved from authenticated identity; a client never names either.
+            // Open begins a paid session; Request stays free because it is also the auto-refresh timer.
+            public const string TreasuryOpen            = "kmh.treasury.open";           // client -> server
+            public const string TreasuryAccess          = "kmh.treasury.access";         // server -> client
             public const string TreasuryRequest         = "kmh.treasury.request";        // client -> server
             public const string TreasurySnapshot        = "kmh.treasury.snapshot";       // server -> client
             public const string TreasuryDepositSilver   = "kmh.treasury.deposit_silver"; // client -> server
@@ -83,6 +90,7 @@
             public const string GuildLeave              = "kmh.guild.leave";              // client -> server
             public const string GuildDonate             = "kmh.guild.donate";             // client -> server
             public const string GuildWithdraw           = "kmh.guild.withdraw";           // client -> server (guild vault -> personal, rank-capped)
+            public const string GuildWithdrawItem       = "kmh.guild.withdraw_item";      // client -> server (guild vault goods -> colony delivery, rank-capped)
             public const string GuildTransferOwner      = "kmh.guild.transfer_owner";     // client -> server ({ username }) Owner only
             public const string GuildProposeAlliance    = "kmh.guild.propose_alliance";   // client -> server
             public const string GuildAcceptAlliance     = "kmh.guild.accept_alliance";    // client -> server
@@ -102,6 +110,8 @@
 
             public const string GuildLeaderboardRequest = "kmh.guild_leaderboard.request"; // client -> server
             public const string GuildLeaderboardSnapshot = "kmh.guild_leaderboard.snapshot"; // server -> client
+            public const string LeaderboardsRequest  = "kmh.leaderboards.request";  // client -> server
+            public const string LeaderboardsSnapshot = "kmh.leaderboards.snapshot"; // server -> client
 
             public const string LinkedAccountsRequest   = "kmh.linked_accounts.request";  // client -> server
             public const string LinkedAccountsSnapshot  = "kmh.linked_accounts.snapshot"; // server -> client
@@ -146,7 +156,7 @@
             public const string SiteRepair             = "kmh.site.repair";             // client -> server (owner, charges silver)
             public const string SiteSetup              = "kmh.site.setup";              // client -> server (one-time config of a captured outpost)
 
-            // Frontier Operations. The server asks capable clients where an outpost could go; it never judges geography.
+            // The server asks capable clients where an outpost could go; it never judges geography itself.
             public const string FrontierPlacementRequest = "kmh.frontier.placement.request"; // server -> client
             public const string FrontierPlacementPropose = "kmh.frontier.placement.propose"; // client -> server
 
@@ -164,6 +174,10 @@
 
             public const string DebugLog                = "kmh.debug.log";                // client -> server
 
+            // The op id is the report id, so a resend after a lost answer is the same report.
+            public const string ReportSubmit            = "kmh.report.submit";            // client -> server
+            public const string ReportResult            = "kmh.report.result";            // server -> client
+
             public const string EnforcementSnapshot     = "kmh.enforcement.snapshot";      // server -> client
             public const string EnforcementSnapshotRequest = "kmh.enforcement.snapshot.request"; // client -> server (refresh on dialog open, e.g. after being op'd mid-session)
             public const string EnforcementProfileRequest = "kmh.enforcement.profile.request"; // client -> server (only when the local hash differs)
@@ -174,9 +188,14 @@
             public const string EnforcementSetEnabled   = "kmh.enforcement.set_enabled";   // client -> server (admin toggles enforcement)
             public const string EnforcementSetSafe      = "kmh.enforcement.set_safe";      // client -> server (admin adds/removes a safe mod)
             public const string EnforcementSetFlag      = "kmh.enforcement.set_flag";      // client -> server (admin toggles admin_bypass / preserve_personal)
-            public const string EnforcementUploadBegin  = "kmh.enforcement.upload.begin";  // client -> server (admin publishes their configs as the profile)
-            public const string EnforcementUploadChunk  = "kmh.enforcement.upload.chunk";  // client -> server
-            public const string EnforcementUploadEnd    = "kmh.enforcement.upload.end";    // client -> server
+            // A transaction: only the server's committed publish.result may be reported as success.
+            public const string EnforcementPublishBegin    = "kmh.enforcement.publish.begin";    // client -> server (admin offers a manifest)
+            public const string EnforcementPublishAccepted = "kmh.enforcement.publish.accepted"; // server -> client (upload id, wanted files, limits)
+            public const string EnforcementPublishPart     = "kmh.enforcement.publish.part";     // client -> server (one file's bytes, chunked)
+            public const string EnforcementPublishAck      = "kmh.enforcement.publish.ack";      // server -> client (credit for more parts)
+            public const string EnforcementPublishCommit   = "kmh.enforcement.publish.commit";   // client -> server
+            public const string EnforcementPublishCancel   = "kmh.enforcement.publish.cancel";   // client -> server
+            public const string EnforcementPublishResult   = "kmh.enforcement.publish.result";   // server -> client (committed revision/hash, or why not)
 
             public const string MailSend     = "kmh.mail.send";     // client -> server (to, subject, body, attach_silver)
             public const string MailRequest  = "kmh.mail.request";  // client -> server (refresh inbox)
@@ -186,6 +205,45 @@
             public const string MailDecline  = "kmh.mail.decline";  // client -> server (id) return attachment to sender
             public const string MailRecall   = "kmh.mail.recall";   // client -> server (id) sender pulls back their own unread attachment
             public const string MailSnapshot = "kmh.mail.snapshot"; // server -> client (inbox + unread)
+
+            // Balance and history are NOT here: the client reads them from Global with its own token, so no server
+            // vouches for a federated balance; the server sends only the durable state of its own operations.
+            public const string ConnectedRequest  = "kmh.connected.request";  // client -> server (refresh)
+            public const string ConnectedDeposit  = "kmh.connected.deposit";  // client -> server (amount)
+            public const string ConnectedWithdraw = "kmh.connected.withdraw"; // client -> server (amount)
+            public const string ConnectedSnapshot = "kmh.connected.snapshot"; // server -> client (durable op state)
+
+            // The guild's federated balance DOES travel here (a guild has no player token), stamped with when Global
+            // reported it; it is shown only, never authorising anything - Global's hold authorises a withdrawal.
+            public const string GuildConnectedRequest  = "kmh.guild.connected.request";  // client -> server (refresh)
+            public const string GuildConnectedDeposit  = "kmh.guild.connected.deposit";  // client -> server (amount)
+            public const string GuildConnectedWithdraw = "kmh.guild.connected.withdraw"; // client -> server (amount)
+            public const string GuildConnectedSnapshot = "kmh.guild.connected.snapshot"; // server -> client
+
+            // Identity and membership are Global's; this server relays requests and a cached view, and moves no value.
+            public const string FederationRequest      = "kmh.federation.request";       // client -> server (refresh)
+            public const string FederationCreate       = "kmh.federation.create";        // client -> server (name, tag, description, color)
+            public const string FederationJoin         = "kmh.federation.join";          // client -> server (invite)
+            public const string FederationInvite       = "kmh.federation.invite";        // client -> server (target_server)
+            public const string FederationInviteRevoke = "kmh.federation.invite_revoke"; // client -> server (invite_id)
+            public const string FederationLeave        = "kmh.federation.leave";         // client -> server
+            public const string FederationRemove       = "kmh.federation.remove";        // client -> server (link_id)
+            public const string FederationTransfer     = "kmh.federation.transfer";      // client -> server (link_id)
+            public const string FederationUpdate       = "kmh.federation.update";        // client -> server (name, tag, description, color)
+            public const string FederationDisband      = "kmh.federation.disband";       // client -> server (confirm, reason)
+            public const string FederationReprove      = "kmh.federation.reprove";       // client -> server
+            public const string FederationSnapshot     = "kmh.federation.snapshot";      // server -> client
+
+            // Owner-only server settings. A credential is never carried in either direction.
+            public const string ConfigRequest = "kmh.config.request"; // client -> server (area, or blank for the list)
+            public const string ConfigSchema  = "kmh.config.schema";  // server -> client (areas, or one area's fields)
+            public const string ConfigApply   = "kmh.config.apply";   // client -> server (area, edits)
+            public const string ConfigApplied = "kmh.config.applied"; // server -> client (ok, reason)
+            public const string ConfigRestart = "kmh.config.restart"; // client -> server (owner asks for a restart)
+
+            // A ticket Global signed for THIS server, proving which account is behind the session.
+            public const string JoinTicket   = "kmh.player.ticket";   // client -> server (Global-signed ticket)
+            public const string JoinVerified = "kmh.player.verified"; // server -> client (ok, reason)
 
             public const string ChatSend     = "kmh.chat.send";     // client -> server (channel, body, token)
             public const string ChatRequest  = "kmh.chat.request";  // client -> server (channel) -> recent history

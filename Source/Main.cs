@@ -20,7 +20,7 @@ namespace KMHServerAddon
         public static Harmony  HarmonyInstance { get; private set; }
         public static System.DateTime BootstrapUtc { get; private set; } = System.DateTime.MinValue;
 
-        // Assembly-qualified so we bind RWT's own assembly, not something same-named. Newest first.
+        // Assembly-qualified so only RWT's own assembly binds, not something same-named. Newest first.
         private static readonly string[] ServerEntryTypeNames =
         {
             "RTServer.Core.Program, RTServer",
@@ -29,9 +29,17 @@ namespace KMHServerAddon
 
         public static int RunAndStartServer(string[] args)
         {
+            // Before anything binds a port: this instance may be the replacement a `kmh restart` just launched.
+            Maintenance.KmhRestart.WaitIfRelaunched();
+
             // Runs before anything writes: an empty RWT config kills RWT inside its own logger, naming no file.
             Diagnostics.RwtPreflight.Run();
             RunKmhBoot();
+            if (!Features.Enforcement.EnforcementAdmission.Ready)
+            {
+                System.Console.Error.WriteLine("Colony Nexus admission compatibility failed; refusing to start an unguarded RWT server.");
+                return 1;
+            }
             try
             {
                 // Try both identities rather than hard-coding one; RWT renamed the assembly mid-life.
@@ -61,13 +69,13 @@ namespace KMHServerAddon
             }
             catch (System.Exception ex)
             {
-                // The stack alone sends owners hunting the wrong thing - lead with the cause when we recognise it.
+                // The stack alone sends owners hunting the wrong thing - lead with the cause when it is recognised.
                 string why = Diagnostics.RwtPreflight.ExplainStartupFailure(ex);
                 if (why != null)
                 {
                     System.Console.Error.WriteLine($"{Constants.LogPrefix} RWT server failed to start - {why}");
                     System.Console.Error.WriteLine($"{Constants.LogPrefix} This repeats on every restart until that "
-                        + "file is fixed. KMH keeps a last-good copy of each RWT config in KMH-Data/RwtConfigBackup.");
+                        + "file is fixed. Colony Nexus keeps a last-good copy of each RWT config in KMH-Data/RwtConfigBackup.");
                 }
                 System.Console.Error.WriteLine($"{Constants.LogPrefix} RWT server failed to start: {ex}");
                 return 1;
@@ -81,23 +89,31 @@ namespace KMHServerAddon
                 BootstrapUtc = System.DateTime.UtcNow;
                 // First thing of all: a boot that dies during patching is exactly the one worth having a file for.
                 Diagnostics.KmhLogSink.Start();
-                System.Console.WriteLine(
-                    $"{Constants.LogPrefix} {Constants.DisplayName} v{typeof(Main_).Assembly.GetName().Version} bootstrapping…");
+                // Before anything can open a connection, so a self-test run sees every request that heads for Global.
+                Features.Global.KmhGlobalIsolationMonitor.StartIfSelfTest();
+                System.Console.WriteLine($"{Constants.LogPrefix} Colony Nexus server {KmhVersion.Build} ({KmhVersion.BuildTag}) starting…");
 
                 HarmonyInstance = new Harmony(HarmonyId);
                 HarmonyInstance.PatchAll(typeof(Main_).Assembly);
+                Features.Enforcement.EnforcementAdmission.Install(HarmonyInstance);
+                Features.Identity.AccountNameGuard.Install(HarmonyInstance);
+                Features.Global.RwtBrowserEndpoint.Install(HarmonyInstance);
+                Features.Simulation.SimulatedColonyGate.Install(HarmonyInstance);
 
                 KmhHandshakeHandler.Register();
                 LinkedAccountsHandler.Register();
                 PlayerStatsHandler.Register();
                 TreasuryHandler.Register();
                 Features.Delivery.DeliveryHandler.Register();
+                Features.Notifications.NotificationHandler.Register();
                 MarketplaceHandler.Register();
                 QuestHandler.Register();
                 GuildHandler.Register();
+                Features.Leaderboards.LeaderboardHandler.Register();
                 Features.ItemLabels.ItemLabelsHandler.Register();
                 Features.Sites.SiteMetadataHandler.Register();
                 Diagnostics.KmhClientDebugLog.Register();
+                Features.Reports.ReportHandler.Register();
                 Features.Sites.SiteHandler.Register();
                 Features.Roadworks.RoadworksHandler.Register();
                 Features.Frontier.FrontierHandler.Register();
@@ -107,7 +123,12 @@ namespace KMHServerAddon
                 Features.Auctions.AuctionHandler.Register();
                 Features.WantBoard.WantHandler.Register();
                 Features.Mail.MailHandler.Register();
+                Features.Global.Treasury.ConnectedTreasuryHandler.Register();
+                Features.Global.Guilds.ConnectedGuildHandler.Register();
+                Features.Global.Federation.FederationHandler.Register();
                 Features.Chat.ChatHandler.Register();
+                Features.Admin.ConfigEditorHandler.Register();
+                Features.Global.KmhJoinTicketHandler.Register();
                 Features.Chat.ChatRosterHandler.Register();
                 Features.Media.KmhMediaHandler.Register();
                 Features.Chat.ChatMediaRefresh.Register();
@@ -116,20 +137,18 @@ namespace KMHServerAddon
 
                 Persistence.KmhDataPaths.EnsureFolder();
 
-                // A missing Newtonsoft otherwise surfaces later as a confusing "storage failed".
-                try { _ = Newtonsoft.Json.JsonConvert.SerializeObject(new { ok = true }); }
-                catch (System.Exception depEx)
-                {
-                    Diagnostics.ServerLog.Error($"Missing dependency: KMH could not load Newtonsoft.Json ({depEx.GetType().Name}). " +
-                        "For a self-contained/folder build, extract the whole package so Newtonsoft.Json.dll sits next to the exe.");
-                }
+                // Otherwise a dependency that resolves and then fails on first use reads as "KMH-Data is not writable".
+                bool serializationOk = Diagnostics.DependencyPreflight.Check(out string depDetail);
+                if (!serializationOk) Diagnostics.ServerLog.Error("Missing dependency: " + depDetail);
 
                 // A read-only KMH-Data otherwise makes every save fail silently and read as a data-collection bug.
                 if (Persistence.JsonFileStore.SelfTest(out string storageDetail))
-                    Diagnostics.ServerLog.Info($"Persistence self-test: OK - {storageDetail}");
+                    Diagnostics.ServerLog.Diag($"Persistence self-test: OK - {storageDetail}");
                 else
-                    Diagnostics.ServerLog.Error($"Persistence SELF-TEST FAILED - KMH data will NOT save! ({storageDetail}) " +
-                                                "Check folder permissions / free disk space for KMH-Data, or a missing dependency (see above).");
+                    Diagnostics.ServerLog.Error($"Persistence SELF-TEST FAILED - Colony Nexus data will NOT save! ({storageDetail}) "
+                        + (serializationOk
+                            ? "Check folder permissions / free disk space for KMH-Data."
+                            : "The missing dependency above is the cause - fix that first; the folder itself may be fine."));
 
                 // Before anything reads KMH-Data, or a restore that died mid-swap reads as a fresh install.
                 Persistence.KmhDataBackup.FinishInterruptedRestore();
@@ -141,9 +160,9 @@ namespace KMHServerAddon
                 Maintenance.MaintenanceConfig.EnsureGenerated();
                 Maintenance.MaintenanceConfig maint = Maintenance.MaintenanceConfig.Current;
 
-                // Seed transport config + apply its debug toggle early so boot traces respect it.
+                // Early, so boot traces respect the debug toggle.
                 Features.Transport.TransportConfig.EnsureGenerated();
-                ServerLog.DebugEnabled = Features.Transport.TransportConfig.Current.DebugLogging;
+                ServerLog.DebugEnabled = Features.Transport.TransportConfig.Current.Advanced.DebugLogging;
 
                 // Seeded BEFORE the scan below, or a first boot reports configs it is about to write as missing.
                 Features.Economy.EconomyConfig.EnsureGenerated();
@@ -156,12 +175,17 @@ namespace KMHServerAddon
                 Features.Chat.ChatConfig.EnsureGenerated();
                 Features.Media.MediaConfig.EnsureGenerated();
                 Features.Mail.MailConfig.EnsureGenerated();
+                Features.Global.Federation.FederationConfig.EnsureGenerated();
+                Features.Mods.ModPolicyConfig.EnsureGenerated();
                 Features.Frontier.FrontierConfig.EnsureGenerated();
                 Features.Identity.StaffConfig.EnsureGenerated();
+                Features.Global.GlobalConfig.EnsureGenerated();
                 Features.FeaturesConfig.EnsureGenerated();
 
+                Features.Discord.DiscordIconAssets.Provision();
+
                 ServerLog.Info(Persistence.KmhDataMeta.ReconcileOnBoot());
-                ServerLog.Info($"KMH server identity: '{KmhServerIdentity.Name}' (id {KmhServerIdentity.Id})");
+                ServerLog.Info($"Colony Nexus server identity: '{KmhServerIdentity.Name}' (id {KmhServerIdentity.Id})");
                 // Scanned even when the report is off: the backup step below must know whether the data is trustworthy.
                 bool dataDamaged = false;
                 if (maint.IntegrityScanOnBoot || maint.BackupOnBoot)
@@ -170,7 +194,11 @@ namespace KMHServerAddon
                     if (maint.IntegrityScanOnBoot) Persistence.KmhDataIntegrity.LogScan(scan);
                     dataDamaged = scan.CriticalDamage;
                 }
-                string bootBackupName = "";
+                // Reported by an earlier boot's load; the file now looks healthy only because it was recreated empty.
+                if (Persistence.JsonFileStore.DamageReported(out _)) dataDamaged = true;
+                // Before any prune: the journal names a pending migration's rollback backup, and the boot backup prunes at once.
+                Persistence.KmhDataBackup.Pin(Maintenance.KmhMigrationJournal.Read()?.BackupDirName);
+
                 if (dataDamaged)
                 {
                     // A crash loop would otherwise spend the whole retention on copies of broken data in about a minute.
@@ -181,9 +209,8 @@ namespace KMHServerAddon
                 {
                     if (Persistence.KmhDataBackup.TryCreate("boot", out string backupDir, out string backupErr))
                     {
-                        bootBackupName = System.IO.Path.GetFileName(backupDir);
                         int pruned = Persistence.KmhDataBackup.Prune(maint.BackupRetention);
-                        ServerLog.Info($"Boot backup: {bootBackupName}" +
+                        ServerLog.Info($"Boot backup: {System.IO.Path.GetFileName(backupDir)}" +
                                        (pruned > 0 ? $" ({pruned} old backup(s) pruned)" : ""));
                     }
                     else ServerLog.Verbose($"Boot backup skipped: {backupErr}");
@@ -194,26 +221,13 @@ namespace KMHServerAddon
                 Features.Media.KmhVideoCache.Start();
                 Features.Media.KmhMediaCache.ResetOnBoot();   // converted copies never survive a restart
 
-                // Detected BEFORE backfill, because backfill writes the safe defaults that erase the evidence.
-                bool sitesMigratedToTiers = System.IO.File.Exists(Persistence.KmhDataPaths.SitesConfigFile)
-                    && !Persistence.JsonFileStore.FileHasKey(Persistence.KmhDataPaths.SitesConfigFile, "UseSiteOutputTiers");
                 // Move a legacy (pre-mode) Economy.json to the recommended Balanced BEFORE backfill would lock in Standard.
                 bool economyModeMigrated = Features.Economy.EconomyConfig.MigrateLegacyModeToBalanced();
+                // One canonical list, or a config reaches the validator but not the backfill and its new fields stay hidden.
                 int fieldsBackfilled = 0;
-                fieldsBackfilled += Persistence.JsonFileStore.BackfillMissingFields(Persistence.KmhDataPaths.EconomyConfigFile,     new Features.Economy.EconomyConfig());
-                fieldsBackfilled += Persistence.JsonFileStore.BackfillMissingFields(Persistence.KmhDataPaths.SitesConfigFile,       new Features.Sites.SitesConfig());
-                fieldsBackfilled += Persistence.JsonFileStore.BackfillMissingFields(Persistence.KmhDataPaths.DiscordConfigFile,     new Features.Discord.DiscordConfig());
-                fieldsBackfilled += Persistence.JsonFileStore.BackfillMissingFields(Persistence.KmhDataPaths.ReputationConfigFile,  new Features.Reputation.ReputationConfig());
-                fieldsBackfilled += Persistence.JsonFileStore.BackfillMissingFields(Persistence.KmhDataPaths.QuestsConfigFile,      new Features.Quests.QuestsConfig());
-                fieldsBackfilled += Persistence.JsonFileStore.BackfillMissingFields(Persistence.KmhDataPaths.EnforcementConfigFile, new Features.Enforcement.EnforcementConfig());
-                fieldsBackfilled += Persistence.JsonFileStore.BackfillMissingFields(Persistence.KmhDataPaths.WorldConfigFile,       new Features.World.WorldConfig());
-                fieldsBackfilled += Persistence.JsonFileStore.BackfillMissingFields(Persistence.KmhDataPaths.MaintenanceConfigFile, new Maintenance.MaintenanceConfig());
-                fieldsBackfilled += Persistence.JsonFileStore.BackfillMissingFields(Persistence.KmhDataPaths.TransportConfigFile,   new Features.Transport.TransportConfig());
-                fieldsBackfilled += Persistence.JsonFileStore.BackfillMissingFields(Persistence.KmhDataPaths.FeaturesConfigFile,    new Features.FeaturesConfig());
-                fieldsBackfilled += Persistence.JsonFileStore.BackfillMissingFields(Persistence.KmhDataPaths.MailConfigFile,        new Features.Mail.MailConfig());
-                fieldsBackfilled += Persistence.JsonFileStore.BackfillMissingFields(Persistence.KmhDataPaths.FrontierConfigFile,    new Features.Frontier.FrontierConfig());
-
-                Maintenance.KmhDefaultsUpgrade.ApplyIfNeeded();
+                foreach ((string _, string cfgPath, object cfgDefaults) in Maintenance.KmhConfigValidation.ConfigTargets())
+                    fieldsBackfilled += Persistence.JsonFileStore.BackfillMissingFields(cfgPath, cfgDefaults);
+                Features.Chat.ChatConfig.MergeShippedImageHosts();
 
                 // Reloaded AFTER every config write, or the banner and access checks run on a pre-rewrite cache.
                 Features.Economy.EconomyConfig.Reload();
@@ -221,6 +235,9 @@ namespace KMHServerAddon
                     ServerLog.Warn("Economy: migrated legacy (pre-v1.2.0) config to the recommended Balanced mode - remote-convenient with light caps/cooldowns/fees. Set EconomyMode in Config/Economy.json to change it.");
 
                 Features.Enforcement.EnforcementProfile.Reload();
+                // A publish staged by the previous process cannot be resumed, so it is cleared rather than left.
+                Features.Enforcement.EnforcementPublish.SweepStagingAtBoot();
+                Features.Mods.ModProfile.LoadFromDisk();
 
                 Features.LinkedAccounts.LinkedAccountsStore.LoadFromDisk();
                 Features.PlayerStats.PlayerStatsStore.LoadFromDisk();
@@ -228,13 +245,11 @@ namespace KMHServerAddon
                 Maintenance.KmhReadiness.Recovering();
                 Features.Economy.EconomyResetStore.LoadFromDisk();
                 Features.Economy.KmhEconomyReset.LoadFromDisk();   // holds the barrier before any store is reachable
-                // Advance past the restored generation, or ids issued against the replaced data hit different rows.
-                if (!string.IsNullOrEmpty(Persistence.KmhDataBackup.RestoredThisBoot))
-                {
-                    Features.Economy.KmhEconomyReset.BumpDataGeneration(
-                        $"restored from {Persistence.KmhDataBackup.RestoredThisBoot}");
+                // Advance past the restored generation, or ids issued against the replaced data hit different rows. The
+                // restored rows match the restored vaults, so recovery finishes them rather than closing them unpaid.
+                if (!string.IsNullOrEmpty(Persistence.KmhDataBackup.RestoredThisBoot)
+                    && Features.Economy.KmhEconomyReset.BumpDataGeneration($"restored from {Persistence.KmhDataBackup.RestoredThisBoot}", staleRows: false))
                     Persistence.KmhDataBackup.ClearRestoredThisBoot();
-                }
                 Features.Treasury.TreasuryStore.LoadFromDisk();
                 // Drop vault rows that were created but never written to, so a lookup alone never leaves one behind.
                 Features.Treasury.TreasuryStore.PruneUnusedVaults();
@@ -244,17 +259,13 @@ namespace KMHServerAddon
                 Features.Quests.QuestStore.LoadFromDisk();
                 Features.Guilds.GuildStore.LoadFromDisk();
                 Features.Guilds.Contributions.KmhGuildContributionLedger.LoadFromDisk();
-                Transactions.KmhTransactionRepository.LoadFromDisk();
-                Transactions.KmhTransactionRepository.RecoverOnBoot();   // reconcile transactions left by a crash
-                // Needs the rows loaded above: a pending take is owned by the vault only while no row names it.
-                Transactions.KmhPayloadTakeRecovery.RecoverOnBoot();
-                // After the ledger, before the stores it purges are used: an unfinished reset must not be raced.
-                Features.Economy.KmhEconomyReset.RecoverOnBoot();
+                // Every store loads before recovery: a purge or hold on an unloaded store is overwritten when it loads.
+                Features.Auctions.AuctionStore.LoadFromDisk();
+                Features.Delivery.DeliveryStore.LoadFromDisk();
                 Features.Reputation.ReputationStore.LoadFromDisk();
                 Features.Sites.SiteCatalogStore.LoadFromDisk();   // before sites: reclassification reads it
                 Features.Sites.SiteStore.LoadFromDisk();
                 Features.World.WorldStore.LoadFromDisk();
-                Features.Auctions.AuctionStore.LoadFromDisk();
                 Features.WantBoard.WantStore.LoadFromDisk();
                 Features.Mail.MailStore.LoadFromDisk();
                 Features.Chat.ChatModerationStore.LoadFromDisk();
@@ -262,11 +273,44 @@ namespace KMHServerAddon
                 Features.Seasons.SeasonStore.LoadFromDisk();
                 Features.Notifications.NotificationStore.LoadFromDisk();
                 Features.Recovery.RecoveryStore.LoadFromDisk();
-                Features.Delivery.DeliveryStore.LoadFromDisk();
+                Features.Global.Treasury.ConnectedTreasuryStore.LoadFromDisk();
+                Features.Global.Guilds.FederatedGuildStore.LoadFromDisk();
+                Features.Global.Federation.FederationOutbox.LoadFromDisk();
                 Features.ItemLabels.ItemLabelCache.LoadFromDisk();
                 Features.ItemLabels.WeatherDefCache.LoadFromDisk();
                 Features.Discord.DiscordUserState.LoadFromDisk();
                 Policy.KmhPolicyStore.LoadFromDisk();
+                Transactions.KmhTransactionRepository.LoadFromDisk();
+
+                // Not over a store a damaged file emptied: restoring it is the fix, and recovery would have nothing to replay.
+                if (Maintenance.KmhBootRecovery.ShouldRun())
+                {
+                    // First: a wipe the last run started must finish before anything settles into the stores it empties.
+                    Maintenance.KmhSeasonReset.RecoverOnBoot();
+                    Transactions.KmhTransactionRepository.RecoverOnBoot();
+                    // Needs the rows loaded above: a pending take is owned by the vault only while no row names it.
+                    Transactions.KmhPayloadTakeRecovery.RecoverOnBoot();
+                    // Same rule for a listing: units that left one are the ledger's only while a row answers for them.
+                    Features.Marketplace.MarketplaceStore.RecoverPendingReserves();
+                    // A fee a vault commit owed the house pool, cut off before the pool's save held it, is credited once.
+                    Features.Treasury.TreasuryStore.SettleOwedFees();
+                    // Same rule: a closed message's attachment is owed to whoever the record beside it names.
+                    Features.Mail.MailStore.RecoverPendingPayouts();
+                    // A quest delivery handed over but not completed rolls forward; a close's owed payout is paid.
+                    Features.Quests.QuestStore.RecoverOnBoot();
+                    // Site payouts and road work written down with their cycle, and roadworks refunds, likewise.
+                    Features.Roadworks.RoadworksStore.RecoverOnBoot();
+                    Features.Sites.SiteStore.RecoverOnBoot();
+                    // A guild perk charged and then interrupted is applied or refunded.
+                    Features.Guilds.GuildStore.RecoverPendingPerks();
+                    // And for a want closed, or a purged auction's bid, with its silver still to refund.
+                    Features.WantBoard.WantStore.RecoverPendingRefunds();
+                    Features.Auctions.AuctionStore.SettlePendingRefunds();
+                    // A completion recorded before the crash still owes its rewards.
+                    Features.World.WorldEngine.ResumePendingPayouts();
+                    // Last, and still behind the readiness barrier: an unfinished reset must not be raced.
+                    Features.Economy.KmhEconomyReset.RecoverOnBoot();
+                }
 
                 // Sites and World are the truth; the director only holds references and is saved at its own moments.
                 Features.Frontier.KmhWorldDirector.Reconcile();
@@ -279,21 +323,36 @@ namespace KMHServerAddon
                     // A journal left behind means the previous migration never committed, so roll back before retrying.
                     Maintenance.KmhMigrationRecovery.RecoverIfIncomplete();
 
-                    Maintenance.KmhMigrationJournal journal = Maintenance.KmhMigrationJournal.Begin(bootBackupName);
-                    Maintenance.KmhConfigMigration.ApplyIfNeeded();
-                    Maintenance.KmhConfigValidation.GateOnBoot();   // load-test configs; recover from backup on failure
-                    journal.Commit();
-                    Maintenance.KmhMigrationJournal.Clear();        // clean commit: no incomplete journal remains
+                    Maintenance.KmhConfigMigrationPlan plan = Maintenance.KmhConfigMigration.Prepare();
+                    if (!plan.Needed)
+                    {
+                        Maintenance.KmhConfigValidation.GateOnBoot();
+                        Maintenance.KmhMigrationJournal.Clear();
+                    }
+                    else if (plan.Blocked != null)
+                    {
+                        Maintenance.KmhReadiness.Failed($"config migration blocked - {plan.Blocked}");
+                    }
+                    else
+                    {
+                        // Pinned for the whole migration: the next backup prunes on creation, and this is the only old copy.
+                        Persistence.KmhDataBackup.Pin(plan.BackupName);
+                        try { RunConfigMigration(plan); }
+                        finally { Persistence.KmhDataBackup.Unpin(plan.BackupName); }
+                    }
                 }
                 finally { Maintenance.KmhMaintenanceGate.Release(); }
 
                 // A migration rewrites Economy.json after the reload above, so re-read or it lands only next boot.
-                Features.Economy.EconomyConfig.Reload();
+                if (Maintenance.KmhConfigMigration.RanThisBoot) Features.Economy.EconomyConfig.Reload();
 
                 // Applied only once every config rewrite is done, or a cache holds the pre-rewrite copy all run.
-                Features.Comms.CommsPush.Wire();          // how a later reload reaches connected clients
-                Maintenance.KmhInvalidation.Wire();       // a vault changed by Discord/SDK/admin still reaches its owner
+                Features.Comms.CommsPush.Wire();
+                Maintenance.KmhInvalidation.Wire();
                 Features.Comms.CommsStartup.ApplyAtBoot();
+                Maintenance.KmhConfigRegeneration.Announce();
+                // Every boot, or an upgraded server keeps the wording of whichever build first wrote it.
+                Maintenance.KmhConfigRegeneration.RefreshReadme();
 
                 Maintenance.KmhMigrationReport.Write(new Maintenance.KmhMigrationReport.Inputs
                 {
@@ -304,58 +363,56 @@ namespace KMHServerAddon
                     ConfigSchemaTo    = KmhVersion.ConfigSchema,
                     DataSchema        = KmhVersion.DataSchema,
                     FieldsBackfilled  = fieldsBackfilled,
-                    DefaultsChanged   = Maintenance.KmhDefaultsUpgrade.Changed.Count,
-                    DefaultsPreserved = Maintenance.KmhDefaultsUpgrade.Preserved.Count,
+                    Regenerated       = Maintenance.KmhConfigRegeneration.Regenerated.Count,
+                    Kept              = Maintenance.KmhConfigRegeneration.Preserved.Count,
                     Steps             = Maintenance.KmhConfigMigration.Report,
                 });
 
                 string ecoMode = Features.Economy.EconomyConfig.Current.EconomyMode ?? "Standard";
-                if (Features.Economy.EconomyAccess.Policy.IsStrict)
-                    ServerLog.Warn($"Economy: STRICT treasury mode active - {Features.Economy.EconomyAccess.Describe()}");
-                else if (string.Equals(ecoMode, "Standard", StringComparison.OrdinalIgnoreCase))
+                bool wealth = Features.FeaturesConfig.Current.Wealth;
+                if (string.Equals(ecoMode, "Standard", StringComparison.OrdinalIgnoreCase))
                     ServerLog.Warn("Economy: Treasury is in Remote/Standard mode - allows off-map wealth storage and may reduce raid pressure. " +
                         "Balanced (recommended), Localized or Hardcore are safer for public servers. Set EconomyMode in Config/Economy.json.");
                 else
-                    ServerLog.Info($"Economy: {ecoMode} profile active - {Features.Economy.EconomyAccess.Describe()}");
+                    ServerLog.Info($"Economy: {ecoMode} - {Features.Economy.EconomyAccess.Describe()}; Colony Nexus wealth "
+                                   + (wealth ? "counts toward raids" : "is NOT counted toward raids (a safe haven)") + ".");
                 Features.Economy.EconomyPolicy pol = Features.Economy.EconomyAccess.Policy;
                 if (pol.DepositFeePct > 0 || pol.WithdrawFeePct > 0)
-                    ServerLog.Info($"Economy: treasury silver fees {pol.DepositFeePct:0.#}% deposit / {pol.WithdrawFeePct:0.#}% withdraw -> the house pool (same sink as marketplace tax). Item deposits/withdraws pay no fee.");
-                ServerLog.Info("Economy: passive income (site rewards, marketplace/auction/want payouts) accrues into the treasury under every access mode; a restrictive mode only gates withdrawal, so value is never stranded silently ('kmh audit-player').");
-                // Both branches log, because an owner has to know which way this server actually behaves.
-                if (Features.FeaturesConfig.Current.Wealth)
-                    ServerLog.Warn("Economy: Features.Wealth is ON - KMH off-map value (treasury + escrow) counts toward RimWorld raid/threat scaling on v1.3.0+ clients, so parking wealth in KMH does not dodge raids. Set Features.json Wealth=false to make KMH a safe haven.");
-                else
-                    ServerLog.Info("Economy: Features.Wealth is OFF - KMH off-map value is NOT counted in RimWorld raid/threat scaling; KMH is a safe haven from the storyteller.");
+                    ServerLog.Diag($"Economy: treasury silver fees {pol.DepositFeePct:0.#}% deposit / {pol.WithdrawFeePct:0.#}% withdraw -> the house pool (same sink as marketplace tax). Item deposits/withdraws pay no fee.");
+                ServerLog.Diag("Economy: passive income (site rewards, marketplace/auction/want payouts) accrues into the treasury under every access mode; a restrictive mode only gates withdrawal, so value is never stranded silently ('kmh audit-player').");
+                ServerLog.Diag(wealth
+                    ? "Economy: Features.Wealth is ON - Colony Nexus off-map value (treasury + escrow) counts toward RimWorld raid/threat scaling on v1.3.0+ clients, so parking wealth in Colony Nexus does not dodge raids. Set Features.json Wealth=false to make Colony Nexus a safe haven."
+                    : "Economy: Features.Wealth is OFF - Colony Nexus off-map value is NOT counted in RimWorld raid/threat scaling; Colony Nexus is a safe haven from the storyteller.");
                 if (Features.Economy.EconomyConfig.Current.AnyGuildHallRule)
                     ServerLog.Warn("Guilds: physical Guild Hall restrictions are ENABLED - some guild actions require a hall / proximity. See Config/Economy.json.");
-                if (sitesMigratedToTiers)
-                    ServerLog.Warn("Sites: your Sites.json was upgraded to v1.2.0 - outputs now use a CURATED, server-authoritative tier catalog. " +
-                        "Sites can no longer produce weapons/apparel/tech/archotech/bionics/genes/relics/ammo; unknown items and Tier 4 are BLOCKED by default. " +
-                        "Your existing values were kept; review Config/Sites.json (OutputTiers, AllowedDefNames/AllowExplicitComplexSiteOutputs) to allow more.");
                 if (Features.Sites.SiteStore.LegacyBlockedSiteCount > 0)
                     ServerLog.Warn($"Sites: {Features.Sites.SiteStore.LegacyBlockedSiteCount} existing site(s) are PAUSED because their output is now blocked by current rules - review with 'kmh audit sites' and either allow the output or remove the site.");
                 if (Features.Sites.SiteStore.LegacyWorkerCount > 0)
                     ServerLog.Warn($"Sites: {Features.Sites.SiteStore.LegacyWorkerCount} legacy account-worker(s) are DISABLED - sites now need real pawns (caravan -> assign). Old workers were kept, not deleted; reassign to resume production. See 'kmh validate sites'.");
-                if (!Features.Sites.SitesConfig.Current.UseSiteOutputTiers && Features.Sites.SitesConfig.Current.AllowUnsafeLegacySiteOutputs)
-                    ServerLog.Warn("Sites: UNSAFE legacy mode is ON (UseSiteOutputTiers=false + AllowUnsafeLegacySiteOutputs=true) - Sites can produce ANY def. This is admin/dev-only; standard servers should leave tiers on.");
+                if (!Features.Sites.SitesConfig.Current.Output.UseTiers && Features.Sites.SitesConfig.Current.Output.AllowUnsafeLegacy)
+                    ServerLog.Warn("Sites: UNSAFE legacy mode is ON (Sites.json Output.UseTiers=false + Output.AllowUnsafeLegacy=true) - Sites can produce ANY def. This is admin/dev-only; standard servers should leave tiers on.");
                 if (Features.Recovery.RecoveryStore.HeldCount > 0)
                     ServerLog.Warn($"Recovery: {Features.Recovery.RecoveryStore.HeldCount} item/silver record(s) couldn't reach their owner and are HELD - triage with 'kmh recover list'.");
 
                 Maintenance.KmhUpgradeSummary.Print(fieldsBackfilled);
 
+                EnsureFile(Persistence.KmhDataPaths.GlobalSetupFile,      Features.Global.GlobalSetupState.EnsureCreated);
                 EnsureFile(Persistence.KmhDataPaths.LinkedAccountsFile,   () => Features.LinkedAccounts.LinkedAccountsStore.SaveToDisk());
-                EnsureFile(Persistence.KmhDataPaths.PlayerStatsFile,      Features.PlayerStats.PlayerStatsStore.SaveToDisk);
-                EnsureFile(Persistence.KmhDataPaths.ColonistsFile,        Features.PlayerStats.PlayerStatsStore.SaveColonistsToDisk);
+                EnsureFile(Persistence.KmhDataPaths.PlayerStatsFile,      () => Features.PlayerStats.PlayerStatsStore.SaveToDisk());
+                EnsureFile(Persistence.KmhDataPaths.ColonistsFile,        () => Features.PlayerStats.PlayerStatsStore.SaveColonistsToDisk());
                 EnsureFile(Persistence.KmhDataPaths.TreasuryFile,         () => Features.Treasury.TreasuryStore.SaveToDisk());
                 EnsureFile(Persistence.KmhDataPaths.MarketplaceFile,      () => Features.Marketplace.MarketplaceStore.SaveToDisk());
                 EnsureFile(Persistence.KmhDataPaths.QuestsFile,           () => Features.Quests.QuestStore.SaveToDisk());
                 EnsureFile(Persistence.KmhDataPaths.GuildsFile,           () => Features.Guilds.GuildStore.SaveToDisk());
                 EnsureFile(Persistence.KmhDataPaths.ReputationFile,       Features.Reputation.ReputationStore.SaveToDisk);
                 EnsureFile(Persistence.KmhDataPaths.SitesFile,            () => Features.Sites.SiteStore.SaveToDisk());
-                EnsureFile(Persistence.KmhDataPaths.WorldFile,            Features.World.WorldStore.SaveToDisk);
+                EnsureFile(Persistence.KmhDataPaths.WorldFile,            () => Features.World.WorldStore.SaveToDisk());
                 EnsureFile(Persistence.KmhDataPaths.AuctionsFile,         () => Features.Auctions.AuctionStore.SaveToDisk());
                 EnsureFile(Persistence.KmhDataPaths.WantsFile,            () => Features.WantBoard.WantStore.SaveToDisk());
                 EnsureFile(Persistence.KmhDataPaths.RecoveryFile,         () => Features.Recovery.RecoveryStore.SaveToDisk());
+                EnsureFile(Persistence.KmhDataPaths.ConnectedTreasuryFile, () => Features.Global.Treasury.ConnectedTreasuryStore.SaveToDisk());
+                EnsureFile(Persistence.KmhDataPaths.FederatedGuildsFile, () => Features.Global.Guilds.FederatedGuildStore.SaveToDisk());
+                EnsureFile(Persistence.KmhDataPaths.FederationOutboxFile, () => Features.Global.Federation.FederationOutbox.SaveToDisk());
                 EnsureFile(Persistence.KmhDataPaths.NotificationsFile,    () => Features.Notifications.NotificationStore.SaveToDisk());
                 EnsureFile(Persistence.KmhDataPaths.ItemLabelsFile,       Features.ItemLabels.ItemLabelCache.SaveToDisk);
                 EnsureFile(Persistence.KmhDataPaths.DiscordUserStateFile, Features.Discord.DiscordUserState.SaveToDisk);
@@ -365,9 +422,9 @@ namespace KMHServerAddon
                 EnsureFile(Persistence.KmhDataPaths.MailFile,             () => Features.Mail.MailStore.SaveToDisk());
                 EnsureFile(Persistence.KmhDataPaths.ChatFile,             Features.Chat.ChatStore.SaveToDisk);
                 EnsureFile(Persistence.KmhDataPaths.ChatModerationFile,   Features.Chat.ChatModerationStore.SaveToDisk);
-                EnsureFile(Persistence.KmhDataPaths.SeasonsFile,          Features.Seasons.SeasonStore.SaveToDisk);
+                EnsureFile(Persistence.KmhDataPaths.SeasonsFile,          () => Features.Seasons.SeasonStore.SaveToDisk());
                 EnsureFile(Persistence.KmhDataPaths.DeliveryFile,         () => Features.Delivery.DeliveryStore.SaveToDisk());
-                EnsureFile(Persistence.KmhDataPaths.GuildContributionsFile, Features.Guilds.Contributions.KmhGuildContributionLedger.SaveToDisk);
+                EnsureFile(Persistence.KmhDataPaths.GuildContributionsFile, () => Features.Guilds.Contributions.KmhGuildContributionLedger.SaveToDisk());
                 EnsureFile(Persistence.KmhDataPaths.TransactionLedgerFile, () => Transactions.KmhTransactionRepository.SaveToDisk());
 
                 // Primes the house pool once, so global-quest rewards are fundable before any tax revenue exists.
@@ -386,24 +443,30 @@ namespace KMHServerAddon
 
                 Features.World.WorldEngine.Start();
                 Maintenance.KmhScheduler.Register("frontier-director", TimeSpan.FromMinutes(1),
-                                                  Features.Frontier.KmhWorldDirector.Tick, TimeSpan.FromMinutes(2));
+                                                  Features.Frontier.KmhWorldDirector.Tick,
+                                                  Maintenance.KmhJobKind.Mutating, TimeSpan.FromMinutes(2));
 
                 DiscordBridge.Start();
-                DiscordLeaderboardPoster.Start();
-                Features.Discord.DiscordShowcaseSweep.Start();
+                Features.Discord.DiscordLive.Start();
                 Features.Discord.DiscordEventPublisher.Start();
                 Features.Discord.DiscordGuildRoleSync.Start();
                 Features.Discord.DiscordConsoleFeed.Start();
+                Features.Discord.KmhWorldChatDiscordBridge.Start();
 
                 Maintenance.KmhOwnerNotice.ScheduleIfNeeded();
 
                 Extensibility.ExtensionLoader.DiscoverAndLoad();
 
-                // Last: value moves must not act on a half-loaded copy of the state.
+                // Last: value moves must not act on half-loaded state, nor on a store an unreadable file left empty.
+                if (Persistence.JsonFileStore.DamageReported(out string damage)) Maintenance.KmhReadiness.Failed(damage);
                 Maintenance.KmhReadiness.Ready();
 
+                // After Ready, or the first beat describes a half-loaded server; skipping it drops a restart from the browser.
+                Features.Global.KmhGlobalService.Start();
+
                 int patchCount = HarmonyInstance.GetPatchedMethods().Count();
-                ServerLog.Info($"Bootstrap complete - {patchCount} method(s) patched, KMH handlers registered, {Extensibility.ExtensionLoader.Loaded.Count} extension(s) loaded");
+                ServerLog.Info($"Bootstrap complete - {patchCount} method(s) patched, Colony Nexus handlers registered, {Extensibility.ExtensionLoader.Loaded.Count} extension(s) loaded");
+                AdminCommands.KmhDoctor.LogBootSummary();
 
                 string prevBuild = Persistence.KmhDataMeta.PreviousBuildVersion;
                 string curBuild  = typeof(Persistence.KmhDataMeta).Assembly.GetName().Version?.ToString() ?? "";
@@ -412,7 +475,7 @@ namespace KMHServerAddon
             }
             catch (System.Exception ex)
             {
-                // A KMH boot failure must not abort RWT, so nothing in here may throw - but a half-loaded KMH must not serve players either.
+                // A KMH boot failure must not abort RWT, so nothing here throws - but a half-loaded KMH must not serve players.
                 try { Maintenance.KmhReadiness.Failed(ex.GetType().Name + ": " + ex.Message); } catch { }
                 try { System.Console.Error.WriteLine($"{Constants.LogPrefix} Bootstrap failed: {ex}"); } catch { }
             }
@@ -425,6 +488,28 @@ namespace KMHServerAddon
         }
 
         private static bool _shutdownFlushHooked;
+
+        // Every exit but one leaves the journal in place: an uncommitted journal is what makes the next boot roll back.
+        private static void RunConfigMigration(Maintenance.KmhConfigMigrationPlan plan)
+        {
+            Maintenance.KmhMigrationJournal journal =
+                Maintenance.KmhMigrationJournal.Begin(plan.BackupName, out string journalErr);
+            string failure = journal == null
+                ? $"its journal could not be written ({journalErr}), and a migration without one cannot be rolled back"
+                : Maintenance.KmhConfigMigration.Apply(plan);
+
+            if (failure != null)
+            {
+                Maintenance.KmhReadiness.Failed(
+                    $"config migration v{plan.From} -> v{plan.To} did not complete - {failure}. The journal was left "
+                    + $"in place, so the next start rolls back to '{plan.BackupName}'");
+                return;
+            }
+
+            Maintenance.KmhConfigValidation.GateOnBoot();
+            if (journal.Commit(out string commitErr)) Maintenance.KmhMigrationJournal.Clear();
+            else Maintenance.KmhReadiness.Failed($"the migration finished but could not be committed ({commitErr})");
+        }
 
         private static void RegisterShutdownFlush()
         {

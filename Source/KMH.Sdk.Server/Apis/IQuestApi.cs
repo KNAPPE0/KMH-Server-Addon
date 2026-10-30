@@ -21,10 +21,8 @@ namespace KMH.Sdk.Server.Apis
         /// <summary>Claim a quest. Returns false if already claimed or non-open.</summary>
         bool Claim(string claimerUsername, long questId);
 
-        /// <summary>
-        /// Submit a claimed quest. A DeliverItem quest completes as soon as the claimer's treasury holds the target;
-        /// a Bounty waits for the poster's <see cref="Approve"/>.
-        /// </summary>
+        /// <summary>Submits a claimed quest; a Bounty then waits for the poster's <see cref="Approve"/>.</summary>
+        /// <remarks>A DeliverItem quest completes as soon as the claimer's treasury holds the target.</remarks>
         bool Submit(string claimerUsername, long questId);
 
         /// <summary>Bounty-only: poster signs off on a Submitted quest, paying out the bounty.</summary>

@@ -39,6 +39,7 @@ namespace KMHServerAddon.Features.WantBoard
             string itemDef = env?.GetString("item_def_name") ?? "";
             int qty        = env?.GetInt("qty", 0) ?? 0;
             int unitPrice  = env?.GetInt("unit_price_silver", 0) ?? 0;
+            long priceMilli = env?.GetLong("unit_price_milli", -1) ?? -1;   // -1 is an old client: derive from whole silver
             int hours      = env?.GetInt("hours", 0) ?? 0;
             string vis     = env?.GetString("visibility") ?? "public";
             int minQ       = env?.GetInt("min_quality", 0) ?? 0;
@@ -51,7 +52,7 @@ namespace KMHServerAddon.Features.WantBoard
             if (!op.Begin()) { SendSnapshotTo(client); Push(client, buyer); return; }
 
             (long id, string reason) = WantStore.Post(buyer, itemDef, qty, unitPrice, hours, vis,
-                minQ, reqStuff, allowComplex, allowTainted, allowDamaged);
+                minQ, reqStuff, allowComplex, allowTainted, allowDamaged, priceMilli);
             if (id <= 0) op.Release();
             KmhRouter.Notify(client, id > 0 ? "positive" : "negative", reason);
             if (id > 0)
@@ -114,11 +115,7 @@ namespace KMHServerAddon.Features.WantBoard
             return $"Want #{id} cancelled" + (o.Refunded > 0 ? $" - {Util.SilverFmt.Format(o.Refunded)} refunded to {o.Buyer}." : ".");
         }
 
-        private static string ItemName(string key)
-        {
-            Util.ItemKey.Split(key, out string def, out _, out _);
-            return def;
-        }
+        private static string ItemName(string key) => ItemLabels.ItemLabelCache.LabelFor(key);
 
         private static void Push(ServerClient client, string user)
             => KmhRouter.SendTo(client, KmhProtocol.Kind.TreasurySnapshot, Treasury.TreasuryStore.GetSnapshotFor(user));

@@ -5,7 +5,7 @@ using KMHServerAddon.SubProtocol;
 
 namespace KMHServerAddon.Maintenance
 {
-    // Two ServerClients answering to one username is the zombie-connection shape; built directly, since a live handshake never does it.
+    // Two ServerClients on one username is the zombie-connection shape; built directly, as no live handshake does it.
     internal static class KmhSessionOwnershipSelfTest
     {
         private const string ProbeKind = "kmh.selftest.session_probe";
@@ -86,15 +86,17 @@ namespace KMHServerAddon.Maintenance
                     Login(a);
                     KmhApiServer.RegisterForTest("taz", a);
                     bool live = KmhApiServer.IsConnected(a);
-                    // A test connection has no stream, so the write throws exactly where a reset socket throws.
+                    // No stream, so the write throws as a reset socket would - on the writer, just after the send.
                     KmhApiServer.SendResult first  = KmhApiServer.Send(a, new KmhEnvelope(ProbeKind, null));
+                    var waited = System.Diagnostics.Stopwatch.StartNew();
+                    while (KmhApiServer.IsRegisteredFor(a) && waited.ElapsedMilliseconds < 2000) System.Threading.Thread.Sleep(5);
                     bool dropped = !KmhApiServer.IsRegisteredFor(a) && !KmhApiServer.IsConnected(a);
                     KmhApiServer.SendResult second = KmhApiServer.Send(a, new KmhEnvelope(ProbeKind, null));
                     Logout(a);
-                    bool ok = live && first == KmhApiServer.SendResult.IoFailure
+                    bool ok = live && first == KmhApiServer.SendResult.Sent
                            && dropped && second == KmhApiServer.SendResult.NotConnected;
                     return (ok, ok
-                        ? "the first write fails and deregisters; the second never touches the dead socket"
+                        ? $"the failed write deregistered it within {waited.ElapsedMilliseconds} ms; the next send never touches the dead socket"
                         : $"live={live} first={first} dropped={dropped} second={second} - a dead socket stays registered and every later send retries it");
                 });
 
@@ -116,7 +118,7 @@ namespace KMHServerAddon.Maintenance
                     Login(a);
                     string token = KmhApiServer.IssueToken(a);
                     bool minted = !string.IsNullOrEmpty(token);
-                    Logout(a);   // session ends before the client ever dialed
+                    Logout(a);
                     bool refused = !KmhApiServer.TryConsumeTokenForTest(token, out _, out _);
                     return (minted && refused, minted && refused
                         ? "an unused token stops authenticating the moment its session ends"
@@ -128,7 +130,7 @@ namespace KMHServerAddon.Maintenance
                     ServerClient a = Session("taz"), b = Session("taz");
                     Login(a);
                     string token = KmhApiServer.IssueToken(a);
-                    Logout(a); Login(b);   // same username, new session
+                    Logout(a); Login(b);
                     bool refused = !KmhApiServer.TryConsumeTokenForTest(token, out _, out _);
                     Logout(b);
                     return (refused, refused ? "A's credential does not authenticate B" : "B AUTHENTICATED WITH A'S TOKEN");
@@ -190,10 +192,10 @@ namespace KMHServerAddon.Maintenance
                     Logout(a);
                     KmhRouter.ForgetPeer(a);           // the session teardown the disconnect hook performs
                     Login(b);
-                    KmhRouter.HandleInbound(b, parts[parts.Count - 1]);   // B sends only the tail
+                    KmhRouter.HandleInbound(b, parts[parts.Count - 1]);
                     int afterOrphan = delivered;
 
-                    foreach (KmhEnvelope p in parts) KmhRouter.HandleInbound(b, p);   // B's own complete transfer
+                    foreach (KmhEnvelope p in parts) KmhRouter.HandleInbound(b, p);
                     int afterOwn = delivered;
                     Logout(b);
                     KmhRouter.ForgetPeer(b);

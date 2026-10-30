@@ -42,8 +42,9 @@ namespace KMHServerAddon.Persistence
                 bus.RestoreApplied       += e => Write("admin",    "restore",   e);
                 PruneOld();
                 // Retention has to keep running: pruning only at boot means a server up for months never prunes again.
-                Maintenance.KmhScheduler.Register("history-prune", TimeSpan.FromHours(24), PruneOld, TimeSpan.FromHours(24));
-                ServerLog.Info($"History: recording state changes to {Dir} (kept {KeepMonths} months; inspect via 'kmh history').");
+                Maintenance.KmhScheduler.Register("history-prune", TimeSpan.FromHours(24), PruneOld,
+                    Maintenance.KmhJobKind.Infrastructure, TimeSpan.FromHours(24));
+                ServerLog.Diag($"History: recording state changes to {Dir} (kept {KeepMonths} months; inspect via 'kmh history').");
             }
             catch (Exception ex) { ServerLog.Warn($"History: could not start ({ex.Message}) - state-change history disabled."); }
         }

@@ -13,7 +13,7 @@ namespace KMHServerAddon.Features.World.Dto
         [JsonProperty("server_quests")] public List<ServerQuestDto> ServerQuests { get; set; } = new List<ServerQuestDto>();
     }
 
-    // Time-limited server-wide event. Magnitude's meaning depends on Type; Target is an optional def the event scopes to.
+    // Magnitude's meaning depends on Type; Target is an optional def the event scopes to.
     public class WorldEventDto
     {
         public const string TaxHoliday      = "tax_holiday";       // house tax -> 0
@@ -32,7 +32,7 @@ namespace KMHServerAddon.Features.World.Dto
         [JsonProperty("magnitude")]         public double Magnitude       { get; set; } = 0;
         [JsonProperty("target")]            public string Target          { get; set; } = "";
         [JsonProperty("started_utc_ticks")] public long   StartedUtcTicks { get; set; } = 0;
-        [JsonProperty("ends_utc_ticks")]    public long   EndsUtcTicks    { get; set; } = 0; // <= now means over; 0 only in pre-1.2.2 data
+        [JsonProperty("ends_utc_ticks")]    public long   EndsUtcTicks    { get; set; } = 0; // <= now means over; 0 only in legacy data
 
         public WorldEventDto ShallowClone() => (WorldEventDto)MemberwiseClone();
     }
@@ -40,8 +40,8 @@ namespace KMHServerAddon.Features.World.Dto
     // A server-owned quest (distinct from player-posted), funded from the house pool.
     public class ServerQuestDto
     {
-        public const string KindCooperative = "cooperative"; // shared progress, contributors split the reward
-        public const string KindCompetitive = "competitive"; // a race, first to finish takes the pot
+        public const string KindCooperative = "cooperative";
+        public const string KindCompetitive = "competitive";
 
         public const string ObjDeliver = "deliver";
         public const string ObjHunt    = "hunt";

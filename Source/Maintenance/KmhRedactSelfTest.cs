@@ -1,4 +1,5 @@
 ﻿using System.Collections.Generic;
+using System.Linq;
 
 namespace KMHServerAddon.Maintenance
 {
@@ -68,8 +69,28 @@ namespace KMHServerAddon.Maintenance
             r.Add(("redact: a url with no signature is left alone",
                    KmhRedact.Text("https://i.imgur.com/a.png") == "https://i.imgur.com/a.png", ""));
 
+            (string Line, string Address)[] addresses =
+            {
+                ("refused 'x' from 203.0.113.7 - banned", "203.0.113.7"), ("from 198.51.100.23.", "198.51.100.23"),
+                ("peer 192.0.2.1:25555 left", "192.0.2.1"), ("peer [2001:db8::7]:5000", "2001:db8::7"),
+                ("2001:0db8:85a3:0000:0000:8a2e:0370:7334 joined", "2001:0db8:85a3:0000:0000:8a2e:0370:7334"),
+                ("via ::ffff:192.0.2.9", "192.0.2.9"), ("loopback ::1 only", "::1"),
+            };
+            List<string> leaked = addresses.Select(a => KmhRedact.Addresses(a.Line))
+                                           .Where((s, i) => s.Contains(addresses[i].Address) || !s.Contains(KmhRedact.AddressMask))
+                                           .ToList();
+            r.Add(("redact: an IPv4 or IPv6 address bound for Global is masked, with or without a port",
+                   leaked.Count == 0, string.Join(" | ", leaked)));
+            string[] kept =
+            {
+                "[2026-10-07T12:34:56.789Z] [warn] slow", "KMHAddon.RTShared v1.3.1.0", "mac aa:bb:cc:dd:ee:ff", "ratio 1.5.2", "Foo::Bar()",
+            };
+            List<string> changed = kept.Where(s => KmhRedact.Addresses(s) != s).ToList();
+            r.Add(("redact: timestamps, versions, MAC-like and C++-like text are not taken for addresses",
+                   changed.Count == 0, string.Join(" | ", changed.Select(KmhRedact.Addresses))));
+
             bool threw = false;
-            try { KmhRedact.Json("not json at all { ["); KmhRedact.Text(null); KmhRedact.Json(null); }
+            try { KmhRedact.Json("not json at all { ["); KmhRedact.Text(null); KmhRedact.Json(null); KmhRedact.Addresses(null); }
             catch { threw = true; }
             r.Add(("redact: malformed input is still redacted and never throws", !threw, ""));
 

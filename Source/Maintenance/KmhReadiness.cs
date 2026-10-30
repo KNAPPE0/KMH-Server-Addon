@@ -4,7 +4,7 @@ namespace KMHServerAddon.Maintenance
 {
     internal enum KmhReadyState { Starting = 0, Recovering = 1, Ready = 2, Failed = 3 }
 
-    // Handlers register long before their stores load; without this a half-failed boot serves an unread treasury and saves that emptiness.
+    // Handlers register before stores load; without this a half-failed boot serves and saves an unread treasury.
     internal static class KmhReadiness
     {
         private static volatile KmhReadyState _state = KmhReadyState.Starting;
@@ -24,7 +24,7 @@ namespace KMHServerAddon.Maintenance
         {
             if (_state != KmhReadyState.Starting) return;
             _state = KmhReadyState.Recovering;
-            ServerLog.Info("KMH is loading its stores and replaying anything the last run left unfinished.");
+            ServerLog.Diag("Colony Nexus is loading its stores and replaying anything the last run left unfinished.");
         }
 
         public static void Ready()
@@ -33,14 +33,14 @@ namespace KMHServerAddon.Maintenance
             bool announce = _state != KmhReadyState.Ready;
             _state = KmhReadyState.Ready;
             _why = "";
-            if (announce) ServerLog.Info($"KMH is ready. {Persistence.JsonFileStore.DescribeHealth()}");
+            if (announce) ServerLog.Info($"Colony Nexus is ready. {Persistence.JsonFileStore.DescribeHealth()}");
         }
 
         public static void Failed(string why)
         {
             _state = KmhReadyState.Failed;
             _why = why ?? "";
-            string line = $"{Constants.LogPrefix} KMH is NOT operational: {Describe()}. Player value moves are "
+            string line = $"{Constants.LogPrefix} Colony Nexus is NOT operational: {Describe()}. Player value moves are "
                         + "refused; admin repair is still available. Fix the cause and restart.";
             // Not through ServerLog: it reaches RWT's Printer, and a mismatched Printer signature is exactly this boot failure.
             try { Diagnostics.KmhLogSink.Write($"[{System.DateTime.UtcNow:O}] [error] {line}"); } catch { }

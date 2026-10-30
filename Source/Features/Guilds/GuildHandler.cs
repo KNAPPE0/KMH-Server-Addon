@@ -5,7 +5,7 @@ using KMHServerAddon.SubProtocol;
 
 namespace KMHServerAddon.Features.Guilds
 {
-    // kmh.guild.* handler; snapshots are caller-scoped so mutations broadcast only to the affected guild's members.
+    // Snapshots are caller-scoped, so a mutation broadcasts only to the affected guild's members.
     internal static class GuildHandler
     {
         public static void Register()
@@ -19,12 +19,13 @@ namespace KMHServerAddon.Features.Guilds
             KmhRouter.RegisterHandler(KmhProtocol.Kind.GuildLeave,             OnLeave);
             KmhRouter.RegisterHandler(KmhProtocol.Kind.GuildDonate,            OnDonate);
             KmhRouter.RegisterHandler(KmhProtocol.Kind.GuildWithdraw,          OnWithdraw);
+            KmhRouter.RegisterHandler(KmhProtocol.Kind.GuildWithdrawItem,      OnWithdrawItem);
             KmhRouter.RegisterHandler(KmhProtocol.Kind.GuildTransferOwner,     OnTransferOwner);
-            KmhRouter.RegisterHandler(KmhProtocol.Kind.GuildProposeAlliance,   (c, e) => OnAlliance(c, e, GuildSnapshot.RelationAlliedRequested));
-            KmhRouter.RegisterHandler(KmhProtocol.Kind.GuildAcceptAlliance,    (c, e) => OnAlliance(c, e, GuildSnapshot.RelationAllied));
-            KmhRouter.RegisterHandler(KmhProtocol.Kind.GuildBreakAlliance,     (c, e) => OnAlliance(c, e, GuildSnapshot.RelationNone));
-            KmhRouter.RegisterHandler(KmhProtocol.Kind.GuildDeclareHostile,    (c, e) => OnAlliance(c, e, GuildSnapshot.RelationHostile));
-            KmhRouter.RegisterHandler(KmhProtocol.Kind.GuildClearHostile,      (c, e) => OnAlliance(c, e, GuildSnapshot.RelationNone));
+            KmhRouter.RegisterHandler(KmhProtocol.Kind.GuildProposeAlliance,   (c, e) => OnAlliance(c, e, GuildSnapshot.RelationAlliedRequested, Diplomacy.Propose));
+            KmhRouter.RegisterHandler(KmhProtocol.Kind.GuildAcceptAlliance,    (c, e) => OnAlliance(c, e, GuildSnapshot.RelationAllied, Diplomacy.Accept));
+            KmhRouter.RegisterHandler(KmhProtocol.Kind.GuildBreakAlliance,     (c, e) => OnAlliance(c, e, GuildSnapshot.RelationNone, Diplomacy.Break));
+            KmhRouter.RegisterHandler(KmhProtocol.Kind.GuildDeclareHostile,    (c, e) => OnAlliance(c, e, GuildSnapshot.RelationHostile, Diplomacy.Hostile));
+            KmhRouter.RegisterHandler(KmhProtocol.Kind.GuildClearHostile,      (c, e) => OnAlliance(c, e, GuildSnapshot.RelationNone, Diplomacy.ClearHostile));
             KmhRouter.RegisterHandler(KmhProtocol.Kind.GuildSaveSettings,      OnSaveSettings);
             KmhRouter.RegisterHandler(KmhProtocol.Kind.GuildInvite,            OnInvite);
             KmhRouter.RegisterHandler(KmhProtocol.Kind.GuildDeclineInvite,     OnDeclineInvite);
@@ -60,42 +61,52 @@ namespace KMHServerAddon.Features.Guilds
             SendSnapshotTo(client);
         }
 
+        // A refusal names its reason: the client already flashed "sent", and a silent fresh snapshot read as success.
+        private static void Refuse(ServerClient client, string reason, string fallback)
+        {
+            KmhRouter.Notify(client, "negative", string.IsNullOrEmpty(reason) ? fallback : reason);
+            SendSnapshotTo(client);
+        }
+
         private static void OnPromote(ServerClient client, KmhEnvelope env)
         {
             string actor  = client?.GetData<UserFile>()?.Username;
             string target = env?.GetString("username") ?? "";
-            if (GuildStore.Promote(actor, target))
+            if (GuildStore.Promote(actor, target, out string reason))
             {
                 ServerLog.Info($"Guild: {actor} promoted {target}");
                 BroadcastToGuildOf(actor);
             }
-            else SendSnapshotTo(client);
+            else Refuse(client, reason, "Could not promote that member.");
         }
 
         private static void OnDemote(ServerClient client, KmhEnvelope env)
         {
             string actor  = client?.GetData<UserFile>()?.Username;
             string target = env?.GetString("username") ?? "";
-            if (GuildStore.Demote(actor, target))
+            if (GuildStore.Demote(actor, target, out string reason))
             {
                 ServerLog.Info($"Guild: {actor} demoted {target}");
                 BroadcastToGuildOf(actor);
             }
-            else SendSnapshotTo(client);
+            else Refuse(client, reason, "Could not demote that member.");
         }
 
         private static void OnKick(ServerClient client, KmhEnvelope env)
         {
             string actor  = client?.GetData<UserFile>()?.Username;
             string target = env?.GetString("username") ?? "";
-            if (GuildStore.Kick(actor, target))
+            string guild  = GuildStore.CurrentGuildOf(actor);
+            if (GuildStore.Kick(actor, target, out string reason))
             {
                 ServerLog.Info($"Guild: {actor} kicked {target}");
                 BroadcastToGuildOf(actor);
                 // The broadcast above no longer reaches them - they are out of the guild as of this call.
                 SendSnapshotToUsername(target);
+                Notifications.KmhNotify.ToUser(target.Trim(), "negative", "Removed from your guild",
+                    $"{actor} removed you from '{guild}'. Its vault, sites and perks stay with the guild.");
             }
-            else SendSnapshotTo(client);
+            else Refuse(client, reason, "Could not kick that member.");
         }
 
         private static void OnBuyPerk(ServerClient client, KmhEnvelope env)
@@ -111,7 +122,7 @@ namespace KMHServerAddon.Features.Guilds
             {
                 ServerLog.Info($"Guild: {actor} bought perk {perkKey} -> Lv {newLevel} ({cost}s)");
                 KmhRouter.Notify(client, "positive", $"Purchased {GuildStore.PerkLabel(perkKey)} (now Lv {newLevel}) for {Util.SilverFmt.Format(cost)}.");
-                BroadcastToGuildOf(actor);   // refresh the Hall for the whole guild so levels update immediately
+                BroadcastToGuildOf(actor);
             }
             else
             {
@@ -126,12 +137,11 @@ namespace KMHServerAddon.Features.Guilds
         {
             string actor = client?.GetData<UserFile>()?.Username;
             string guild = GuildStore.CurrentGuildOf(actor);
-            // GuildStore.Leave handles last-admin block + disband + vault return; guild/vault/sites are never deleted here.
             if (GuildStore.Leave(actor, out string reason))
             {
                 ServerLog.Info($"Guild: {actor} left '{guild}'");
                 KmhRouter.Notify(client, "positive", "You left the guild.");
-                SendSnapshotTo(client);   // remaining members refresh on next Hall open (no global guild broadcast)
+                SendSnapshotTo(client);   // remaining members refresh on their next Hall open
             }
             else KmhRouter.Notify(client, "negative", reason ?? "Could not leave the guild.");
         }
@@ -142,12 +152,11 @@ namespace KMHServerAddon.Features.Guilds
             int    amount = env?.GetInt("amount", 0) ?? 0;
             string reqId  = env?.GetString("req_id") ?? "";
             if (amount <= 0) { KmhRouter.Notify(client, "negative", "Donation amount must be positive."); return; }
-            // The donation books as PENDING and credits the vault only when the donor's save confirms.
             long now = System.DateTime.UtcNow.Ticks;
             if (_lastWithdrawTicks.TryGetValue("donate|" + actor, out long last) && now - last < System.TimeSpan.FromSeconds(2).Ticks)
             { KmhRouter.Notify(client, "negative", "Donation is on a short cooldown - try again in a moment."); return; }
             var op = new Security.KmhOpClaim("guild.donate", actor, env, "req_id");
-            if (!op.Begin()) { SendSnapshotTo(client); return; }   // duplicate click/replay: already processed
+            if (!op.Begin()) { SendSnapshotTo(client); return; }
             if (GuildStore.DepositToGuild(actor, amount, out string reason, Features.Economy.EconomyContext.FromEnvelope(env), txnId: reqId))
             {
                 _lastWithdrawTicks["donate|" + actor] = now;
@@ -162,19 +171,21 @@ namespace KMHServerAddon.Features.Guilds
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _lastWithdrawTicks
             = new System.Collections.Concurrent.ConcurrentDictionary<string, long>(System.StringComparer.OrdinalIgnoreCase);
 
+        internal static void ClearCooldownsForTest() => _lastWithdrawTicks.Clear();
+
         private static void OnWithdraw(ServerClient client, KmhEnvelope env)
         {
             string actor  = client?.GetData<UserFile>()?.Username;
             int    amount = env?.GetInt("amount", 0) ?? 0;
             if (amount <= 0) { KmhRouter.Notify(client, "negative", "Withdraw amount must be positive."); return; }
-            if (string.Equals(Features.Economy.EconomyConfig.Current.GuildTreasuryAccessMode, "Disabled", System.StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(Features.Economy.EconomyAccess.Policy.GuildAccess, "Disabled", System.StringComparison.OrdinalIgnoreCase))
             { KmhRouter.Notify(client, "negative", "Guild vault is disabled by server."); return; }
             long now = System.DateTime.UtcNow.Ticks;
             if (_lastWithdrawTicks.TryGetValue(actor ?? "", out long last) && now - last < System.TimeSpan.FromSeconds(3).Ticks)
             { KmhRouter.Notify(client, "negative", "Withdraw is on a short cooldown - try again in a moment."); return; }
             var op = new Security.KmhOpClaim("guild.withdraw", actor, env, "req_id");
-            if (!op.Begin()) { SendSnapshotTo(client); return; }   // duplicate click/replay: already processed, just refresh
-            if (GuildStore.WithdrawFromGuild(actor, amount, out string reason))
+            if (!op.Begin()) { SendSnapshotTo(client); return; }
+            if (GuildStore.WithdrawFromGuild(actor, amount, out string reason, Features.Economy.EconomyContext.FromEnvelope(env)))
             {
                 _lastWithdrawTicks[actor ?? ""] = now;
                 ServerLog.Info($"Guild: {actor} withdrew {Util.SilverFmt.Format(amount)} from the guild vault.");
@@ -185,15 +196,54 @@ namespace KMHServerAddon.Features.Guilds
             else { op.Release(); KmhRouter.Notify(client, "negative", reason ?? "Could not withdraw from the guild vault."); }
         }
 
+        private static void OnWithdrawItem(ServerClient client, KmhEnvelope env)
+        {
+            string actor       = client?.GetData<UserFile>()?.Username;
+            string itemKey     = env?.GetString("item_def_name") ?? "";
+            string fingerprint = env?.GetString("fingerprint") ?? "";
+            int    qty         = env?.GetInt("qty", 0) ?? 0;
+            if (string.IsNullOrEmpty(actor)) return;
+            if (qty <= 0) { KmhRouter.Notify(client, "negative", "Withdraw quantity must be positive."); return; }
+            // Claimed first, so a repeat is answered as the repeat it is rather than as a cooldown.
+            var op = new Security.KmhOpClaim("guild.withdraw_item", actor, env);
+            if (!op.Begin()) { SendSnapshotTo(client); return; }
+            if (Delivery.DeliveryStore.TooManyOwed(actor, out string owedWhy)) { op.Release(); KmhRouter.Notify(client, "negative", owedWhy); return; }
+            long now = System.DateTime.UtcNow.Ticks;
+            if (_lastWithdrawTicks.TryGetValue("item|" + actor, out long last) && now - last < System.TimeSpan.FromSeconds(3).Ticks)
+            { op.Release(); KmhRouter.Notify(client, "negative", "Withdraw is on a short cooldown - try again in a moment."); return; }
+
+            switch (GuildStore.WithdrawItemFromGuild(actor, itemKey, fingerprint, qty, Features.Economy.EconomyContext.FromEnvelope(env),
+                                                     out string reason, out Delivery.OutboundDelivery delivery))
+            {
+                case GuildStore.ItemWithdrawOutcome.Delivered:
+                    _lastWithdrawTicks["item|" + actor] = now;
+                    Delivery.DeliveryHandler.Send(client, delivery);
+                    KmhRouter.Notify(client, "positive", "Withdrawn from the guild vault - the goods are on their way to your colony.");
+                    BroadcastToGuildOf(actor);
+                    break;
+                case GuildStore.ItemWithdrawOutcome.Compensated:
+                    KmhRouter.Notify(client, "negative", reason);
+                    BroadcastToGuildOf(actor);
+                    break;
+                default:
+                    op.Release();
+                    Refuse(client, reason, "Could not withdraw that from the guild vault.");
+                    break;
+            }
+        }
+
         private static void OnTransferOwner(ServerClient client, KmhEnvelope env)
         {
             string actor  = client?.GetData<UserFile>()?.Username;
             string target = env?.GetString("username") ?? "";
             if (GuildStore.TransferAdmin(actor, target, out string reason))
             {
+                string guild = GuildStore.CurrentGuildOf(actor);
                 ServerLog.Info($"Guild: {actor} transferred guild ownership to {target}.");
                 KmhRouter.Notify(client, "positive", $"Ownership transferred to {target}. You are now an Admin.");
                 BroadcastToGuildOf(actor);
+                Notifications.KmhNotify.ToUser(target.Trim(), "positive", "You now own your guild",
+                    $"{actor} handed you ownership of '{guild}'. You are its Owner now; {actor} stays an Admin.");
             }
             else KmhRouter.Notify(client, "negative", reason ?? "Could not transfer ownership.");
         }
@@ -202,24 +252,66 @@ namespace KMHServerAddon.Features.Guilds
         {
             string actor = client?.GetData<UserFile>()?.Username;
             string motd  = env?.GetString("motd") ?? "";
-            if (GuildStore.SetMotd(actor, motd))
+            if (GuildStore.SetMotd(actor, motd, out string reason))
             {
                 ServerLog.Info($"Guild: {actor} updated MOTD");
                 BroadcastToGuildOf(actor);
             }
-            else SendSnapshotTo(client);
+            else Refuse(client, reason, "Could not change the message of the day.");
         }
 
-        private static void OnAlliance(ServerClient client, KmhEnvelope env, string newState)
+        internal enum Diplomacy { Propose, Accept, Break, Hostile, ClearHostile }
+
+        // Break also withdraws our proposal or declines theirs; clearing a rival mark touches nothing else.
+        private static void OnAlliance(ServerClient client, KmhEnvelope env, string newState, Diplomacy what)
         {
             string actor      = client?.GetData<UserFile>()?.Username;
             string otherGuild = env?.GetString("other_guild") ?? "";
-            if (GuildStore.SetRelationship(actor, otherGuild, newState))
+            if (GuildStore.SetRelationship(actor, otherGuild, newState, what == Diplomacy.ClearHostile,
+                                           out string reason, out GuildStore.DiplomacyChange change))
             {
-                ServerLog.Info($"Guild: {actor} set relationship with {otherGuild} to {newState}");
+                ServerLog.Info($"Guild: {actor} changed diplomacy with {otherGuild}: {change}");
                 BroadcastToGuildOf(actor);
+                TellOtherGuild(GuildStore.CurrentGuildOf(actor), GuildStore.CanonicalName(otherGuild), change);
             }
-            else SendSnapshotTo(client);
+            else Refuse(client, reason, "Could not change that relationship.");
+        }
+
+        // Leader notices are queued so an offline Owner still sees a proposal; online members' Halls refresh at once.
+        internal static void TellOtherGuild(string mine, string other, GuildStore.DiplomacyChange change)
+        {
+            if (string.IsNullOrEmpty(mine) || string.IsNullOrEmpty(other)) return;
+            string title, body, tone;
+            switch (change)
+            {
+                case GuildStore.DiplomacyChange.Proposed:
+                    title = "Alliance proposed"; tone = "positive";
+                    body = $"'{mine}' proposes an alliance with '{other}'. An Admin or the Owner of '{other}' can accept or decline it under Diplomacy in the Guild Hall."; break;
+                case GuildStore.DiplomacyChange.Allied:
+                    title = "Alliance accepted"; tone = "positive";
+                    body = $"'{mine}' accepted the alliance - '{mine}' and '{other}' are now allied."; break;
+                case GuildStore.DiplomacyChange.Withdrawn:
+                    title = "Alliance proposal withdrawn"; tone = "neutral";
+                    body = $"'{mine}' withdrew its alliance proposal to '{other}'."; break;
+                case GuildStore.DiplomacyChange.Declined:
+                    title = "Alliance proposal declined"; tone = "negative";
+                    body = $"'{mine}' declined the alliance proposal from '{other}'."; break;
+                case GuildStore.DiplomacyChange.Rival:
+                    title = "Marked as a rival"; tone = "negative";
+                    body = $"'{mine}' marked '{other}' as a rival. It is a label only and changes nothing in play."; break;
+                case GuildStore.DiplomacyChange.RivalEndedAlliance:
+                    title = "Alliance ended"; tone = "negative";
+                    body = $"'{mine}' marked '{other}' as a rival, which ended their alliance. Allying again takes a new proposal and its acceptance."; break;
+                case GuildStore.DiplomacyChange.RivalCleared:
+                    title = "Rival mark cleared"; tone = "neutral";
+                    body = $"'{mine}' no longer marks '{other}' as a rival."; break;
+                default:
+                    title = "Alliance ended"; tone = "negative";
+                    body = $"'{mine}' ended its alliance with '{other}'. Allying again takes a new proposal and its acceptance."; break;
+            }
+            foreach (string leader in GuildStore.LeadersOf(other)) Notifications.KmhNotify.ToUser(leader, tone, title, body);
+            List<string> members = GuildStore.MembersOf(other);
+            if (members.Count > 0) BroadcastToGuildOf(members[0]);
         }
 
         private static void OnSaveSettings(ServerClient client, KmhEnvelope env)
@@ -227,25 +319,27 @@ namespace KMHServerAddon.Features.Guilds
             string actor    = client?.GetData<UserFile>()?.Username;
             // The patch mod sends the typed DTO as the data field itself, so there is no wrapper to unpack.
             GuildSettingsDto settings = env?.DataAs<GuildSettingsDto>();
-            if (settings != null && GuildStore.SaveSettings(actor, settings))
+            if (GuildStore.SaveSettings(actor, settings, out string reason))
             {
                 ServerLog.Info($"Guild: {actor} saved settings");
                 BroadcastToGuildOf(actor);
             }
-            else SendSnapshotTo(client);
+            else Refuse(client, reason, "Could not save the guild settings.");
         }
 
         private static void OnInvite(ServerClient client, KmhEnvelope env)
         {
             string actor  = client?.GetData<UserFile>()?.Username;
             string target = env?.GetString("username") ?? "";
+            // Each invite queues a notice under the name, so a name nobody plays under only grew the notice store.
+            if (!Features.Mail.MailHandler.RecipientKnown(target)) { KmhRouter.Notify(client, "negative", "Nobody by that name has played on this server."); return; }
             if (GuildStore.Invite(actor, target, out string gname, out string err, Features.Economy.EconomyContext.FromEnvelope(env)))
             {
                 ServerLog.Info($"Guild: {actor} invited {target} to {gname}");
                 KmhRouter.Notify(client, "positive", $"Invited {target}.");
                 BroadcastToGuildOf(actor);
                 Notifications.KmhNotify.ToUser(target.Trim(), "positive", $"Guild invite: {gname}",
-                    $"{actor} invited you to join '{gname}'. Open the Guild Hall (KMH tab) to accept or decline.");
+                    $"{actor} invited you to join '{gname}'. Open the Guild Hall (Colony Nexus tab) to accept or decline.");
                 SendSnapshotToUsername(target.Trim());
             }
             else KmhRouter.Notify(client, "negative", err ?? "Invite failed.");
@@ -321,12 +415,12 @@ namespace KMHServerAddon.Features.Guilds
             {
                 ServerLog.Info($"Guild: {actor} joined {guildName}");
                 KmhRouter.Notify(client, "positive", $"Joined {guildName}.");
-                BroadcastToGuildOf(actor); // refreshes the joiner + existing members
+                BroadcastToGuildOf(actor);
             }
             else
             {
                 KmhRouter.Notify(client, "negative", err ?? "Could not join that guild.");
-                SendSnapshotTo(client); // refresh the joiner's no-guild view
+                SendSnapshotTo(client);
             }
         }
 
@@ -334,17 +428,17 @@ namespace KMHServerAddon.Features.Guilds
         {
             string actor = client?.GetData<UserFile>()?.Username;
             string name  = env?.GetString("name") ?? "";
-            int    hallTile = env?.GetInt("hall_tile", -1) ?? -1;   // optional hall location at creation
+            int    hallTile = env?.GetInt("hall_tile", -1) ?? -1;
             if (GuildStore.CreateGuildAndJoinAsAdmin(actor, name, out string err, hallTile))
             {
                 ServerLog.Info($"Guild: {actor} created {name}");
                 KmhRouter.Notify(client, "positive", $"Created guild {name}.");
-                BroadcastToGuildOf(actor); // refreshes the creator into their new guild
+                BroadcastToGuildOf(actor);
             }
             else
             {
                 KmhRouter.Notify(client, "negative", err ?? "Could not create that guild.");
-                SendSnapshotTo(client); // keep the creator's no-guild view in sync
+                SendSnapshotTo(client);
             }
         }
 
@@ -373,12 +467,22 @@ namespace KMHServerAddon.Features.Guilds
             KmhRouter.SendTo(client, KmhProtocol.Kind.GuildSnapshot, envelope);
         }
 
+        // The verified sessions a broadcast may reach; a self-test stands in its own.
+        internal static System.Func<IEnumerable<ServerClient>> OnlineForTest;
+
+        private static IEnumerable<ServerClient> Online()
+        {
+            if (OnlineForTest != null) return OnlineForTest();
+            var outp = new List<ServerClient>();
+            foreach (ServerClient c in Network.ServerClients.Keys) if (c != null && c.IsVerified) outp.Add(c);
+            return outp;
+        }
+
         private static void SendSnapshotToUsername(string username)
         {
             if (string.IsNullOrEmpty(username)) return;
-            foreach (ServerClient c in Network.ServerClients.Keys)
+            foreach (ServerClient c in Online())
             {
-                if (c == null || !c.IsVerified) continue;
                 if (string.Equals(c.GetData<UserFile>()?.Username, username, System.StringComparison.OrdinalIgnoreCase))
                 {
                     SendSnapshotTo(c);
@@ -388,7 +492,7 @@ namespace KMHServerAddon.Features.Guilds
         }
 
         // Membership is read after the mutation, so whoever the change added or removed is already accounted for.
-        private static void BroadcastToGuildOf(string actor)
+        internal static void BroadcastToGuildOf(string actor)
         {
             if (string.IsNullOrEmpty(actor)) return;
             GuildSnapshotEnvelope envelope = GuildStore.BuildEnvelopeFor(actor);
@@ -398,13 +502,19 @@ namespace KMHServerAddon.Features.Guilds
                 = new System.Collections.Generic.HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
             foreach (GuildMemberDto m in envelope.Guild.Members) memberSet.Add(m.Username);
 
-            foreach (ServerClient c in Network.ServerClients.Keys)
+            foreach (ServerClient c in Online())
             {
-                if (c == null || !c.IsVerified) continue;
                 string u = c.GetData<UserFile>()?.Username;
                 if (string.IsNullOrEmpty(u) || !memberSet.Contains(u)) continue;
                 SendSnapshotTo(c);
             }
+        }
+
+        // A change to the guild itself rather than one member's action - a donation landing in its vault.
+        internal static void BroadcastToGuild(string guildName)
+        {
+            List<string> members = GuildStore.MembersOf(guildName);
+            if (members.Count > 0) BroadcastToGuildOf(members[0]);
         }
     }
 }

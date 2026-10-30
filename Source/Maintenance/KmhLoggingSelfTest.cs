@@ -124,7 +124,6 @@ namespace KMHServerAddon.Maintenance
 
                 // Past the window the next one passes and carries the count of what it stood in for.
                 bool later = KmhLogThrottle.Allow("probe.key", window, t0 + window.Ticks + 1, out suppressedTotal);
-                // A different key is never suppressed by another key's traffic.
                 bool other = KmhLogThrottle.Allow("probe.other", window, t0 + 1, out _);
 
                 bool ok = first && s0 == 0 && allowed == 0 && later && suppressedTotal == 50 && other;
@@ -135,9 +134,9 @@ namespace KMHServerAddon.Maintenance
 
             Check("Log text: a newline or an escape in a name cannot forge a second line", () =>
             {
-                string hostile = "Taz\r\n[error] fake line[31m injected";
+                string hostile = "Taz\r\n[error] fake line\u001b[31m injected\u0007";
                 string safe = KmhLogText.OneLine(hostile, 400);
-                bool flattened = !safe.Contains("\n") && !safe.Contains("\r") && !safe.Contains("");
+                bool flattened = !safe.Contains("\n") && !safe.Contains("\r") && !safe.Contains("\u001b");
                 // An ordinary Unicode name must survive untouched - sanitising must not mangle real players.
                 string unicode = "Ünïcödé-玩家-🎮";
                 bool kept = KmhLogText.OneLine(unicode, 400) == unicode;
@@ -190,6 +189,38 @@ namespace KMHServerAddon.Maintenance
                                 $"separateBudgets={separate} (a={aBytes}, b={bBytes})");
             });
 
+            // An unrequested upload must write nothing, or each reconnect brings a fresh 10 MB allowance to fill the disk.
+            Check("Remote debug: an upload this server did not ask for writes nothing, and the folder stays bounded", () =>
+            {
+                string user = "selftest_ask_" + Guid.NewGuid().ToString("N").Substring(0, 8);
+                ServerClient c = FakeSession(user), d = FakeSession(user);
+                if (c == null || d == null) return (false, "could not build a probe session");
+                Features.Transport.TransportConfig had = Features.Transport.TransportConfig.Current;
+                string dir = Path.Combine(Path.GetTempPath(), "kmh-dbg-trim-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+                try
+                {
+                    Features.Transport.TransportConfig.ApplyForTest(new Features.Transport.TransportConfig
+                        { Advanced = new Features.Transport.TransportAdvanced { DebugLogging = false } });
+                    bool refused = !KmhClientDebugLog.Receive(c, user, new List<string> { "unasked" }, "s", 1) && !KmhClientDebugLog.HasStateForTest(c);
+                    Features.Transport.TransportConfig.ApplyForTest(new Features.Transport.TransportConfig
+                        { Advanced = new Features.Transport.TransportAdvanced { DebugLogging = true } });
+                    bool taken = KmhClientDebugLog.Receive(d, user, new List<string> { "asked" }, "s", 1) && KmhClientDebugLog.HasStateForTest(d);
+
+                    Directory.CreateDirectory(dir);
+                    string oldest = Path.Combine(dir, "a.txt"), newest = Path.Combine(dir, "b.txt");
+                    File.WriteAllText(oldest, new string('x', 100)); File.SetLastWriteTimeUtc(oldest, DateTime.UtcNow.AddHours(-1));
+                    File.WriteAllText(newest, new string('x', 100));
+                    KmhClientDebugLog.TrimFolder(dir, 150);
+                    bool trimmed = !File.Exists(oldest) && File.Exists(newest);
+                    return (refused && taken && trimmed, $"unaskedRefused={refused} askedTaken={taken} oldestTrimmed={trimmed}");
+                }
+                finally
+                {
+                    Features.Transport.TransportConfig.ApplyForTest(had);
+                    try { Directory.Delete(dir, true); } catch { }
+                }
+            });
+
             Check("Remote debug: a gap in the stream is reported, not silently smoothed over", () =>
             {
                 string user = "selftest_gap_" + Guid.NewGuid().ToString("N").Substring(0, 8);
@@ -200,7 +231,6 @@ namespace KMHServerAddon.Maintenance
                 // 18 and 19 never arrived; a support reader must see that rather than read a hole as continuity.
                 KmhClientDebugLog.AppendForTest(c, user, new List<string> { "chunk 20" }, "sess", 20);
 
-                string path = Path.Combine(KmhDataPaths.DebugDir, "");
                 string found = "";
                 foreach (string f in Directory.GetFiles(KmhDataPaths.DebugDir, user + "_*.txt")) found = f;
                 string text = string.IsNullOrEmpty(found) ? "" : File.ReadAllText(found);

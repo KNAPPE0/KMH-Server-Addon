@@ -9,15 +9,23 @@ namespace KMHServerAddon.Features.Treasury
     internal static class TreasuryStore
     {
         private static readonly object _lock = new object();
+
+        // Fires inside the read, not around the call, so a caller holding another store's lock across it is caught.
+        internal static Action OnGuildSilverReadForTest;
         private static readonly Dictionary<string, TreasurySnapshot> _vaults
             = new Dictionary<string, TreasurySnapshot>(StringComparer.OrdinalIgnoreCase);
 
         public const int MaxTransactionLogEntries = 100;
 
-        public static string PersonalKeyFor(string username)
-            => "_personal:" + (username ?? "").ToLowerInvariant();
+        public const string PersonalPrefix = "_personal:";
 
-        // The inverse, for a listener that only has the key a change was announced under.
+        public static string PersonalKeyFor(string username)
+            => PersonalPrefix + (username ?? "").ToLowerInvariant();
+
+        // Guild vaults are addressed by guild name in the same key space, so a guild call must never land on one.
+        internal static bool IsPersonalKey(string key)
+            => !string.IsNullOrEmpty(key) && key.TrimStart().StartsWith(PersonalPrefix, StringComparison.OrdinalIgnoreCase);
+
         public static string UsernameOfOwnerKey(string ownerKey)
             => string.IsNullOrEmpty(ownerKey) || !ownerKey.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase)
              ? "" : ownerKey.Substring("_personal:".Length);
@@ -31,7 +39,8 @@ namespace KMHServerAddon.Features.Treasury
         // 0 when the guild has no vault yet, since vaults are created lazily on first deposit.
         public static long GetGuildSilver(string guildName)
         {
-            if (string.IsNullOrEmpty(guildName)) return 0;
+            OnGuildSilverReadForTest?.Invoke();
+            if (string.IsNullOrEmpty(guildName) || IsPersonalKey(guildName)) return 0;
             lock (_lock)
             {
                 return _vaults.TryGetValue(guildName, out TreasurySnapshot v) ? v.SilverBalance : 0;
@@ -46,6 +55,15 @@ namespace KMHServerAddon.Features.Treasury
                 Diagnostics.ServerLog.Error($"Treasury: {v.OwnerKey} silver hit the {int.MaxValue:N0} ceiling on {what} - "
                     + "the excess could not be stored. Raise the silver sinks or split the vault.");
             return result;
+        }
+
+        // A credit past the ceiling is refused whole, so the caller's fallback (Recovery) holds it instead of it being destroyed.
+        private static bool PassesCeiling(TreasurySnapshot v, long current, long add, string what)
+        {
+            if (current + add <= int.MaxValue) return false;
+            Diagnostics.ServerLog.Error($"Treasury: {v.OwnerKey} {what} of {add:N0} refused - it would pass the {int.MaxValue:N0} "
+                + "ceiling. Nothing was changed.");
+            return true;
         }
 
         // Item counts take client-claimed quantities, so they wrap even more easily than silver.
@@ -101,22 +119,161 @@ namespace KMHServerAddon.Features.Treasury
             return total;
         }
 
-        // This player's own vault: silver plus the trusted value of both item shapes.
         public static long PersonalVaultValue(string username)
         {
             string key = PersonalKeyFor(username);
+            lock (_lock) return _vaults.TryGetValue(key, out TreasurySnapshot v) ? VaultValueLocked(v) : 0;
+        }
+
+        // A guild vault valued the same way, goods included: what it holds counts toward raids like anything else off-map.
+        public static long GuildVaultValue(string guildName)
+        {
+            if (string.IsNullOrEmpty(guildName) || IsPersonalKey(guildName)) return 0;
+            lock (_lock) return _vaults.TryGetValue(guildName, out TreasurySnapshot v) ? VaultValueLocked(v) : 0;
+        }
+
+        private static long VaultValueLocked(TreasurySnapshot v)
+        {
+            long total = v.SilverBalance;
+            if (v.Items != null)
+                foreach (KeyValuePair<string, int> kv in v.Items)
+                    total += Items.KmhItemSafety.GetTrustedMarketValue((kv.Key ?? "").Split('|')[0]) * kv.Value;
+            if (v.ItemPayloads != null)
+                foreach (Items.KmhThingPayload p in v.ItemPayloads)
+                    total += Items.KmhItemSafety.GetTrustedMarketValue(p?.DefName ?? "") * Math.Max(1, p?.StackCount ?? 1);
+            return total;
+        }
+
+        public static (Dictionary<string, int> Items, List<Items.KmhThingPayload> Payloads) GuildGoodsFor(string guildName)
+        {
+            var items = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            if (string.IsNullOrEmpty(guildName) || IsPersonalKey(guildName)) return (items, new List<Items.KmhThingPayload>());
             lock (_lock)
             {
-                if (!_vaults.TryGetValue(key, out TreasurySnapshot v)) return 0;
-                long total = v.SilverBalance;
-                if (v.Items != null)
-                    foreach (System.Collections.Generic.KeyValuePair<string, int> kv in v.Items)
-                        total += Items.KmhItemSafety.GetTrustedMarketValue((kv.Key ?? "").Split('|')[0]) * kv.Value;
-                if (v.ItemPayloads != null)
-                    foreach (Items.KmhThingPayload p in v.ItemPayloads)
-                        total += Items.KmhItemSafety.GetTrustedMarketValue(p?.DefName ?? "") * System.Math.Max(1, p?.StackCount ?? 1);
-                return total;
+                if (!_vaults.TryGetValue(guildName, out TreasurySnapshot v)) return (items, new List<Items.KmhThingPayload>());
+                if (v.Items != null) foreach (KeyValuePair<string, int> kv in v.Items) if (kv.Value > 0) items[kv.Key] = kv.Value;
+                return (items, GroupForDisplay(v.ItemPayloads));
             }
+        }
+
+        public static int GuildItemCount(string guildName, string itemKey)
+        {
+            if (string.IsNullOrEmpty(guildName) || IsPersonalKey(guildName) || string.IsNullOrEmpty(itemKey)) return 0;
+            lock (_lock)
+                return _vaults.TryGetValue(guildName, out TreasurySnapshot v) && v.Items != null
+                       && v.Items.TryGetValue(itemKey, out int n) ? n : 0;
+        }
+
+        // A member's take from the guild vault, stamped with its row's marker in the same commit, and only from the
+        // incarnation the caller checked: a guild disbanded and re-created meanwhile is somebody else's vault.
+        public static bool WithdrawGuildItemForTxn(string guildName, string identity, string itemKey, int qty,
+                                                   string marker, string actor, string note = "")
+        {
+            if (string.IsNullOrEmpty(guildName) || IsPersonalKey(guildName) || string.IsNullOrEmpty(identity)
+                || string.IsNullOrEmpty(itemKey) || qty <= 0 || string.IsNullOrEmpty(marker)) return false;
+            lock (_lock)
+            {
+                if (!Guilds.GuildIdentity.IsLive(guildName, identity)) return false;
+                if (!_vaults.TryGetValue(guildName, out TreasurySnapshot v)) return false;
+                if (IsAppliedMarkerLocked(v, marker)) return true;
+                if (v.Items == null || !v.Items.TryGetValue(itemKey, out int cur) || cur < qty) return false;
+                TreasurySnapshot before = RollbackPointLocked(guildName);
+                int next = cur - qty;
+                if (next <= 0) v.Items.Remove(itemKey);
+                else           v.Items[itemKey] = next;
+                RecordTransactionLocked(v, actor, TreasuryTransaction.KindWithdraw, qty, itemKey, note);
+                AddMarkerLocked(v, marker);
+                if (!CommitLocked(guildName, before)) return false;
+            }
+            RaiseChanged(guildName, note);
+            return true;
+        }
+
+        // The stacks a take of qty from that displayed row would remove, copied and left in place. The row naming them
+        // is written next, and TakeGuildPayloadsForTxn then removes exactly these or nothing.
+        public static List<Items.KmhThingPayload> PlanGuildPayloadTake(string guildName, string fingerprint, int qty)
+        {
+            if (string.IsNullOrEmpty(guildName) || IsPersonalKey(guildName)) return null;
+            lock (_lock)
+            {
+                if (!_vaults.TryGetValue(guildName, out TreasurySnapshot v)) return null;
+                List<(Items.KmhThingPayload Stack, int Units)> plan = PlanPayloadTakeLocked(v.ItemPayloads, fingerprint, qty);
+                if (plan.Count == 0) return null;
+                var outp = new List<Items.KmhThingPayload>(plan.Count);
+                foreach ((Items.KmhThingPayload stack, int units) in plan) outp.Add(Clone(stack, units));
+                return outp;
+            }
+        }
+
+        // Refused, taking nothing, when the vault no longer matches the plan the row was written for.
+        public static List<Items.KmhThingPayload> TakeGuildPayloadsForTxn(string guildName, string identity, string fingerprint, int qty,
+                                                                         IList<Items.KmhThingPayload> planned, string marker,
+                                                                         string actor, string note = "")
+        {
+            if (string.IsNullOrEmpty(guildName) || IsPersonalKey(guildName) || string.IsNullOrEmpty(identity)
+                || planned == null || planned.Count == 0 || string.IsNullOrEmpty(marker)) return null;
+            var granted = new List<Items.KmhThingPayload>();
+            lock (_lock)
+            {
+                if (!Guilds.GuildIdentity.IsLive(guildName, identity)) return null;
+                if (!_vaults.TryGetValue(guildName, out TreasurySnapshot v) || IsAppliedMarkerLocked(v, marker)) return null;
+                List<(Items.KmhThingPayload Stack, int Units)> plan = PlanPayloadTakeLocked(v.ItemPayloads, fingerprint, qty);
+                if (plan.Count != planned.Count) return null;
+                for (int i = 0; i < plan.Count; i++)
+                    if (planned[i] == null || plan[i].Units != planned[i].StackCount
+                        || !string.Equals(plan[i].Stack.Fingerprint, planned[i].Fingerprint, StringComparison.Ordinal)) return null;
+                TreasurySnapshot before = RollbackPointLocked(guildName);
+                int taken = 0;
+                foreach ((Items.KmhThingPayload stack, int units) in plan)
+                {
+                    if (units >= stack.StackCount) { granted.Add(stack); v.ItemPayloads.Remove(stack); }
+                    else { granted.Add(Clone(stack, units)); stack.StackCount -= units; }
+                    taken += units;
+                }
+                RecordTransactionLocked(v, actor, TreasuryTransaction.KindWithdraw, taken,
+                    Items.KmhItemSafety.DescribeStateForLedger(granted[0]), note);
+                AddMarkerLocked(v, marker);
+                if (!CommitLocked(guildName, before)) return null;
+            }
+            RaiseChanged(guildName, note);
+            return granted;
+        }
+
+        // Goods a guild withdrawal took and could not hand over, back into the vault they came from: once, on the row's
+        // refund marker, and only while that incarnation lives. False when it does not - the caller decides where then.
+        public static bool ReturnGuildGoodsOnce(string guildName, string identity, string marker, IDictionary<string, int> items,
+                                                IEnumerable<Items.KmhThingPayload> payloads, string note)
+        {
+            if (string.IsNullOrEmpty(guildName) || IsPersonalKey(guildName) || string.IsNullOrEmpty(identity)
+                || string.IsNullOrEmpty(marker)) return false;
+            lock (_lock)
+            {
+                if (!Guilds.GuildIdentity.IsLive(guildName, identity)) return false;
+                TreasurySnapshot before = RollbackPointLocked(guildName);
+                TreasurySnapshot v = LiveGuildVaultLocked(guildName, identity, note);
+                if (v == null) return false;
+                if (IsAppliedMarkerLocked(v, marker)) return true;
+                if (items != null)
+                    foreach (KeyValuePair<string, int> kv in items)
+                    {
+                        if (string.IsNullOrEmpty(kv.Key) || kv.Value <= 0) continue;
+                        if (!v.Items.TryGetValue(kv.Key, out int cur)) cur = 0;
+                        v.Items[kv.Key] = AddQty(v, cur, kv.Value, kv.Key, "guild withdrawal returned");
+                        RecordTransactionLocked(v, guildName, TreasuryTransaction.KindDeposit, kv.Value, kv.Key, note);
+                    }
+                if (payloads != null)
+                    foreach (Items.KmhThingPayload p in payloads)
+                    {
+                        if (p == null || !Items.KmhItemSafety.ValidatePayload(p)) continue;
+                        AddPayloadLocked(v, p);
+                        RecordTransactionLocked(v, guildName, TreasuryTransaction.KindDeposit, p.StackCount,
+                            Items.KmhItemSafety.DescribeStateForLedger(p), note);
+                    }
+                AddMarkerLocked(v, marker);
+                if (!CommitLocked(guildName, before)) return false;
+            }
+            RaiseChanged(guildName, note);
+            return true;
         }
 
         public static (long silver, int itemStacks, int pending) PersonalSummary(string username)
@@ -129,14 +286,30 @@ namespace KMHServerAddon.Features.Treasury
             }
         }
 
-        // The contributor is recorded in the log, but the vault itself belongs to the guild.
-        public static bool DepositGuildSilver(string guildName, int amount, string contributorUsername, string note = "")
+        // Putting silver BACK after a failed withdrawal: the vault is already debited and there is no
+        // guild-side recovery hold, so a compensation that cannot be written destroys the silver outright.
+        public static bool ReturnGuildSilver(string guildName, int amount, string actor, string note)
         {
-            if (string.IsNullOrEmpty(guildName) || amount <= 0) return false;
+            if (DepositGuildSilver(guildName, amount, actor, note)) return true;
+            // Disbanded meanwhile, its vault already handed out: held for an admin rather than rebuilding the vault.
+            if (amount > 0 && !Guilds.GuildIdentity.IsLive(guildName))
+                return Recovery.RecoveryStore.HoldSilver(actor, amount, note, $"guild '{guildName}' disbanded before this could be returned to its vault") > 0;
+            Diagnostics.ServerLog.Error(
+                $"Treasury: {amount} silver could not be returned to guild '{guildName}' after a failed "
+                + $"withdrawal by {actor} ({note}). Value moves are refused until persistence recovers.");
+            Maintenance.KmhMaintenanceGate.SetPersistenceDegraded(true);
+            return false;
+        }
+
+        public static bool DepositGuildSilver(string guildName, int amount, string contributorUsername, string note = "", string identity = null)
+        {
+            if (string.IsNullOrEmpty(guildName) || IsPersonalKey(guildName) || amount <= 0) return false;
             lock (_lock)
             {
                 TreasurySnapshot before = RollbackPointLocked(guildName);
-                TreasurySnapshot v = GetOrCreateLocked(guildName, isGuildOwned: true);
+                TreasurySnapshot v = LiveGuildVaultLocked(guildName, identity, note);
+                if (v == null) return false;
+                if (PassesCeiling(v, v.SilverBalance, amount, "guild deposit")) return false;
                 v.SilverBalance     = AddSilver(v, amount, "guild deposit");
                 v.LifetimeSilverIn += amount;
                 RecordTransactionLocked(v, contributorUsername, TreasuryTransaction.KindDeposit, amount, "", note);
@@ -148,20 +321,21 @@ namespace KMHServerAddon.Features.Treasury
 
         // Marker written in the SAME commit as the balance, so a settlement replayed after a crash cannot pay the guild twice.
         public static bool DepositGuildSilverOnce(string guildName, string marker, int amount,
-                                                  string contributorUsername, string note = "")
+                                                  string contributorUsername, string note = "", string identity = null)
         {
-            if (string.IsNullOrEmpty(marker)) return DepositGuildSilver(guildName, amount, contributorUsername, note);
-            if (string.IsNullOrEmpty(guildName) || amount <= 0) return false;
+            if (string.IsNullOrEmpty(marker)) return DepositGuildSilver(guildName, amount, contributorUsername, note, identity);
+            if (string.IsNullOrEmpty(guildName) || IsPersonalKey(guildName) || amount <= 0) return false;
             lock (_lock)
             {
                 TreasurySnapshot before = RollbackPointLocked(guildName);
-                TreasurySnapshot v = GetOrCreateLocked(guildName, isGuildOwned: true);
-                if (IsKnownTxnLocked(v, marker)) return true;
+                TreasurySnapshot v = LiveGuildVaultLocked(guildName, identity, note);
+                if (v == null) return false;
+                if (IsAppliedMarkerLocked(v, marker)) return true;
+                if (PassesCeiling(v, v.SilverBalance, amount, "guild deposit")) return false;
                 v.SilverBalance     = AddSilver(v, amount, "guild deposit");
                 v.LifetimeSilverIn += amount;
                 RecordTransactionLocked(v, contributorUsername, TreasuryTransaction.KindDeposit, amount, "", note);
-                v.RecentCommittedTxns.Add(marker);
-                while (v.RecentCommittedTxns.Count > MaxRecentCommittedTxns) v.RecentCommittedTxns.RemoveAt(0);
+                AddMarkerLocked(v, marker);
                 if (!CommitLocked(guildName, before)) return false;
             }
             Extensibility.KmhEventBus.Instance.RaiseTreasuryChanged(new KMH.Sdk.Server.Events.TreasuryChangedEvent { OwnerKey = guildName, IsGuildOwned = true, Reason = note ?? "" });
@@ -170,7 +344,7 @@ namespace KMHServerAddon.Features.Treasury
 
         public static bool WithdrawGuildSilver(string guildName, int amount, string actorUsername, string note = "")
         {
-            if (string.IsNullOrEmpty(guildName) || amount <= 0) return false;
+            if (string.IsNullOrEmpty(guildName) || IsPersonalKey(guildName) || amount <= 0) return false;
             lock (_lock)
             {
                 if (!_vaults.TryGetValue(guildName, out TreasurySnapshot v) || v.SilverBalance < amount) return false;
@@ -182,6 +356,79 @@ namespace KMHServerAddon.Features.Treasury
             }
             Extensibility.KmhEventBus.Instance.RaiseTreasuryChanged(new KMH.Sdk.Server.Events.TreasuryChangedEvent { OwnerKey = guildName, IsGuildOwned = true, Reason = note ?? "" });
             return true;
+        }
+
+        // A member's guild withdrawal in ONE commit: the vault's debit and the member's credit land together or not at
+        // all, so a crash leaves the silver in the vault or with the member - never with neither.
+        public static bool TransferGuildToMember(string guildName, string identity, string member, int amount, string note)
+        {
+            if (string.IsNullOrEmpty(guildName) || IsPersonalKey(guildName) || string.IsNullOrEmpty(member) || amount <= 0) return false;
+            string toKey = PersonalKeyFor(member);
+            lock (_lock)
+            {
+                if (!Guilds.GuildIdentity.IsLive(guildName, identity)) return false;
+                if (!_vaults.TryGetValue(guildName, out TreasurySnapshot gv) || gv.SilverBalance < amount) return false;
+                TreasurySnapshot before = RollbackPointLocked(guildName);
+                var others = new Dictionary<string, TreasurySnapshot> { { toKey, RollbackPointLocked(toKey) } };
+                TreasurySnapshot pv = GetOrCreateLocked(toKey, isGuildOwned: false);
+                if (PassesCeiling(pv, pv.SilverBalance, amount, "guild withdrawal"))
+                {
+                    if (others[toKey] == null) _vaults.Remove(toKey);
+                    return false;
+                }
+                gv.SilverBalance     -= amount;
+                gv.LifetimeSilverOut += amount;
+                RecordTransactionLocked(gv, member, TreasuryTransaction.KindWithdraw, amount, "", note);
+                pv.SilverBalance     = AddSilver(pv, amount, "guild withdrawal");
+                pv.LifetimeSilverIn += amount;
+                RecordTransactionLocked(pv, member, TreasuryTransaction.KindDeposit, amount, "", note);
+                if (!CommitLocked(guildName, before, others)) return false;
+            }
+            RaiseChanged(guildName, note);
+            RaiseChanged(toKey, note);
+            return true;
+        }
+
+        // The marker lands in the same commit as the balance, so an escrow replayed after a crash takes the silver once;
+        // with an identity, the debit lands only while that incarnation holds the name, never on whoever took it next.
+        public static bool WithdrawGuildSilverOnce(string guildName, string marker, int amount,
+                                                   string actorUsername, string note = "", string identity = null)
+        {
+            if (string.IsNullOrEmpty(marker)) return WithdrawGuildSilver(guildName, amount, actorUsername, note);
+            if (string.IsNullOrEmpty(guildName) || IsPersonalKey(guildName) || amount <= 0) return false;
+            lock (_lock)
+            {
+                if (identity != null && !Guilds.GuildIdentity.IsLive(guildName, identity)) return false;
+                if (!_vaults.TryGetValue(guildName, out TreasurySnapshot v)) return false;
+                if (IsAppliedMarkerLocked(v, marker)) return true;
+                if (v.SilverBalance < amount) return false;
+                TreasurySnapshot before = RollbackPointLocked(guildName);
+                v.SilverBalance     -= amount;
+                v.LifetimeSilverOut += amount;
+                RecordTransactionLocked(v, actorUsername, TreasuryTransaction.KindWithdraw, amount, "", note);
+                AddMarkerLocked(v, marker);
+                if (!CommitLocked(guildName, before)) return false;
+            }
+            Extensibility.KmhEventBus.Instance.RaiseTreasuryChanged(new KMH.Sdk.Server.Events.TreasuryChangedEvent { OwnerKey = guildName, IsGuildOwned = true, Reason = note ?? "" });
+            return true;
+        }
+
+        // Like KnowsTxnMarker, valid inside the capped recovery window only, never as permanent history.
+        public static bool KnowsGuildTxnMarker(string guildName, string marker)
+        {
+            if (string.IsNullOrEmpty(guildName) || IsPersonalKey(guildName) || string.IsNullOrEmpty(marker)) return false;
+            lock (_lock)
+                return _vaults.TryGetValue(guildName, out TreasurySnapshot v) && IsAppliedMarkerLocked(v, marker);
+        }
+
+        // A guild vault is credited only while that guild lives as the incarnation the caller expects. Checked under _lock
+        // (GuildIdentity takes none), so a credit racing a disband either lands before the hand-back or is refused.
+        private static TreasurySnapshot LiveGuildVaultLocked(string guildName, string identity, string note)
+        {
+            if (Guilds.GuildIdentity.IsLive(guildName, identity)) return GetOrCreateLocked(guildName, isGuildOwned: true);
+            Diagnostics.ServerLog.Warn($"Treasury: refused a credit to guild '{guildName}' ({note}) - "
+                + (Guilds.GuildIdentity.IsLive(guildName) ? "that name now belongs to a different guild." : "it no longer exists."));
+            return null;
         }
 
         private static TreasurySnapshot GetOrCreateLocked(string ownerKey, bool isGuildOwned)
@@ -243,12 +490,56 @@ namespace KMHServerAddon.Features.Treasury
             {
                 TreasurySnapshot before = RollbackPointLocked(ownerKey);
                 TreasurySnapshot v = GetOrCreateLocked(ownerKey, ownerKey.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase) == false);
+                if (PassesCeiling(v, v.SilverBalance, amount, "deposit")) return false;
                 v.SilverBalance     = AddSilver(v, amount, "deposit");
                 v.LifetimeSilverIn  += amount;
                 RecordTransactionLocked(v, username, TreasuryTransaction.KindDeposit, amount, "", note);
                 if (!CommitLocked(ownerKey, before)) return false;
             }
-            Extensibility.KmhEventBus.Instance.RaiseTreasuryChanged(new KMH.Sdk.Server.Events.TreasuryChangedEvent { OwnerKey = ownerKey, IsGuildOwned = !ownerKey.StartsWith("_personal:", System.StringComparison.OrdinalIgnoreCase), Reason = note ?? "" });
+            RaiseChanged(ownerKey, note);
+            return true;
+        }
+
+        // A deposit whose fee goes to the house pool: the net credit and the owed fee are one commit, then the fee is settled.
+        public static bool DepositSilverOwingFee(string username, int net, int fee, string note = "")
+        {
+            if (string.IsNullOrEmpty(username) || net <= 0 || fee < 0) return false;
+            string ownerKey = PersonalKeyFor(username);
+            string marker = null;
+            lock (_lock)
+            {
+                TreasurySnapshot before = RollbackPointLocked(ownerKey);
+                TreasurySnapshot v = GetOrCreateLocked(ownerKey, isGuildOwned: false);
+                if (PassesCeiling(v, v.SilverBalance, net, "deposit")) return false;
+                v.SilverBalance     = AddSilver(v, net, "deposit");
+                v.LifetimeSilverIn += net;
+                RecordTransactionLocked(v, username, TreasuryTransaction.KindDeposit, net, "", note);
+                marker = OweFeeLocked(FeeMarkerFor(ownerKey, Guid.NewGuid().ToString("N")), fee, username, $"treasury deposit fee ({username})");
+                if (!CommitLocked(ownerKey, before)) { ForgetFeesLocked(new List<string> { marker }); return false; }
+            }
+            RaiseChanged(ownerKey, note);
+            if (marker != null) SettleOwedFees(new[] { marker });
+            return true;
+        }
+
+        // A fee charged from a player's own vault for the house pool (the access fee): debit and owed fee in one commit.
+        public static bool ChargeHouseFee(string username, int fee, string note)
+        {
+            if (string.IsNullOrEmpty(username) || fee <= 0) return false;
+            string ownerKey = PersonalKeyFor(username);
+            string marker;
+            lock (_lock)
+            {
+                if (!_vaults.TryGetValue(ownerKey, out TreasurySnapshot v) || v.SilverBalance < fee) return false;
+                TreasurySnapshot before = RollbackPointLocked(ownerKey);
+                v.SilverBalance     -= fee;
+                v.LifetimeSilverOut += fee;
+                RecordTransactionLocked(v, username, TreasuryTransaction.KindWithdraw, fee, "", note);
+                marker = OweFeeLocked(FeeMarkerFor(ownerKey, Guid.NewGuid().ToString("N")), fee, username, $"{note} ({username})");
+                if (!CommitLocked(ownerKey, before)) { ForgetFeesLocked(new List<string> { marker }); return false; }
+            }
+            RaiseChanged(ownerKey, note);
+            SettleOwedFees(new[] { marker });
             return true;
         }
 
@@ -266,19 +557,26 @@ namespace KMHServerAddon.Features.Treasury
                 RecordTransactionLocked(v, username, TreasuryTransaction.KindWithdraw, amount, "", note);
                 if (!CommitLocked(ownerKey, before)) return false;
             }
-            Extensibility.KmhEventBus.Instance.RaiseTreasuryChanged(new KMH.Sdk.Server.Events.TreasuryChangedEvent { OwnerKey = ownerKey, IsGuildOwned = !ownerKey.StartsWith("_personal:", System.StringComparison.OrdinalIgnoreCase), Reason = note ?? "" });
+            RaiseChanged(ownerKey, note);
             return true;
         }
 
         public static bool DepositItem(string username, string itemDefName, int qty, string note = "")
         {
             if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(itemDefName) || qty <= 0) return false;
+            // A composed key is def|stuff|quality; every key is written to Treasury.json on every commit, for every player.
+            if (itemDefName.Length > 2 * Util.KmhSafe.MaxDefLength + 8) return false;
             string ownerKey = ResolveOwnerKeyFor(username);
             lock (_lock)
             {
                 TreasurySnapshot before = RollbackPointLocked(ownerKey);
                 TreasurySnapshot v = GetOrCreateLocked(ownerKey, ownerKey.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase) == false);
-                if (!v.Items.TryGetValue(itemDefName, out int cur)) cur = 0;
+                if (!v.Items.TryGetValue(itemDefName, out int cur))
+                {
+                    if (v.Items.Count >= MaxItemKeysPerVault) return false;
+                    cur = 0;
+                }
+                if (PassesCeiling(v, cur, qty, $"'{itemDefName}' deposit")) return false;
                 v.Items[itemDefName] = AddQty(v, cur, qty, itemDefName, "item deposit");
                 RecordTransactionLocked(v, username, TreasuryTransaction.KindDeposit, qty, itemDefName, note);
                 if (!CommitLocked(ownerKey, before)) return false;
@@ -290,19 +588,55 @@ namespace KMHServerAddon.Features.Treasury
                 Guilds.GuildStore.AddItemsContributed(ownerKey, username, qty);
                 Guilds.Contributions.KmhGuildContributionLedger.RecordItem(ownerKey, username, contributed, $"{qty}x {itemDefName}");
             }
-            Extensibility.KmhEventBus.Instance.RaiseTreasuryChanged(new KMH.Sdk.Server.Events.TreasuryChangedEvent { OwnerKey = ownerKey, IsGuildOwned = !ownerKey.StartsWith("_personal:", System.StringComparison.OrdinalIgnoreCase), Reason = note ?? "" });
+            RaiseChanged(ownerKey, note);
             return true;
         }
 
-        // Records no contribution, or a member could farm standing simply by owning a productive guild site.
-        public static bool DepositGuildItem(string guildName, string itemDefName, int qty, string note = "")
+        // A reward minted on this server, once per marker: a retry after a crash finds the marker and adds nothing.
+        public static bool DepositGuildItemOnce(string guildName, string itemDefName, int qty, string marker, string note = "", string identity = null)
         {
-            if (string.IsNullOrEmpty(guildName) || string.IsNullOrEmpty(itemDefName) || qty <= 0) return false;
+            if (string.IsNullOrEmpty(guildName) || IsPersonalKey(guildName) || string.IsNullOrEmpty(itemDefName)
+                || qty <= 0 || string.IsNullOrEmpty(marker)) return false;
             lock (_lock)
             {
                 TreasurySnapshot before = RollbackPointLocked(guildName);
-                TreasurySnapshot v = GetOrCreateLocked(guildName, isGuildOwned: true);
+                TreasurySnapshot v = LiveGuildVaultLocked(guildName, identity, note);
+                if (v == null) return false;
+                if (IsAppliedMarkerLocked(v, marker)) return true;
+                if (!v.Items.TryGetValue(itemDefName, out int cur))
+                {
+                    if (v.Items.Count >= MaxItemKeysPerVault) return false;
+                    cur = 0;
+                }
+                if (PassesCeiling(v, cur, qty, $"'{itemDefName}' reward")) return false;
+                v.Items[itemDefName] = AddQty(v, cur, qty, itemDefName, "reward");
+                RecordTransactionLocked(v, guildName, TreasuryTransaction.KindDeposit, qty, itemDefName, note);
+                AddMarkerLocked(v, marker);
+                if (!CommitLocked(guildName, before)) return false;
+            }
+            Extensibility.KmhEventBus.Instance.RaiseTreasuryChanged(new KMH.Sdk.Server.Events.TreasuryChangedEvent
+            { OwnerKey = guildName, IsGuildOwned = true, Reason = note ?? "" });
+            return true;
+        }
+
+        public static bool HasGuildMarker(string guildName, string marker)
+        {
+            if (string.IsNullOrEmpty(guildName) || string.IsNullOrEmpty(marker)) return false;
+            lock (_lock)
+                return _vaults.TryGetValue(guildName, out TreasurySnapshot v) && v != null && IsAppliedMarkerLocked(v, marker);
+        }
+
+        // Records no contribution, or a member could farm standing simply by owning a productive guild site.
+        public static bool DepositGuildItem(string guildName, string itemDefName, int qty, string note = "", string identity = null)
+        {
+            if (string.IsNullOrEmpty(guildName) || IsPersonalKey(guildName) || string.IsNullOrEmpty(itemDefName) || qty <= 0) return false;
+            lock (_lock)
+            {
+                TreasurySnapshot before = RollbackPointLocked(guildName);
+                TreasurySnapshot v = LiveGuildVaultLocked(guildName, identity, note);
+                if (v == null) return false;
                 if (!v.Items.TryGetValue(itemDefName, out int cur)) cur = 0;
+                if (PassesCeiling(v, cur, qty, $"'{itemDefName}' guild income")) return false;
                 v.Items[itemDefName] = AddQty(v, cur, qty, itemDefName, "guild income");
                 RecordTransactionLocked(v, guildName, TreasuryTransaction.KindDeposit, qty, itemDefName, note);
                 if (!CommitLocked(guildName, before)) return false;
@@ -327,11 +661,11 @@ namespace KMHServerAddon.Features.Treasury
                 RecordTransactionLocked(v, username, TreasuryTransaction.KindWithdraw, qty, itemDefName, note);
                 if (!CommitLocked(ownerKey, before)) return false;
             }
-            Extensibility.KmhEventBus.Instance.RaiseTreasuryChanged(new KMH.Sdk.Server.Events.TreasuryChangedEvent { OwnerKey = ownerKey, IsGuildOwned = !ownerKey.StartsWith("_personal:", System.StringComparison.OrdinalIgnoreCase), Reason = note ?? "" });
+            RaiseChanged(ownerKey, note);
             return true;
         }
 
-        // Item form of WithdrawSilverForTxn: the marker lands in the same commit as the stack, so recovery never refunds goods still in the vault.
+        // The marker lands in the same commit as the stack, so recovery never refunds goods still in the vault.
         public static bool WithdrawItemForTxn(string username, string itemDefName, int qty, string marker, string note = "")
         {
             if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(itemDefName) || qty <= 0
@@ -341,14 +675,13 @@ namespace KMHServerAddon.Features.Treasury
             {
                 TreasurySnapshot before = RollbackPointLocked(ownerKey);
                 TreasurySnapshot v = GetOrCreateLocked(ownerKey, !ownerKey.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase));
-                if (IsKnownTxnLocked(v, marker)) return true;
+                if (IsAppliedMarkerLocked(v, marker)) return true;
                 if (!v.Items.TryGetValue(itemDefName, out int cur) || cur < qty) return false;
                 int next = cur - qty;
                 if (next <= 0) v.Items.Remove(itemDefName);
                 else           v.Items[itemDefName] = next;
                 RecordTransactionLocked(v, username, TreasuryTransaction.KindWithdraw, qty, itemDefName, note);
-                v.RecentCommittedTxns.Add(marker);
-                while (v.RecentCommittedTxns.Count > MaxRecentCommittedTxns) v.RecentCommittedTxns.RemoveAt(0);
+                AddMarkerLocked(v, marker);
                 if (!CommitLocked(ownerKey, before)) return false;
             }
             RaiseChanged(ownerKey, note);
@@ -363,7 +696,7 @@ namespace KMHServerAddon.Features.Treasury
             if (string.IsNullOrEmpty(marker)) return null;
             string ownerKey = ResolveOwnerKeyFor(username);
             lock (_lock)
-                if (_vaults.TryGetValue(ownerKey, out TreasurySnapshot known) && IsKnownTxnLocked(known, marker))
+                if (_vaults.TryGetValue(ownerKey, out TreasurySnapshot known) && IsAppliedMarkerLocked(known, marker))
                     return null;
             return WithdrawPayloadsInternal(username, fingerprint, qty, marker, note, refundMarker);
         }
@@ -377,13 +710,12 @@ namespace KMHServerAddon.Features.Treasury
             {
                 TreasurySnapshot before = RollbackPointLocked(ownerKey);
                 TreasurySnapshot v = GetOrCreateLocked(ownerKey, !ownerKey.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase));
-                if (IsKnownTxnLocked(v, marker)) return true;
+                if (IsAppliedMarkerLocked(v, marker)) return true;
                 if (v.SilverBalance < amount) return false;
                 v.SilverBalance     -= amount;
                 v.LifetimeSilverOut += amount;
                 RecordTransactionLocked(v, username, TreasuryTransaction.KindWithdraw, amount, "", note);
-                v.RecentCommittedTxns.Add(marker);
-                while (v.RecentCommittedTxns.Count > MaxRecentCommittedTxns) v.RecentCommittedTxns.RemoveAt(0);
+                AddMarkerLocked(v, marker);
                 if (!CommitLocked(ownerKey, before)) return false;
             }
             RaiseChanged(ownerKey, note);
@@ -396,7 +728,7 @@ namespace KMHServerAddon.Features.Treasury
             if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(marker)) return false;
             string ownerKey = ResolveOwnerKeyFor(username);
             lock (_lock)
-                return _vaults.TryGetValue(ownerKey, out TreasurySnapshot v) && IsKnownTxnLocked(v, marker);
+                return _vaults.TryGetValue(ownerKey, out TreasurySnapshot v) && IsAppliedMarkerLocked(v, marker);
         }
 
         // Dedup marker written in the SAME commit as the balance, so a replayed compensation cannot pay twice or half-apply.
@@ -410,7 +742,7 @@ namespace KMHServerAddon.Features.Treasury
             {
                 TreasurySnapshot before = RollbackPointLocked(ownerKey);
                 TreasurySnapshot v = GetOrCreateLocked(ownerKey, !ownerKey.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase));
-                if (IsKnownTxnLocked(v, txnId)) return true;
+                if (IsAppliedMarkerLocked(v, txnId)) return true;
 
                 if (silver > 0)
                 {
@@ -436,8 +768,7 @@ namespace KMHServerAddon.Features.Treasury
                             Items.KmhItemSafety.DescribeStateForLedger(p), note);
                     }
 
-                v.RecentCommittedTxns.Add(txnId);
-                while (v.RecentCommittedTxns.Count > MaxRecentCommittedTxns) v.RecentCommittedTxns.RemoveAt(0);
+                AddMarkerLocked(v, txnId);
                 if (!CommitLocked(ownerKey, before)) return false;
             }
             RaiseChanged(ownerKey, note);
@@ -478,28 +809,11 @@ namespace KMHServerAddon.Features.Treasury
             {
                 TreasurySnapshot before = RollbackPointLocked(ownerKey);
                 TreasurySnapshot v = GetOrCreateLocked(ownerKey, !ownerKey.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase));
-                int remaining = qty;
 
-                // One displayed row represents every stack that looks alike, so the withdraw drains the whole group.
-                string wantGroup = null;
-                foreach (Items.KmhThingPayload e in v.ItemPayloads)
-                    if (string.Equals(e.Fingerprint, fingerprint, StringComparison.Ordinal))
-                    { wantGroup = Items.KmhItemSafety.DisplayKey(e); break; }
-
-                foreach (Items.KmhThingPayload e in new List<Items.KmhThingPayload>(v.ItemPayloads))
+                foreach ((Items.KmhThingPayload e, int units) in PlanPayloadTakeLocked(v.ItemPayloads, fingerprint, qty))
                 {
-                    if (remaining <= 0) break;
-                    bool sameRow   = string.Equals(e.Fingerprint, fingerprint, StringComparison.Ordinal);
-                    bool sameGroup = wantGroup != null && Items.KmhItemSafety.DisplayKey(e) == wantGroup;
-                    if (!sameRow && !sameGroup) continue;
-
-                    switch (Items.KmhItemService.PlanTake(e.StackCount, remaining, Items.KmhPayloadEscrow.IsSplittable(e)))
-                    {
-                        case Items.KmhItemService.TakeKind.Whole:
-                            granted.Add(e); v.ItemPayloads.Remove(e); remaining -= e.StackCount; break;
-                        case Items.KmhItemService.TakeKind.Split:
-                            granted.Add(Clone(e, remaining)); e.StackCount -= remaining; remaining = 0; break;
-                    }
+                    if (units >= e.StackCount) { granted.Add(e); v.ItemPayloads.Remove(e); }
+                    else { granted.Add(Clone(e, units)); e.StackCount -= units; }
                 }
                 if (granted.Count == 0) return null;
                 int taken = 0; foreach (var g in granted) taken += g.StackCount;
@@ -507,8 +821,7 @@ namespace KMHServerAddon.Features.Treasury
                     Items.KmhItemSafety.DescribeStateForLedger(granted[0]), note);
                 if (!string.IsNullOrEmpty(marker))
                 {
-                    v.RecentCommittedTxns.Add(marker);
-                    while (v.RecentCommittedTxns.Count > MaxRecentCommittedTxns) v.RecentCommittedTxns.RemoveAt(0);
+                    AddMarkerLocked(v, marker);
 
                     // Written in THIS commit: until the caller's transaction row lands, this entry is the only record of what left.
                     if (!string.IsNullOrEmpty(refundMarker))
@@ -528,6 +841,35 @@ namespace KMHServerAddon.Features.Treasury
             return granted;
         }
 
+        // One displayed row is one exact state, so a take drains only stacks identical to the one the row names.
+        private static List<(Items.KmhThingPayload Stack, int Units)> PlanPayloadTakeLocked(List<Items.KmhThingPayload> stacks,
+                                                                                         string fingerprint, int qty)
+        {
+            var plan = new List<(Items.KmhThingPayload, int)>();
+            if (stacks == null || string.IsNullOrEmpty(fingerprint) || qty <= 0) return plan;
+            string wantGroup = null;
+            foreach (Items.KmhThingPayload e in stacks)
+                if (e != null && string.Equals(e.Fingerprint, fingerprint, StringComparison.Ordinal))
+                { wantGroup = Items.KmhItemSafety.DisplayKey(e); break; }
+            if (wantGroup == null) return plan;
+
+            int remaining = qty;
+            foreach (Items.KmhThingPayload e in stacks)
+            {
+                if (remaining <= 0) break;
+                if (e == null) continue;
+                // By content, never the stored fingerprint alone: a client-chosen duplicate must not pull a different item in.
+                if (Items.KmhItemSafety.DisplayKey(e) != wantGroup) continue;
+
+                switch (Items.KmhItemService.PlanTake(e.StackCount, remaining, Items.KmhPayloadEscrow.IsSplittable(e)))
+                {
+                    case Items.KmhItemService.TakeKind.Whole: plan.Add((e, e.StackCount)); remaining -= e.StackCount; break;
+                    case Items.KmhItemService.TakeKind.Split: plan.Add((e, remaining)); remaining = 0; break;
+                }
+            }
+            return plan;
+        }
+
         // Safe to fail: a durable row now names the take, so recovery sees the value accounted for and drops the entry without paying.
         public static bool ClearPendingTake(string username, string takeMarker)
         {
@@ -536,11 +878,14 @@ namespace KMHServerAddon.Features.Treasury
             lock (_lock)
             {
                 if (!_vaults.TryGetValue(ownerKey, out TreasurySnapshot v)) return true;
-                TreasurySnapshot before = RollbackPointLocked(ownerKey);
                 int removed = v.PendingTakes.RemoveAll(
                     p => p != null && string.Equals(p.TakeMarker, takeMarker, StringComparison.Ordinal));
                 if (removed == 0) return true;
-                return CommitLocked(ownerKey, before);
+                // Kept cleared if this save fails: the row naming the take is already written, and a take rolled back to
+                // pending once outlived its pruned row, so boot handed the goods back a second time.
+                if (!SaveToDisk())
+                    Diagnostics.ServerLog.Warn($"Treasury: cleared take {takeMarker} for {ownerKey} in memory only - written by the save retry.");
+                return true;
             }
         }
 
@@ -575,6 +920,30 @@ namespace KMHServerAddon.Features.Treasury
             return all;
         }
 
+        // What a fingerprint withdrawal would really take, for the veto hook, which was told the name the client sent.
+        internal static string PayloadDefOf(string username, string fingerprint)
+        {
+            if (string.IsNullOrEmpty(fingerprint)) return null;
+            string ownerKey = ResolveOwnerKeyFor(username);
+            lock (_lock)
+            {
+                if (!_vaults.TryGetValue(ownerKey, out TreasurySnapshot v) || v.ItemPayloads == null) return null;
+                foreach (Items.KmhThingPayload p in v.ItemPayloads)
+                    if (p != null && string.Equals(p.Fingerprint, fingerprint, StringComparison.Ordinal)) return p.DefName;
+                return null;
+            }
+        }
+
+        // The on-disk view: the wire snapshot strips every blob, so it cannot tell a kept deep state from a destroyed one.
+        internal static List<Items.KmhThingPayload> StoredPayloadsForTest(string username)
+        {
+            string ownerKey = ResolveOwnerKeyFor(username);
+            lock (_lock)
+                return _vaults.TryGetValue(ownerKey, out TreasurySnapshot v) && v.ItemPayloads != null
+                     ? new List<Items.KmhThingPayload>(v.ItemPayloads)
+                     : new List<Items.KmhThingPayload>();
+        }
+
         private static List<Items.KmhThingPayload> StripBlobs(List<Items.KmhThingPayload> src)
         {
             List<Items.KmhThingPayload> outList = new List<Items.KmhThingPayload>();
@@ -584,7 +953,7 @@ namespace KMHServerAddon.Features.Treasury
             return outList;
         }
 
-        // Display only: a modded stack's fingerprint includes its blob, so identical-looking stacks would each be a row.
+        // Display only: stacks of one exact state share a row; two saved states never do, or a take would drain both.
         internal static List<Items.KmhThingPayload> GroupForDisplay(List<Items.KmhThingPayload> src)
         {
             var outList = new List<Items.KmhThingPayload>();
@@ -612,11 +981,14 @@ namespace KMHServerAddon.Features.Treasury
             if (src == null) return outList;
             foreach (Dto.PendingDeposit d in src)
             {
+                // Only the blobs go: a committed record that lost its fee could not give that fee back on a reversal.
                 outList.Add(new Dto.PendingDeposit
                 {
-                    TxnId = d.TxnId, Username = d.Username, CreatedUtcTicks = d.CreatedUtcTicks, State = d.State,
-                    Kind = d.Kind, Silver = d.Silver, ItemDefName = d.ItemDefName, Qty = d.Qty, Note = d.Note,
-                    GuildName = d.GuildName, Payloads = StripBlobs(d.Payloads),
+                    TxnId = d.TxnId, Username = d.Username, CreatedUtcTicks = d.CreatedUtcTicks, CommittedUtcTicks = d.CommittedUtcTicks,
+                    State = d.State, Kind = d.Kind, Silver = d.Silver, ItemDefName = d.ItemDefName, Qty = d.Qty, Note = d.Note,
+                    SaveGenAtOpen = d.SaveGenAtOpen, Fee = d.Fee, GuildName = d.GuildName, GuildIdentity = d.GuildIdentity,
+                    LedgerId = d.LedgerId, ConfirmedGeneration = d.ConfirmedGeneration,
+                    Payloads = StripBlobs(d.Payloads),
                 });
             }
             return outList;
@@ -640,7 +1012,6 @@ namespace KMHServerAddon.Features.Treasury
             v.ItemPayloads.Add(payload);
         }
 
-        // Idempotent, and skips the save entirely when nothing merged.
         public static int CompactFungiblePayloads()
         {
             List<string> changedKeys = new List<string>();
@@ -676,9 +1047,10 @@ namespace KMHServerAddon.Features.Treasury
             return totalMerged;
         }
 
-        // Empty when nothing qualifies.
+        // With a marker the take is stamped and held as a pending take in the same commit, like WithdrawPayloadsForTxn.
         public static List<Items.KmhThingPayload> TryWithdrawMatchingPayloads(string username, string defName,
-            string requiredStuff, int minQuality, bool allowTainted, bool allowDamaged, int qty, string note)
+            string requiredStuff, int minQuality, bool allowTainted, bool allowDamaged, int qty, string note,
+            string marker = null, string refundMarker = null)
         {
             List<Items.KmhThingPayload> granted = new List<Items.KmhThingPayload>();
             if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(defName) || qty <= 0) return granted;
@@ -709,6 +1081,17 @@ namespace KMHServerAddon.Features.Treasury
                     int taken = 0; foreach (var g in granted) taken += g.StackCount;
                     RecordTransactionLocked(v, username, TreasuryTransaction.KindWithdraw, taken,
                         Items.KmhItemSafety.DescribeStateForLedger(granted[0]), note);
+                    if (!string.IsNullOrEmpty(marker))
+                    {
+                        AddMarkerLocked(v, marker);
+                        if (!string.IsNullOrEmpty(refundMarker))
+                            v.PendingTakes.Add(new Dto.PendingTake
+                            {
+                                TakeMarker = marker, RefundMarker = refundMarker, Username = username,
+                                TakenUtcTicks = DateTime.UtcNow.Ticks, Note = note ?? "",
+                                Payloads = new List<Items.KmhThingPayload>(granted),
+                            });
+                    }
                     if (!CommitLocked(ownerKey, before)) return new List<Items.KmhThingPayload>();
                 }
             }
@@ -720,10 +1103,129 @@ namespace KMHServerAddon.Features.Treasury
             => Extensibility.KmhEventBus.Instance.RaiseTreasuryChanged(new KMH.Sdk.Server.Events.TreasuryChangedEvent
             { OwnerKey = ownerKey, IsGuildOwned = !ownerKey.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase), Reason = note ?? "" });
 
-        // A deposit stays pending until the client confirms its goods removal saved, so value is never in both places.
+        // Quest hand-overs that committed and whose quest has not yet recorded completing: kept in the treasury file itself,
+        // never aged out like a vault marker, and released only once the quest's completion is on disk.
+        private static readonly Dictionary<string, long> _handOvers = new Dictionary<string, long>(StringComparer.Ordinal);
+
+        public static bool KnowsHandOver(string marker) { lock (_lock) return marker != null && _handOvers.ContainsKey(marker); }
+
+        // After the quest's completion is saved. A failed write leaves it for the boot prune, which is just as safe.
+        public static void ForgetHandOver(string marker)
+        {
+            bool removed;
+            lock (_lock) removed = marker != null && _handOvers.Remove(marker);
+            if (removed) SaveToDisk();
+        }
+
+        // Boot, after quests rolled forward: anything not belonging to a still-claimed delivery is spent evidence.
+        public static int PruneHandOvers(Func<string, bool> stillOpen)
+        {
+            int n = 0;
+            lock (_lock)
+                foreach (string m in new List<string>(_handOvers.Keys))
+                    if (stillOpen == null || !stillOpen(m)) { _handOvers.Remove(m); n++; }
+            if (n > 0) SaveToDisk();
+            return n;
+        }
+
+        // Moves the claimer's goods to the poster's vault in ONE commit with the marker on both: a crash leaves them on one
+        // side, never neither, and a retry moves nothing. Compact stacks first, else full-state payloads; all of qty or none.
+        public static bool HandOverMatchingOnce(string from, string to, string defName, int minQuality, int qty, string marker,
+                                                string note, out bool alreadyHandedOver,
+                                                out List<KeyValuePair<string, int>> movedCompact,
+                                                out List<Items.KmhThingPayload> movedPayloads)
+        {
+            alreadyHandedOver = false;
+            movedCompact = new List<KeyValuePair<string, int>>();
+            movedPayloads = new List<Items.KmhThingPayload>();
+            if (string.IsNullOrEmpty(from) || string.IsNullOrEmpty(to) || string.IsNullOrEmpty(defName) || qty <= 0
+                || string.IsNullOrEmpty(marker)) return false;
+            string fromKey = ResolveOwnerKeyFor(from), toKey = ResolveOwnerKeyFor(to);
+            if (string.Equals(fromKey, toKey, StringComparison.OrdinalIgnoreCase)) return false;
+            lock (_lock)
+            {
+                // The durable record, not the vault's marker window: a retry can never take the claimer's goods twice.
+                if (_handOvers.ContainsKey(marker)
+                    || (_vaults.TryGetValue(toKey, out TreasurySnapshot already) && IsAppliedMarkerLocked(already, marker)))
+                { alreadyHandedOver = true; return true; }
+                if (!_vaults.TryGetValue(fromKey, out TreasurySnapshot src)) return false;
+                TreasurySnapshot before = RollbackPointLocked(fromKey);
+                var others = new Dictionary<string, TreasurySnapshot> { { toKey, RollbackPointLocked(toKey) } };
+
+                List<KeyValuePair<string, int>> plan = PlanMatchingLocked(src, defName, minQuality, qty, "");
+                var takes = new List<(Items.KmhThingPayload Entry, int Count)>();
+                if (plan == null)
+                {
+                    int rem = qty;
+                    foreach (Items.KmhThingPayload e in src.ItemPayloads)
+                    {
+                        if (rem <= 0) break;
+                        if (e == null || !string.Equals(e.DefName, defName, StringComparison.OrdinalIgnoreCase)) continue;
+                        if (minQuality > 0 && e.Quality < minQuality) continue;
+                        switch (Items.KmhItemService.PlanTake(e.StackCount, rem, Items.KmhPayloadEscrow.IsSplittable(e)))
+                        {
+                            case Items.KmhItemService.TakeKind.Whole: takes.Add((e, e.StackCount)); rem -= e.StackCount; break;
+                            case Items.KmhItemService.TakeKind.Split: takes.Add((e, rem)); rem = 0; break;
+                        }
+                    }
+                    if (rem > 0) return false;
+                }
+
+                TreasurySnapshot dst = GetOrCreateLocked(toKey, isGuildOwned: false);
+                if (plan != null)
+                    foreach (KeyValuePair<string, int> kv in plan)
+                    {
+                        int next = src.Items[kv.Key] - kv.Value;
+                        if (next <= 0) src.Items.Remove(kv.Key); else src.Items[kv.Key] = next;
+                        dst.Items.TryGetValue(kv.Key, out int cur);
+                        dst.Items[kv.Key] = AddQty(dst, cur, kv.Value, kv.Key, "quest delivery");
+                        RecordTransactionLocked(src, from, TreasuryTransaction.KindWithdraw, kv.Value, kv.Key, note);
+                        RecordTransactionLocked(dst, to, TreasuryTransaction.KindDeposit, kv.Value, kv.Key, note);
+                        movedCompact.Add(kv);
+                    }
+                foreach ((Items.KmhThingPayload e, int count) in takes)
+                {
+                    Items.KmhThingPayload moved = count >= e.StackCount ? e : Clone(e, count);
+                    if (count >= e.StackCount) src.ItemPayloads.Remove(e); else e.StackCount -= count;
+                    AddPayloadLocked(dst, moved);
+                    RecordTransactionLocked(src, from, TreasuryTransaction.KindWithdraw, count, Items.KmhItemSafety.DescribeStateForLedger(moved), note);
+                    RecordTransactionLocked(dst, to, TreasuryTransaction.KindDeposit, count, Items.KmhItemSafety.DescribeStateForLedger(moved), note);
+                    movedPayloads.Add(moved);
+                }
+                AddMarkerLocked(src, marker);
+                AddMarkerLocked(dst, marker);
+                _handOvers[marker] = DateTime.UtcNow.Ticks;
+                if (!CommitLocked(fromKey, before, others)) { _handOvers.Remove(marker); movedCompact.Clear(); movedPayloads.Clear(); return false; }
+            }
+            RaiseChanged(fromKey, note);
+            RaiseChanged(toKey, note);
+            return true;
+        }
+
+        internal const int MaxItemKeysPerVault = 5_000;
+
+        // In memory only: filling a vault to its key cap through real deposits is thousands of durable commits.
+        internal static void SeedItemKeysForTest(string username, int count)
+        {
+            string ownerKey = ResolveOwnerKeyFor(username);
+            lock (_lock)
+            {
+                TreasurySnapshot v = GetOrCreateLocked(ownerKey, false);
+                for (int i = 0; i < count; i++) v.Items["KmhSelftestKey" + i] = 1;
+            }
+        }
+
+        // The pending commit adds a key without this check, since by then the goods are out of the colony; preflight asks it.
+        internal static bool NewItemKeyOverCap(string username, string itemKey)
+        {
+            string ownerKey = ResolveOwnerKeyFor(username);
+            lock (_lock)
+                return _vaults.TryGetValue(ownerKey, out TreasurySnapshot v) && v.Items.Count >= MaxItemKeysPerVault
+                    && !v.Items.ContainsKey(itemKey ?? "");
+        }
+
         private const int MaxRecentCommittedTxns = 256;
 
-        // Unconfirmed deposits awaiting the player's own durable save.
         public static int UnconfirmedDepositCount(string username)
         {
             if (string.IsNullOrEmpty(username)) return 0;
@@ -754,7 +1256,7 @@ namespace KMHServerAddon.Features.Treasury
         // Idempotent by txn id, so a network resend cannot double-book.
         public static bool BeginPendingDeposit(string username, Dto.PendingDeposit d)
         {
-            if (string.IsNullOrEmpty(username) || d == null || string.IsNullOrEmpty(d.TxnId)) return false;
+            if (string.IsNullOrEmpty(username) || d == null || !IsClientTxnId(d.TxnId)) return false;
             string ownerKey = ResolveOwnerKeyFor(username);
             lock (_lock)
             {
@@ -773,14 +1275,21 @@ namespace KMHServerAddon.Features.Treasury
         }
 
         // The guild is credited only at commit, so it can never spend unconfirmed silver.
-        public static bool BeginPendingGuildDonation(string username, string guildName, int amount, string txnId, out string reason)
+        // expectedIdentity is the incarnation the donor's checks were made against; a different one now holding the name is refused.
+        public static bool BeginPendingGuildDonation(string username, string guildName, int amount, string txnId, out string reason,
+                                                     string expectedIdentity = null)
         {
             reason = null;
-            if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(guildName) || amount <= 0 || string.IsNullOrEmpty(txnId))
+            if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(guildName) || IsPersonalKey(guildName)
+                || amount <= 0 || !IsClientTxnId(txnId))
             { reason = "Invalid donation request."; return false; }
             string ownerKey = ResolveOwnerKeyFor(username);
             lock (_lock)
             {
+                string identity = Guilds.GuildIdentity.Of(guildName);
+                if (string.IsNullOrEmpty(identity)) { reason = "That guild no longer exists."; return false; }
+                if (expectedIdentity != null && !string.Equals(identity, expectedIdentity, StringComparison.Ordinal))
+                { reason = "Your guild changed while that was processing - nothing was taken."; return false; }
                 TreasurySnapshot before = RollbackPointLocked(ownerKey);
                 TreasurySnapshot v = GetOrCreateLocked(ownerKey, !ownerKey.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase));
                 if (IsKnownTxnLocked(v, txnId)) { reason = "That donation was already received."; return false; }
@@ -797,7 +1306,7 @@ namespace KMHServerAddon.Features.Treasury
                 v.PendingDeposits.Add(new Dto.PendingDeposit
                 {
                     TxnId = txnId, Username = username, Kind = Dto.PendingDeposit.KindGuildDonate,
-                    Silver = amount, GuildName = guildName, Note = $"donation to guild '{guildName}'",
+                    Silver = amount, GuildName = guildName, GuildIdentity = identity, Note = $"donation to guild '{guildName}'",
                     State = Dto.PendingDeposit.StatePending, CreatedUtcTicks = DateTime.UtcNow.Ticks,
                 });
                 if (!CommitLocked(ownerKey, before)) { reason = "The server could not record that donation - nothing was taken. Try again shortly."; return false; }
@@ -806,10 +1315,9 @@ namespace KMHServerAddon.Features.Treasury
             return true;
         }
 
-        // Total unconfirmed donation silver headed for a guild (counts toward the vault deposit cap).
         public static long PendingGuildDonationTotal(string guildName)
         {
-            if (string.IsNullOrEmpty(guildName)) return 0;
+            if (string.IsNullOrEmpty(guildName) || IsPersonalKey(guildName)) return 0;
             long total = 0;
             lock (_lock)
                 foreach (TreasurySnapshot v in _vaults.Values)
@@ -823,7 +1331,6 @@ namespace KMHServerAddon.Features.Treasury
         }
 
 
-        // Does a vault row exist for this user? Read-only - unlike the snapshot path, it never creates one.
         public static bool HasVaultForUser(string username)
         {
             if (string.IsNullOrEmpty(username)) return false;
@@ -858,6 +1365,21 @@ namespace KMHServerAddon.Features.Treasury
             return true;
         }
 
+        internal static bool HasVaultForTest(string key) { lock (_lock) return _vaults.ContainsKey(key ?? ""); }
+
+        // The shape an older build's disband left: a vault under a name no guild holds any more.
+        internal static void PutVaultForTest(string key, int silver)
+        {
+            lock (_lock) _vaults[key] = new TreasurySnapshot { OwnerKey = key, IsGuildOwned = true, SilverBalance = silver, Items = NormalizeItemKeys(null) };
+        }
+
+        internal static int GuildItemForTest(string guild, string def)
+        {
+            lock (_lock)
+                return _vaults.TryGetValue(guild ?? "", out TreasurySnapshot v) && v?.Items != null
+                    && v.Items.TryGetValue(def, out int n) ? n : 0;
+        }
+
         // Test seam: durability checks seed a throwaway owner and must leave the shared store as they found it.
         internal static void PurgeOwnerForTest(string owner)
         {
@@ -885,6 +1407,48 @@ namespace KMHServerAddon.Features.Treasury
             return removed;
         }
 
+        // Server markers (take, refund, payout, federation) all contain ':'; a client id never may. A pending client
+        // deposit is not evidence that any server step ran, so the marker check never reads the pending list: a
+        // planted pending id equal to a Connected op id made its withdrawal skip the debit while Global credited it.
+        internal static bool IsClientTxnId(string id)
+        {
+            if (string.IsNullOrEmpty(id) || id.Length > 64) return false;
+            foreach (char c in id)
+                if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_'))
+                    return false;
+            return true;
+        }
+
+        private static bool IsAppliedMarkerLocked(TreasurySnapshot v, string marker)
+        {
+            foreach (string t in v.RecentCommittedTxns)
+                if (string.Equals(t, marker, StringComparison.Ordinal)) return true;
+            return false;
+        }
+
+        // A one-time reward can be offered again by a re-issued link or a stale view, long after 256 other markers;
+        // its marker is the only record it was paid, so it outlives the window every other marker shares.
+        internal const string OneTimeRewardPrefix = "fedreward:";
+        internal const int MaxOneTimeMarkers = 520;
+
+        private static bool IsOneTimeMarker(string marker)
+            => marker != null && marker.StartsWith(OneTimeRewardPrefix, StringComparison.Ordinal);
+
+        // Every marker goes through here: one site still trimming oldest-first would evict a reward marker.
+        private static void AddMarkerLocked(TreasurySnapshot v, string marker)
+        {
+            v.RecentCommittedTxns.Add(marker);
+            int oneTime = 0, other = 0;
+            foreach (string t in v.RecentCommittedTxns) { if (IsOneTimeMarker(t)) oneTime++; else other++; }
+            for (int i = 0; i < v.RecentCommittedTxns.Count && (other > MaxRecentCommittedTxns || oneTime > MaxOneTimeMarkers);)
+            {
+                bool once = IsOneTimeMarker(v.RecentCommittedTxns[i]);
+                if (once && oneTime > MaxOneTimeMarkers) { v.RecentCommittedTxns.RemoveAt(i); oneTime--; }
+                else if (!once && other > MaxRecentCommittedTxns) { v.RecentCommittedTxns.RemoveAt(i); other--; }
+                else i++;
+            }
+        }
+
         private static bool IsKnownTxnLocked(TreasurySnapshot v, string txnId)
         {
             foreach (Dto.PendingDeposit p in v.PendingDeposits)
@@ -898,8 +1462,8 @@ namespace KMHServerAddon.Features.Treasury
         internal static bool SaveGenerationWentBackwards(long seen, long incoming)
             => incoming > 0 && seen > 0 && incoming < seen;
 
-        // Detection only: nothing is reverted or blocked on the strength of it.
-        public static long NoteSaveGeneration(string username, long generation)
+        // Detection only. The watermark is the colony ledger's, or player-wide when the client sends no ledger id.
+        public static long NoteSaveGeneration(string username, long generation, string ledgerId = "")
         {
             if (string.IsNullOrEmpty(username) || generation <= 0) return 0;
             string ownerKey = ResolveOwnerKeyFor(username);
@@ -908,13 +1472,45 @@ namespace KMHServerAddon.Features.Treasury
             {
                 // No vault means no committed deposits, so there is nothing to protect and nothing to create.
                 if (!_vaults.TryGetValue(ownerKey, out TreasurySnapshot v)) return 0;
-                seen = v.LastSaveGeneration;
-                if (generation > seen) v.LastSaveGeneration = generation;
+                if (string.IsNullOrEmpty(ledgerId))
+                {
+                    seen = v.LastSaveGeneration;
+                    if (generation > seen) v.LastSaveGeneration = generation;
+                }
+                else
+                {
+                    v.LedgerGenerations ??= new Dictionary<string, long>(StringComparer.Ordinal);
+                    v.LedgerGenerations.TryGetValue(ledgerId, out seen);
+                    if (generation > seen) v.LedgerGenerations[ledgerId] = generation;
+                    // Bounded: the least-saved colony goes, never the one reporting.
+                    while (v.LedgerGenerations.Count > MaxLedgersPerVault)
+                    {
+                        string drop = null; long low = long.MaxValue;
+                        foreach (KeyValuePair<string, long> kv in v.LedgerGenerations)
+                            if (kv.Key != ledgerId && kv.Value < low) { low = kv.Value; drop = kv.Key; }
+                        if (drop == null) break;
+                        v.LedgerGenerations.Remove(drop);
+                    }
+                }
             }
             return seen;
         }
 
-        // Highest save generation recorded for a player, for `kmh audit-player`.
+        internal const int MaxLedgersPerVault = 32;
+
+        internal static int LedgerCountForTest(string username)
+        {
+            lock (_lock) return _vaults.TryGetValue(ResolveOwnerKeyFor(username), out TreasurySnapshot v) ? v.LedgerGenerations?.Count ?? 0 : 0;
+        }
+
+        // A client's colony ledger id, or "" when absent or not the 32-hex form the client mints.
+        internal static string LedgerIdOrEmpty(string raw)
+        {
+            if (raw == null || raw.Length != 32) return "";
+            foreach (char c in raw) if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return "";
+            return raw;
+        }
+
         public static long LastSaveGenerationOf(string username)
         {
             if (string.IsNullOrEmpty(username)) return 0;
@@ -922,48 +1518,59 @@ namespace KMHServerAddon.Features.Treasury
             lock (_lock) { return _vaults.TryGetValue(key, out TreasurySnapshot v) ? v.LastSaveGeneration : 0; }
         }
 
-        // Idempotent: unknown or already-committed ids are ignored.
-        public static int ConfirmDeposits(string username, IEnumerable<string> txnIds)
+        // Idempotent: unknown or already-committed ids are ignored. ledgerId and generation name the save that holds them.
+        public static int ConfirmDeposits(string username, IEnumerable<string> txnIds, string ledgerId = "", long generation = 0)
         {
             if (string.IsNullOrEmpty(username) || txnIds == null) return 0;
             HashSet<string> want = new HashSet<string>(txnIds, StringComparer.Ordinal);
             if (want.Count == 0) return 0;
             string ownerKey = ResolveOwnerKeyFor(username);
-            int committed = 0; long feeToHouse = 0;
+            int committed = 0;
             List<Dto.PendingDeposit> donations = null;
+            List<string> fees = null;
             lock (_lock)
             {
                 TreasurySnapshot before = RollbackPointLocked(ownerKey);
                 TreasurySnapshot v = GetOrCreateLocked(ownerKey, !ownerKey.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase));
+                Dictionary<string, TreasurySnapshot> guildsBefore = GuildRollbackPointsLocked(v, d => want.Contains(d.TxnId));
                 foreach (Dto.PendingDeposit d in new List<Dto.PendingDeposit>(v.PendingDeposits))
                 {
                     if (d.State != Dto.PendingDeposit.StatePending) continue;
                     if (!want.Contains(d.TxnId)) continue;
-                    feeToHouse += d.Fee;
-                    CommitPendingLocked(v, d, ref donations);
+                    // Owed in this commit, so the deposit and the fee it took for the pool are on disk together.
+                    if (d.Fee > 0) (fees ??= new List<string>()).Add(OweFeeLocked(FeeMarkerFor(ownerKey, d.TxnId), d.Fee, username, $"treasury deposit fee ({username})"));
+                    CommitPendingLocked(v, d, ref donations, ledgerId, generation);
                     committed++;
                 }
                 // The fee follows the commit, so a deposit that stayed pending is never charged for.
-                if (committed > 0 && !CommitLocked(ownerKey, before)) return 0;
+                if (committed > 0 && !CommitLocked(ownerKey, before, guildsBefore)) { ForgetFeesLocked(fees); return 0; }
             }
             if (committed > 0) RaiseChanged(ownerKey, "deposit_confirmed");
-            if (feeToHouse > 0) Marketplace.MarketplaceStore.CreditFeeToHousePool(username, feeToHouse, $"treasury deposit fee ({username})");
+            if (fees != null) SettleOwedFees(fees);
             NotifyDonationsFinalized(donations);
             return committed;
         }
 
-        // Post-commit guild bookkeeping for finalized donations (outside the vault lock - GuildStore has its own).
+        // Runs outside the vault lock, since GuildStore takes its own.
         private static void NotifyDonationsFinalized(List<Dto.PendingDeposit> donations)
         {
             if (donations == null) return;
+            var guilds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (Dto.PendingDeposit d in donations)
-                Guilds.GuildStore.FinalizeDonation(d.Username, d.GuildName, d.Silver);
+            {
+                Guilds.GuildStore.FinalizeDonation(d.Username, d.GuildName, d.Silver, d.GuildIdentity);
+                if (!string.IsNullOrEmpty(d.GuildName)) guilds.Add(d.GuildName);
+            }
+            // The vault's balance changed for every member, so their Halls are told now rather than on their next action.
+            foreach (string g in guilds) Guilds.GuildHandler.BroadcastToGuild(g);
         }
 
         // unsavedGoodsGone is left alone because reverting it would destroy goods the client has already removed.
-        public static (int committed, int reverted) ReconcileDeposits(string username, IEnumerable<string> committed, IEnumerable<string> unsavedGoodsGone, int graceSeconds)
+        public static (int committed, int reverted) ReconcileDeposits(string username, IEnumerable<string> committed, IEnumerable<string> unsavedGoodsGone, int graceSeconds,
+                                                                      string ledgerId = "", long generation = 0)
         {
-            int didCommit = 0, didRevert = 0; long feeToHouse = 0;
+            int didCommit = 0, didRevert = 0;
+            List<string> fees = null;
             if (string.IsNullOrEmpty(username)) return (0, 0);
             HashSet<string> have = new HashSet<string>(committed ?? new List<string>(), StringComparer.Ordinal);
             HashSet<string> keep = new HashSet<string>(unsavedGoodsGone ?? new List<string>(), StringComparer.Ordinal);
@@ -974,12 +1581,18 @@ namespace KMHServerAddon.Features.Treasury
             {
                 TreasurySnapshot before = RollbackPointLocked(ownerKey);
                 TreasurySnapshot v = GetOrCreateLocked(ownerKey, !ownerKey.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase));
+                Dictionary<string, TreasurySnapshot> guildsBefore = GuildRollbackPointsLocked(v,
+                    d => ReconcileVerdictFor(d.TxnId, d.CreatedUtcTicks, have, keep, cutoff) == ReconcileVerdict.Commit);
                 foreach (Dto.PendingDeposit d in new List<Dto.PendingDeposit>(v.PendingDeposits))
                 {
                     if (d.State != Dto.PendingDeposit.StatePending) continue;
                     switch (ReconcileVerdictFor(d.TxnId, d.CreatedUtcTicks, have, keep, cutoff))
                     {
-                        case ReconcileVerdict.Commit: feeToHouse += d.Fee; CommitPendingLocked(v, d, ref donations); didCommit++; break;
+                        case ReconcileVerdict.Commit:
+                            if (d.Fee > 0) (fees ??= new List<string>()).Add(OweFeeLocked(FeeMarkerFor(ownerKey, d.TxnId), d.Fee, username, $"treasury deposit fee ({username})"));
+                            CommitPendingLocked(v, d, ref donations, ledgerId, generation);
+                            didCommit++;
+                            break;
                         case ReconcileVerdict.Revert:
                             RevertPendingLocked(v, d);
                             didRevert++;
@@ -988,10 +1601,10 @@ namespace KMHServerAddon.Features.Treasury
                             break;
                     }
                 }
-                if ((didCommit > 0 || didRevert > 0) && !CommitLocked(ownerKey, before)) return (0, 0);
+                if ((didCommit > 0 || didRevert > 0) && !CommitLocked(ownerKey, before, guildsBefore)) { ForgetFeesLocked(fees); return (0, 0); }
             }
             if (didCommit > 0 || didRevert > 0) RaiseChanged(ownerKey, "deposit_reconciled");
-            if (feeToHouse > 0) Marketplace.MarketplaceStore.CreditFeeToHousePool(username, feeToHouse, $"treasury deposit fee ({username})");
+            if (fees != null) SettleOwedFees(fees);
             NotifyDonationsFinalized(donations);
             return (didCommit, didRevert);
         }
@@ -1035,6 +1648,41 @@ namespace KMHServerAddon.Features.Treasury
             return reverted;
         }
 
+        // Test-only: makes a pending donation look like one an older build wrote, with no incarnation.
+        internal static bool ForgetPendingGuildIdentityForTest(string username, string txnId)
+        {
+            string ownerKey = ResolveOwnerKeyFor(username);
+            lock (_lock)
+            {
+                if (!_vaults.TryGetValue(ownerKey, out TreasurySnapshot v)) return false;
+                foreach (Dto.PendingDeposit d in v.PendingDeposits)
+                    if (string.Equals(d.TxnId, txnId, StringComparison.Ordinal)) { d.GuildIdentity = ""; return true; }
+            }
+            return false;
+        }
+
+        // A guild name that was freed or is being reused: donations still pending towards an incarnation that no longer
+        // holds it go back to the donors. One made to the guild that holds the name now is left alone.
+        public static int RevertPendingGuildDonations(string guildName)
+        {
+            if (string.IsNullOrEmpty(guildName)) return 0;
+            int reverted = 0;
+            lock (_lock)
+            {
+                foreach (TreasurySnapshot v in _vaults.Values)
+                {
+                    if (v?.PendingDeposits == null) continue;
+                    foreach (Dto.PendingDeposit d in new List<Dto.PendingDeposit>(v.PendingDeposits))
+                        if (d.State == Dto.PendingDeposit.StatePending && d.Kind == Dto.PendingDeposit.KindGuildDonate
+                            && string.Equals(d.GuildName, guildName, StringComparison.OrdinalIgnoreCase)
+                            && !(!string.IsNullOrEmpty(d.GuildIdentity) && Guilds.GuildIdentity.IsLive(d.GuildName, d.GuildIdentity)))
+                        { RevertPendingLocked(v, d); reverted++; }
+                }
+            }
+            if (reverted > 0) SaveToDisk();
+            return reverted;
+        }
+
         // A donation refunds the donor, who was debited at begin. Caller holds _lock.
         private static void RevertPendingLocked(TreasurySnapshot v, Dto.PendingDeposit d)
         {
@@ -1049,14 +1697,28 @@ namespace KMHServerAddon.Features.Treasury
         }
 
         // Donations are collected into `donations` so guild bookkeeping runs outside this lock. Caller holds _lock.
-        private static void CommitPendingLocked(TreasurySnapshot v, Dto.PendingDeposit d, ref List<Dto.PendingDeposit> donations)
+        private static void CommitPendingLocked(TreasurySnapshot v, Dto.PendingDeposit d, ref List<Dto.PendingDeposit> donations,
+                                                string ledgerId = "", long generation = 0)
         {
             switch (d.Kind)
             {
                 case Dto.PendingDeposit.KindGuildDonate:
-                    TreasurySnapshot gv = GetOrCreateLocked(d.GuildName, isGuildOwned: true);
+                    // Only the incarnation it was made to. A row from an older build names none, and a name is no proof of
+                    // which guild was meant, so that donation goes back to the donor instead.
+                    if (string.IsNullOrEmpty(d.GuildIdentity))
+                    {
+                        Diagnostics.ServerLog.Warn($"Treasury: donation {d.TxnId} from {d.Username} to guild '{d.GuildName}' predates guild "
+                            + "identities - returned to the donor rather than credited by name.");
+                        RevertPendingLocked(v, d); return;
+                    }
+                    TreasurySnapshot gv = LiveGuildVaultLocked(d.GuildName, d.GuildIdentity, "donation commit");
+                    // Disbanded, or its name re-taken, before the donation was confirmed: the donor gets it back.
+                    if (gv == null) { RevertPendingLocked(v, d); return; }
+                    string donated = "donation:" + d.TxnId;
+                    if (IsAppliedMarkerLocked(gv, donated)) break;
                     gv.SilverBalance     = AddSilver(gv, d.Silver, "guild donation commit");
                     gv.LifetimeSilverIn += d.Silver;
+                    AddMarkerLocked(gv, donated);
                     RecordTransactionLocked(gv, d.Username, TreasuryTransaction.KindDeposit, d.Silver, "",
                         $"contribution from {d.Username} (save-confirmed)");
                     (donations = donations ?? new List<Dto.PendingDeposit>()).Add(d);
@@ -1083,20 +1745,22 @@ namespace KMHServerAddon.Features.Treasury
                     break;
             }
             v.PendingDeposits.Remove(d);
-            v.RecentCommittedTxns.Add(d.TxnId);
-            while (v.RecentCommittedTxns.Count > MaxRecentCommittedTxns) v.RecentCommittedTxns.RemoveAt(0);
+            AddMarkerLocked(v, d.TxnId);
 
             // Blob-stripped, since reversal removes vault payloads by fingerprint rather than by saved XML.
             Dto.PendingDeposit rec = StripPendingBlobs(new List<Dto.PendingDeposit> { d })[0];
             rec.State = Dto.PendingDeposit.StateCommitted;
             rec.CommittedUtcTicks = DateTime.UtcNow.Ticks;
+            rec.LedgerId = ledgerId ?? "";
+            rec.ConfirmedGeneration = Math.Max(0, generation);
             v.CommittedDeposits.Add(rec);
             while (v.CommittedDeposits.Count > MaxRecentCommittedTxns) v.CommittedDeposits.RemoveAt(0);
         }
 
         // Guild donations are reported rather than reversed, because other members may already have spent them.
         public static (int reversed, int flagged) ReverseRolledBackCommits(
-            string username, IEnumerable<string> clientHas, IEnumerable<string> unsavedGoodsGone, int graceSeconds)
+            string username, IEnumerable<string> clientHas, IEnumerable<string> unsavedGoodsGone, int graceSeconds,
+            string ledgerId = "", long loadedGeneration = 0)
         {
             if (string.IsNullOrEmpty(username)) return (0, 0);
             HashSet<string> have = new HashSet<string>(clientHas ?? new List<string>(), StringComparer.Ordinal);
@@ -1105,6 +1769,7 @@ namespace KMHServerAddon.Features.Treasury
             long cutoff = DateTime.UtcNow.Ticks - TimeSpan.FromSeconds(Math.Max(0, graceSeconds)).Ticks;
             int reversed = 0, flagged = 0;
             List<string> report = new List<string>();
+            List<string> returns = null;
 
             lock (_lock)
             {
@@ -1112,7 +1777,10 @@ namespace KMHServerAddon.Features.Treasury
                 if (!_vaults.TryGetValue(ownerKey, out TreasurySnapshot v)) return (0, 0);
                 foreach (Dto.PendingDeposit c in new List<Dto.PendingDeposit>(v.CommittedDeposits))
                 {
-                    if (!ShouldUndoCommitted(c.TxnId, c.CommittedUtcTicks, have, keep, cutoff)) continue;
+                    bool undo = string.IsNullOrEmpty(ledgerId)
+                        ? ShouldUndoCommitted(c.TxnId, c.CommittedUtcTicks, have, keep, cutoff)
+                        : ShouldUndoInLedger(c.TxnId, c.LedgerId, c.ConfirmedGeneration, ledgerId, loadedGeneration, have, keep);
+                    if (!undo) continue;
                     if (c.Kind == Dto.PendingDeposit.KindGuildDonate)
                     {
                         flagged++;
@@ -1121,6 +1789,10 @@ namespace KMHServerAddon.Features.Treasury
                         continue;
                     }
                     string shortfall = ReverseCommittedLocked(v, c);
+                    // The player has the whole amount back, so the pool gives back the fee it took; owed in this save.
+                    if (c.Kind == Dto.PendingDeposit.KindSilver && c.Fee > 0)
+                        (returns ??= new List<string>()).Add(OweFeeReturnLocked(FeeReturnMarkerFor(ownerKey, c.TxnId), c.Fee, c.Username,
+                            $"deposit {c.TxnId} fee returned - client loaded an older save ({c.Username})"));
                     v.CommittedDeposits.Remove(c);
                     v.RecentCommittedTxns.Remove(c.TxnId);
                     reversed++;
@@ -1130,7 +1802,8 @@ namespace KMHServerAddon.Features.Treasury
 
             if (reversed > 0 || flagged > 0)
             {
-                SaveToDisk();
+                // Unsaved, the return stays owed in memory beside the reversal; its marker lets the sweep pay it only once.
+                if (SaveToDisk() && returns != null) SettleOwedFees(returns);
                 RaiseChanged(ownerKey, "rollback_reversed");
                 Diagnostics.ServerLog.Error(
                     $"Treasury: {username} loaded an OLDER save after confirming deposit(s). Reversed {reversed}, " +
@@ -1148,6 +1821,18 @@ namespace KMHServerAddon.Features.Treasury
             if (clientHas != null && clientHas.Contains(txnId)) return false;
             if (unsavedGoodsGone != null && unsavedGoodsGone.Contains(txnId)) return false;
             return committedUtcTicks <= cutoffTicks;
+        }
+
+        // Undo what that colony made durable after the loaded save, however recent: a time grace would keep the duplicate.
+        internal static bool ShouldUndoInLedger(string txnId, string commitLedger, long confirmedGeneration, string ledgerId,
+                                                long loadedGeneration, HashSet<string> clientHas, HashSet<string> unsavedGoodsGone)
+        {
+            if (string.IsNullOrEmpty(txnId) || string.IsNullOrEmpty(ledgerId)) return false;
+            if (!string.Equals(commitLedger, ledgerId, StringComparison.Ordinal)) return false;
+            if (confirmedGeneration <= loadedGeneration) return false;
+            if (clientHas != null && clientHas.Contains(txnId)) return false;
+            if (unsavedGoodsGone != null && unsavedGoodsGone.Contains(txnId)) return false;
+            return true;
         }
 
         // Returns a note when part was already spent; the balance is never driven negative. Caller holds _lock.
@@ -1220,7 +1905,6 @@ namespace KMHServerAddon.Features.Treasury
             }
         }
 
-        // Restore-preview / audit: total silver + item units sitting in pending (never spendable) across a vault.
         public static (int count, long silver, long itemUnits) PendingSummaryFor(string username)
         {
             string ownerKey = ResolveOwnerKeyFor(username);
@@ -1251,36 +1935,108 @@ namespace KMHServerAddon.Features.Treasury
                 TreasurySnapshot before = RollbackPointLocked(ownerKey);
                 TreasurySnapshot v = GetOrCreateLocked(ownerKey, ownerKey.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase) == false);
 
-                List<KeyValuePair<string, int>> candidates = new List<KeyValuePair<string, int>>();
-                foreach (KeyValuePair<string, int> kv in v.Items)
-                    if (Util.ItemKey.Matches(kv.Key, targetDefName, requiredStuff, requiredQualityIndex))
-                        candidates.Add(kv);
-                candidates.Sort((a, b) =>
+                List<KeyValuePair<string, int>> plan = PlanMatchingLocked(v, targetDefName, requiredQualityIndex, qty, requiredStuff);
+                if (plan == null) return false;
+                foreach (KeyValuePair<string, int> kv in plan)
                 {
-                    Util.ItemKey.Split(a.Key, out _, out _, out int qa);
-                    Util.ItemKey.Split(b.Key, out _, out _, out int qb);
-                    return qa.CompareTo(qb);
-                });
-
-                int total = 0;
-                foreach (KeyValuePair<string, int> kv in candidates) total += kv.Value;
-                if (total < qty) return false;
-
-                int remaining = qty;
-                foreach (KeyValuePair<string, int> kv in candidates)
-                {
-                    if (remaining <= 0) break;
-                    int take = Math.Min(kv.Value, remaining);
-                    int next = kv.Value - take;
+                    int next = v.Items[kv.Key] - kv.Value;
                     if (next <= 0) v.Items.Remove(kv.Key);
                     else           v.Items[kv.Key] = next;
-                    RecordTransactionLocked(v, username, TreasuryTransaction.KindWithdraw, take, kv.Key, note);
-                    consumed.Add(new KeyValuePair<string, int>(kv.Key, take));
-                    remaining -= take;
+                    RecordTransactionLocked(v, username, TreasuryTransaction.KindWithdraw, kv.Value, kv.Key, note);
+                    consumed.Add(kv);
                 }
                 if (!CommitLocked(ownerKey, before)) { consumed.Clear(); return false; }
             }
-            Extensibility.KmhEventBus.Instance.RaiseTreasuryChanged(new KMH.Sdk.Server.Events.TreasuryChangedEvent { OwnerKey = ownerKey, IsGuildOwned = !ownerKey.StartsWith("_personal:", System.StringComparison.OrdinalIgnoreCase), Reason = note ?? "" });
+            RaiseChanged(ownerKey, note);
+            return true;
+        }
+
+        // The stacks TryWithdrawMatching would take, lowest quality first, without taking them; null when short.
+        public static List<KeyValuePair<string, int>> PlanMatching(string username, string targetDefName,
+                                                                   int requiredQualityIndex, int qty, string requiredStuff = "")
+        {
+            if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(targetDefName) || qty <= 0) return null;
+            string ownerKey = ResolveOwnerKeyFor(username);
+            lock (_lock)
+                return _vaults.TryGetValue(ownerKey, out TreasurySnapshot v)
+                     ? PlanMatchingLocked(v, targetDefName, requiredQualityIndex, qty, requiredStuff) : null;
+        }
+
+        private static List<KeyValuePair<string, int>> PlanMatchingLocked(TreasurySnapshot v, string targetDefName,
+                                                                           int requiredQualityIndex, int qty, string requiredStuff)
+        {
+            List<KeyValuePair<string, int>> candidates = new List<KeyValuePair<string, int>>();
+            foreach (KeyValuePair<string, int> kv in v.Items)
+                if (Util.ItemKey.Matches(kv.Key, targetDefName, requiredStuff, requiredQualityIndex))
+                    candidates.Add(kv);
+            candidates.Sort((a, b) =>
+            {
+                Util.ItemKey.Split(a.Key, out _, out _, out int qa);
+                Util.ItemKey.Split(b.Key, out _, out _, out int qb);
+                return qa.CompareTo(qb);
+            });
+
+            long total = 0;
+            foreach (KeyValuePair<string, int> kv in candidates) total += kv.Value;
+            if (total < qty) return null;
+
+            var plan = new List<KeyValuePair<string, int>>();
+            int remaining = qty;
+            foreach (KeyValuePair<string, int> kv in candidates)
+            {
+                if (remaining <= 0) break;
+                int take = Math.Min(kv.Value, remaining);
+                plan.Add(new KeyValuePair<string, int>(kv.Key, take));
+                remaining -= take;
+            }
+            return plan;
+        }
+
+        // All or nothing across several keys, on one marker, so a want fill takes exactly the stacks its row names.
+        public static bool WithdrawItemsForTxn(string username, IList<KeyValuePair<string, int>> items, string marker, string note = "")
+            => items != null && items.Count > 0 && WithdrawBundleForTxn(username, 0, items, marker, note);
+
+        // Silver and items in one commit on one marker. With nothing to take it still stamps the marker, so the
+        // row's refund rule ("pay back only what the vault confirms it gave") holds for everything the row names.
+        public static bool WithdrawBundleForTxn(string username, int silver, IList<KeyValuePair<string, int>> items,
+                                                string marker, string note = "")
+        {
+            if (string.IsNullOrEmpty(username) || silver < 0 || string.IsNullOrEmpty(marker)) return false;
+            items = items ?? new List<KeyValuePair<string, int>>();
+            string ownerKey = ResolveOwnerKeyFor(username);
+            lock (_lock)
+            {
+                TreasurySnapshot before = RollbackPointLocked(ownerKey);
+                TreasurySnapshot v = GetOrCreateLocked(ownerKey, !ownerKey.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase));
+                if (IsAppliedMarkerLocked(v, marker)) return true;
+                if (silver > 0 && v.SilverBalance < silver) return false;
+                // The vault's own comparer: "Steel" and "sTEEL" are one stack, so they must be one need, or each passes the check alone.
+                var need = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                foreach (KeyValuePair<string, int> kv in items)
+                {
+                    if (string.IsNullOrEmpty(kv.Key) || kv.Value <= 0) return false;
+                    need.TryGetValue(kv.Key, out int n);
+                    need[kv.Key] = Util.KmhSafe.AddSaturating(n, kv.Value);
+                }
+                foreach (KeyValuePair<string, int> kv in need)
+                    if (!v.Items.TryGetValue(kv.Key, out int cur) || cur < kv.Value) return false;
+                foreach (KeyValuePair<string, int> kv in need)
+                {
+                    int next = v.Items[kv.Key] - kv.Value;
+                    if (next <= 0) v.Items.Remove(kv.Key);
+                    else           v.Items[kv.Key] = next;
+                    RecordTransactionLocked(v, username, TreasuryTransaction.KindWithdraw, kv.Value, kv.Key, note);
+                }
+                if (silver > 0)
+                {
+                    v.SilverBalance -= silver;
+                    v.LifetimeSilverOut += silver;
+                    RecordTransactionLocked(v, username, TreasuryTransaction.KindWithdraw, silver, "", note);
+                }
+                AddMarkerLocked(v, marker);
+                if (!CommitLocked(ownerKey, before)) return false;
+            }
+            RaiseChanged(ownerKey, note);
             return true;
         }
 
@@ -1302,12 +2058,35 @@ namespace KMHServerAddon.Features.Treasury
                 v.RecentTransactions.RemoveAt(0);
             }
 
-            // Safe under _lock because the enqueue is lock-free and the file write happens off-thread.
-            Persistence.TransactionLedger.Record(v.OwnerKey, username, kind, amount, itemDefName, note);
+            // Held for the save that carries the change: queued here, a refused commit's line reached the file anyway.
+            _unsavedLines.Add(new UnsavedLine { Seq = ++_lineSeq, Utc = DateTime.UtcNow, Vault = v.OwnerKey, Actor = username,
+                                                Kind = kind, Amount = amount, Item = itemDefName, Note = note });
+        }
+
+        private sealed class UnsavedLine
+        {
+            public long Seq, Amount;
+            public DateTime Utc;
+            public string Vault, Actor, Kind, Item, Note;
+        }
+
+        // In record order. _commitMark is the last line before the commit in progress, set with its rollback point.
+        private static readonly List<UnsavedLine> _unsavedLines = new List<UnsavedLine>();
+        private static long _lineSeq, _commitMark;
+
+        private static void ReleaseLinesLocked(long upTo)
+        {
+            int n = 0;
+            while (n < _unsavedLines.Count && _unsavedLines[n].Seq <= upTo) n++;
+            for (int i = 0; i < n; i++)
+            {
+                UnsavedLine l = _unsavedLines[i];
+                Persistence.TransactionLedger.Record(l.Vault, l.Actor, l.Kind, l.Amount, l.Item, l.Note, l.Utc);
+            }
+            _unsavedLines.RemoveRange(0, n);
         }
 
 
-        // Returns the silver it held, or -1 when there was no vault. Guild vaults are untouched.
         public static long ResetPersonal(string username)
         {
             string key = PersonalKeyFor(username);
@@ -1322,7 +2101,13 @@ namespace KMHServerAddon.Features.Treasury
             return had;
         }
 
-        // Admin reset: drop every personal vault (guild vaults kept). Returns how many were removed.
+        public static int PersonalVaultCount()
+        {
+            int n = 0;
+            lock (_lock) foreach (string k in _vaults.Keys) if (k.StartsWith("_personal:", StringComparison.OrdinalIgnoreCase)) n++;
+            return n;
+        }
+
         public static int ResetAllPersonal()
         {
             int removed;
@@ -1364,6 +2149,17 @@ namespace KMHServerAddon.Features.Treasury
                 lock (_lock)
                 {
                     _vaults.Clear();
+                    _handOvers.Clear();
+                    _owedFees.Clear();
+                    _feeReturns.Clear();
+                    _unsavedLines.Clear();
+                    if (state.HandOvers != null) foreach (KeyValuePair<string, long> kv in state.HandOvers) _handOvers[kv.Key] = kv.Value;
+                    if (state.OwedFees != null)
+                        foreach (KeyValuePair<string, OwedFee> kv in state.OwedFees)
+                            if (!string.IsNullOrEmpty(kv.Key) && kv.Value != null && kv.Value.Amount > 0) _owedFees[kv.Key] = kv.Value;
+                    if (state.FeeReturns != null)
+                        foreach (KeyValuePair<string, OwedFee> kv in state.FeeReturns)
+                            if (!string.IsNullOrEmpty(kv.Key) && kv.Value != null && kv.Value.Amount > 0) _feeReturns[kv.Key] = kv.Value;
                     foreach (TreasurySnapshot v in state.Vaults)
                     {
                         if (v == null || string.IsNullOrEmpty(v.OwnerKey)) continue;
@@ -1374,7 +2170,7 @@ namespace KMHServerAddon.Features.Treasury
                         _vaults[v.OwnerKey] = v;
                     }
                 }
-                Diagnostics.ServerLog.Info($"Treasury: loaded {state.Vaults.Count} vault(s) from disk");
+                Diagnostics.ServerLog.Diag($"Treasury: loaded {state.Vaults.Count} vault(s) from disk");
                 WarnOnUnreconcilableDeposits();
             }
         }
@@ -1415,19 +2211,18 @@ namespace KMHServerAddon.Features.Treasury
             return all;
         }
 
-        // Season reset: drop every vault - personal AND guild. Caller backs up + logs.
+        // Drops personal AND guild vaults; the caller backs up and logs first.
         public static int ClearAllVaults()
         {
             int n;
-            lock (_lock) { n = _vaults.Count; _vaults.Clear(); }
+            lock (_lock) { n = _vaults.Count; _vaults.Clear(); _handOvers.Clear(); }
             SaveToDisk();
             return n;
         }
 
-        // Anti-shelter reset: drop a guild's vault entirely. Returns the silver it held, or -1 if there was none.
         public static long ClearGuildVault(string guildName)
         {
-            if (string.IsNullOrEmpty(guildName)) return -1;
+            if (string.IsNullOrEmpty(guildName) || IsPersonalKey(guildName)) return -1;
             long had;
             lock (_lock)
             {
@@ -1442,7 +2237,7 @@ namespace KMHServerAddon.Features.Treasury
         // Removes the guild vault too, so re-creating the guild name cannot resurrect it.
         public static long MoveGuildVaultToPersonal(string guildName, string toUsername)
         {
-            if (string.IsNullOrEmpty(guildName) || string.IsNullOrEmpty(toUsername)) return 0;
+            if (string.IsNullOrEmpty(guildName) || IsPersonalKey(guildName) || string.IsNullOrEmpty(toUsername)) return 0;
             long moved = 0;
             lock (_lock)
             {
@@ -1469,45 +2264,292 @@ namespace KMHServerAddon.Features.Treasury
                         moved, "", $"guild '{guildName}' vault returned on disband");
                 }
             }
-            SaveToDisk();
+            // The guild is already gone on disk, so an unwritten hand-back would leave its vault orphaned after a crash.
+            if (!SaveToDisk())
+            {
+                Diagnostics.ServerLog.Error($"Treasury: guild '{guildName}' vault hand-back to {toUsername} is not on disk yet - value moves are refused until a save succeeds. If the server stops first, 'kmh orphans' lists the vault for release.");
+                Maintenance.KmhMaintenanceGate.SetPersistenceDegraded(true);
+            }
             if (moved > 0)
                 Extensibility.KmhEventBus.Instance.RaiseTreasuryChanged(new KMH.Sdk.Server.Events.TreasuryChangedEvent
                 { OwnerKey = PersonalKeyFor(toUsername), IsGuildOwned = false, Reason = "guild disband refund" });
             return moved;
         }
 
-        // False means the change is in memory only; every value path treats that as a refusal rather than acknowledge a move that restart undoes.
+        // A sale's guild tax, once per marker. If the guild it was taken for no longer exists (or the name is now another
+        // guild's), it goes back to the payer it was taken from - logged - rather than rebuild or enrich a vault.
+        public static bool SettleGuildTaxOnce(string guildName, string identity, string marker, long amount, string payer, string note)
+        {
+            if (amount <= 0) return true;
+            int tax = (int)Math.Min(int.MaxValue, amount);
+            string id = string.IsNullOrEmpty(identity) ? null : identity;
+            if (Guilds.GuildIdentity.IsLive(guildName, id) || string.IsNullOrEmpty(marker) || string.IsNullOrEmpty(payer))
+                return DepositGuildSilverOnce(guildName, marker, tax, payer, note: note, identity: id);
+            bool back = DepositEscrowOnce(payer, marker + "-returned", tax, null, null, note + $" - returned, guild '{guildName}' disbanded");
+            if (back) Diagnostics.ServerLog.Info($"Treasury: {tax} silver of guild tax went back to {payer} - guild '{guildName}' no longer exists ({note}).");
+            return back;
+        }
+
+        internal const string OrphanVaultPrefix = "_orphaned:";
+
+        // Before a guild name is (re)used: a vault or pending donation left by an earlier guild of that name is set
+        // aside, never inherited. Credits to a dead name are refused, so nothing can re-create it before the new guild commits.
+        public static int PrepareGuildName(string guildName)
+        {
+            if (string.IsNullOrEmpty(guildName) || IsPersonalKey(guildName) || Guilds.GuildIdentity.IsLive(guildName)) return 0;
+            int set = 0;
+            lock (_lock)
+            {
+                if (!Guilds.GuildIdentity.IsLive(guildName) && _vaults.TryGetValue(guildName, out TreasurySnapshot old))
+                {
+                    string key = OrphanVaultPrefix + guildName + ":" + DateTime.UtcNow.Ticks;
+                    _vaults.Remove(guildName);
+                    old.OwnerKey = key;
+                    _vaults[key] = old;
+                    set++;
+                    Diagnostics.ServerLog.Warn($"Treasury: guild name '{guildName}' is being reused - the vault an earlier guild of that name left ({old.SilverBalance}s, {old.Items?.Count ?? 0} item kind(s)) is set aside as '{key}' for an admin, not inherited.");
+                }
+            }
+            if (set > 0 && !SaveToDisk()) Maintenance.KmhMaintenanceGate.SetPersistenceDegraded(true);
+            return set + RevertPendingGuildDonations(guildName);
+        }
+
+        // Guild vaults no live guild owns: set aside on reuse, or left by a disband the disk never took.
+        public static List<(string Key, long Silver, int ItemKinds, int Payloads)> OrphanVaults()
+        {
+            var outp = new List<(string, long, int, int)>();
+            lock (_lock)
+                foreach (KeyValuePair<string, TreasurySnapshot> kv in _vaults)
+                {
+                    if (kv.Value == null || IsPersonalKey(kv.Key)) continue;
+                    if (!kv.Key.StartsWith(OrphanVaultPrefix, StringComparison.Ordinal) && Guilds.GuildIdentity.IsLive(kv.Key)) continue;
+                    outp.Add((kv.Key, kv.Value.SilverBalance, kv.Value.Items?.Count ?? 0, kv.Value.ItemPayloads?.Count ?? 0));
+                }
+            return outp;
+        }
+
+        // Admin-only and explicit: an orphaned vault goes to the player the admin names, whole, in one write.
+        public static bool ReleaseOrphanVault(string key, string toUsername, string actor, out string message)
+        {
+            message = null;
+            if (string.IsNullOrEmpty(key) || string.IsNullOrEmpty(toUsername) || IsPersonalKey(key)) { message = "Usage: kmh treasury release-orphan <vault> <player>"; return false; }
+            lock (_lock)
+            {
+                if (!_vaults.TryGetValue(key, out TreasurySnapshot gv)) { message = $"No vault '{key}'."; return false; }
+                if (!key.StartsWith(OrphanVaultPrefix, StringComparison.Ordinal) && Guilds.GuildIdentity.IsLive(key))
+                { message = $"'{key}' belongs to a live guild - it is not orphaned."; return false; }
+                TreasurySnapshot before = RollbackPointLocked(PersonalKeyFor(toUsername));
+                var others = new Dictionary<string, TreasurySnapshot> { { key, JsonFileStore.FromJson<TreasurySnapshot>(JsonFileStore.ToJson(gv)) } };
+                _vaults.Remove(key);
+                TreasurySnapshot pv = GetOrCreateLocked(PersonalKeyFor(toUsername), isGuildOwned: false);
+                pv.SilverBalance    = AddSilver(pv, gv.SilverBalance, "orphan vault release");
+                pv.LifetimeSilverIn += gv.SilverBalance;
+                if (gv.Items != null)
+                    foreach (KeyValuePair<string, int> kv in gv.Items)
+                    {
+                        pv.Items.TryGetValue(kv.Key, out int cur);
+                        pv.Items[kv.Key] = AddQty(pv, cur, kv.Value, kv.Key, "orphan vault release");
+                    }
+                if (gv.ItemPayloads != null)
+                    foreach (Items.KmhThingPayload p in gv.ItemPayloads)
+                        if (p != null) AddPayloadLocked(pv, p);
+                RecordTransactionLocked(pv, toUsername, TreasuryTransaction.KindDeposit, gv.SilverBalance, "", $"orphaned vault '{key}' released by {actor}");
+                if (!CommitLocked(PersonalKeyFor(toUsername), before, others)) { message = "The server could not save that - nothing moved."; return false; }
+                message = $"Released '{key}' ({gv.SilverBalance}s, {gv.Items?.Count ?? 0} item kind(s), {gv.ItemPayloads?.Count ?? 0} payload(s)) to {toUsername} - by {actor}.";
+            }
+            Diagnostics.ServerLog.Info("Treasury: " + message);
+            return true;
+        }
+
+        // False means in memory only; every value path treats that as a refusal, not a move a restart would undo.
         public static bool SaveToDisk()
         {
             PersistedState state = new PersistedState();
-            long seq;
+            long seq, upTo;
             lock (_lock)
             {
-                state.Vaults = new List<TreasurySnapshot>(_vaults.Values);
+                state.Vaults = KmhDeepCopy.OfList(_vaults.Values);
+                state.HandOvers = new Dictionary<string, long>(_handOvers, StringComparer.Ordinal);
+                foreach (KeyValuePair<string, OwedFee> kv in _owedFees)
+                    state.OwedFees[kv.Key] = new OwedFee { Payer = kv.Value.Payer, Amount = kv.Value.Amount, Note = kv.Value.Note };
+                foreach (KeyValuePair<string, OwedFee> kv in _feeReturns)
+                    state.FeeReturns[kv.Key] = new OwedFee { Payer = kv.Value.Payer, Amount = kv.Value.Amount, Note = kv.Value.Note };
                 seq = JsonFileStore.NextSequence(); // ticket under the lock = snapshot order, so an older save can't clobber a newer
+                upTo = _lineSeq;
             }
-            return JsonFileStore.Save(KmhDataPaths.TreasuryFile, state, seq);
+            if (!JsonFileStore.Save(KmhDataPaths.TreasuryFile, state, seq)) return false;
+            // The audit line lands with the balance it describes: on the flusher's 2 s beat, a kill in between kept the
+            // balance and lost the line.
+            lock (_lock) ReleaseLinesLocked(upTo);
+            Persistence.TransactionLedger.Flush();
+            return true;
         }
 
         // The state to put back if the write fails; null means there was no vault, so a failed write must leave none behind either.
+        // Every commit takes one before it records a line, so the mark here is where a refused commit's lines begin.
         private static TreasurySnapshot RollbackPointLocked(string ownerKey)
-            => _vaults.TryGetValue(ownerKey, out TreasurySnapshot v)
-             ? JsonFileStore.FromJson<TreasurySnapshot>(JsonFileStore.ToJson(v))
-             : null;
+        {
+            _commitMark = _lineSeq;
+            return _vaults.TryGetValue(ownerKey, out TreasurySnapshot v)
+                 ? JsonFileStore.FromJson<TreasurySnapshot>(JsonFileStore.ToJson(v))
+                 : null;
+        }
 
         // Called inside _lock once the mutation is applied; the rollback copy costs a fraction of the save it guards.
         private static bool CommitLocked(string ownerKey, TreasurySnapshot before)
+            => CommitLocked(ownerKey, before, null);
+
+        // others are the further vaults this change touched. Restoring only the owner's left a donation's guild
+        // credited while the donation itself went back to pending, ready to be committed or refunded again.
+        private static bool CommitLocked(string ownerKey, TreasurySnapshot before, Dictionary<string, TreasurySnapshot> others)
         {
             if (SaveToDisk()) return true;
             if (before == null) _vaults.Remove(ownerKey);
             else                _vaults[ownerKey] = before;
+            if (others != null)
+                foreach (KeyValuePair<string, TreasurySnapshot> kv in others)
+                {
+                    if (kv.Value == null) _vaults.Remove(kv.Key);
+                    else                  _vaults[kv.Key] = kv.Value;
+                }
+            _unsavedLines.RemoveAll(l => l.Seq > _commitMark);
             Diagnostics.ServerLog.Warn($"Treasury: rolled back an unsaved change to {ownerKey} - the request was refused rather than acknowledged.");
             return false;
+        }
+
+        // A null entry means the vault did not exist, so a rollback removes the one the commit created.
+        private static Dictionary<string, TreasurySnapshot> GuildRollbackPointsLocked(TreasurySnapshot v, Func<Dto.PendingDeposit, bool> willCommit)
+        {
+            Dictionary<string, TreasurySnapshot> points = null;
+            foreach (Dto.PendingDeposit d in v.PendingDeposits)
+            {
+                if (d.State != Dto.PendingDeposit.StatePending || d.Kind != Dto.PendingDeposit.KindGuildDonate) continue;
+                if (string.IsNullOrEmpty(d.GuildName) || !willCommit(d)) continue;
+                points = points ?? new Dictionary<string, TreasurySnapshot>(StringComparer.OrdinalIgnoreCase);
+                if (!points.ContainsKey(d.GuildName)) points[d.GuildName] = RollbackPointLocked(d.GuildName);
+            }
+            return points;
         }
 
         private class PersistedState
         {
             public List<TreasurySnapshot> Vaults { get; set; } = new List<TreasurySnapshot>();
+            // Absent in older files, which had no quest hand-over in flight.
+            public Dictionary<string, long> HandOvers { get; set; } = new Dictionary<string, long>();
+            // Absent in older files, which credited fees with nothing on disk naming them.
+            public Dictionary<string, OwedFee> OwedFees { get; set; } = new Dictionary<string, OwedFee>();
+            // Apart from OwedFees, so an older build that reads this file ignores a return rather than crediting it.
+            public Dictionary<string, OwedFee> FeeReturns { get; set; } = new Dictionary<string, OwedFee>();
+        }
+
+        // A fee a vault commit took for the house pool, written down in that same commit and cleared only once the pool's
+        // own save holds it. Two files cannot be saved together, so this is what lets a restart finish the credit - once,
+        // because the pool keys the credit on the same marker.
+        internal sealed class OwedFee
+        {
+            public string Payer  { get; set; } = "";
+            public long   Amount { get; set; }
+            public string Note   { get; set; } = "";
+        }
+
+        private static readonly Dictionary<string, OwedFee> _owedFees = new Dictionary<string, OwedFee>(StringComparer.Ordinal);
+        // The same journey backwards: a fee the pool gives back for a deposit an older save reversed, debited on its marker.
+        private static readonly Dictionary<string, OwedFee> _feeReturns = new Dictionary<string, OwedFee>(StringComparer.Ordinal);
+
+        // Fires between a fee's steps: vault-saved before the pool credit, pool-saved before the clear, return-* for a return.
+        internal static Action<string> AtFeePhaseForTest;
+
+        internal static string FeeMarkerFor(string ownerKey, string txnId) => "fee:" + (ownerKey ?? "") + ":" + (txnId ?? "");
+        internal static string FeeReturnMarkerFor(string ownerKey, string txnId) => "unfee:" + (ownerKey ?? "") + ":" + (txnId ?? "");
+
+        // Caller holds _lock and saves next; a failed save must forget what this returned (ForgetFeesLocked).
+        private static string OweFeeLocked(string marker, long amount, string payer, string note)
+        {
+            if (amount <= 0 || string.IsNullOrEmpty(marker)) return null;
+            _owedFees[marker] = new OwedFee { Payer = payer ?? "", Amount = amount, Note = note ?? "" };
+            return marker;
+        }
+
+        // Caller holds _lock and saves next, like OweFeeLocked.
+        private static string OweFeeReturnLocked(string marker, long amount, string payer, string note)
+        {
+            if (amount <= 0 || string.IsNullOrEmpty(marker)) return null;
+            _feeReturns[marker] = new OwedFee { Payer = payer ?? "", Amount = amount, Note = note ?? "" };
+            return marker;
+        }
+
+        private static void ForgetFeesLocked(List<string> markers)
+        {
+            if (markers != null) foreach (string m in markers) if (m != null) _owedFees.Remove(m);
+        }
+
+        // For a fee taken in another store's write (a withdrawal row): written down here when the pool would not take it.
+        public static bool OweHouseFee(string marker, long amount, string payer, string note)
+        {
+            if (amount <= 0 || string.IsNullOrEmpty(marker)) return true;
+            lock (_lock) OweFeeLocked(marker, amount, payer, note);
+            if (SaveToDisk()) return true;
+            lock (_lock) _owedFees.Remove(marker);
+            return false;
+        }
+
+        // Each owed fee goes to the pool on its own marker and is then cleared. A pool that already holds the marker - a
+        // crash between its save and the clear - credits nothing and is cleared too. A refusal stays owed for the sweep.
+        public static int SettleOwedFees(IEnumerable<string> only = null)
+        {
+            var due = new List<(string Marker, OwedFee Fee, bool Back)>();
+            lock (_lock)
+            {
+                if (only == null)
+                {
+                    foreach (KeyValuePair<string, OwedFee> kv in _owedFees) due.Add((kv.Key, kv.Value, false));
+                    foreach (KeyValuePair<string, OwedFee> kv in _feeReturns) due.Add((kv.Key, kv.Value, true));
+                }
+                else
+                    foreach (string m in only)
+                    {
+                        if (m == null) continue;
+                        if (_owedFees.TryGetValue(m, out OwedFee f)) due.Add((m, f, false));
+                        else if (_feeReturns.TryGetValue(m, out OwedFee g)) due.Add((m, g, true));
+                    }
+            }
+            int paid = 0;
+            foreach ((string marker, OwedFee fee, bool back) in due)
+            {
+                AtFeePhaseForTest?.Invoke(back ? "return-vault-saved" : "vault-saved");
+                bool done = back ? Marketplace.MarketplaceStore.TryDebitHousePoolOnce(marker, fee.Amount, fee.Note)
+                                 : Marketplace.MarketplaceStore.TryCreditHousePoolOnce(marker, fee.Amount, fee.Note);
+                if (!done) continue;
+                AtFeePhaseForTest?.Invoke(back ? "return-pool-saved" : "pool-saved");
+                lock (_lock) { if (back) _feeReturns.Remove(marker); else _owedFees.Remove(marker); }
+                paid++;
+            }
+            // A marker that outlives a failed clear is harmless: the pool already holds it, so the retry moves nothing.
+            if (paid > 0 && !SaveToDisk())
+                Diagnostics.ServerLog.Warn($"Treasury: {paid} house-pool fee(s) were settled but their records could not be cleared yet - a retry moves nothing.");
+            return paid;
+        }
+
+        internal static int OwedFeeCountForTest(string markerPrefix)
+        {
+            int n = 0;
+            lock (_lock)
+            {
+                foreach (string m in _owedFees.Keys) if (m.StartsWith(markerPrefix ?? "", StringComparison.Ordinal)) n++;
+                foreach (string m in _feeReturns.Keys) if (m.StartsWith(markerPrefix ?? "", StringComparison.Ordinal)) n++;
+            }
+            return n;
+        }
+
+        internal static void ForgetOwedFeesForTest(string markerPrefix)
+        {
+            lock (_lock)
+            {
+                foreach (string m in new List<string>(_owedFees.Keys))
+                    if (m.StartsWith(markerPrefix ?? "", StringComparison.Ordinal)) _owedFees.Remove(m);
+                foreach (string m in new List<string>(_feeReturns.Keys))
+                    if (m.StartsWith(markerPrefix ?? "", StringComparison.Ordinal)) _feeReturns.Remove(m);
+            }
         }
     }
 }

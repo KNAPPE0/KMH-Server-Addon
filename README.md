@@ -1,4 +1,4 @@
-# KMH Server Addon
+# KMH: Colony Nexus Server Addon
 
 A drop-in addon that gives your **RimWorld Together** server a full player-driven
 economy: marketplace, auctions, a want board, personal and guild treasuries, a
@@ -7,24 +7,18 @@ server-wide event & global-quest engine, a Server Standings hub, player mail and
 chat channels, and an optional Discord bridge. Everything is server-authoritative
 and crash-safe. Extract it next to your server and that is the whole install.
 
-It pairs with the **[KMH Patch](../KMH-Patch)** client mod. Players without the
-patch still connect and play normally; the KMH features simply light up for the
+It pairs with the **[KMH: Colony Nexus](../KMH-Patch)** client mod. Players without it
+still connect and play normally; the KMH features simply light up for the
 ones who have it.
 
 ## RWT version
 
-KMH v1.3.0 is verified against the nine most recent RWT releases, from
-**26.5.24.1** up to **26.8.31.1**. The addon auto-detects which one it is sitting
+Colony Nexus v1.3.1 runs next to RWT **26.10.20.1**, which makes it a RimWorld 1.7
+server, or RWT **26.10.15.1** for RimWorld 1.6. It needs .NET 10; the
+self-contained packages carry it. The addon auto-detects which RWT it is sitting
 next to and loads the matching build — it identifies the RWT server by what the
 executable actually contains, so a renamed or panel-mangled server file is still
 found.
-
-| RWT release | Status |
-|---|---|
-| 26.8.31.1 · 26.8.16.1 (1) · 26.8.16.1 · 26.8.9.1 · 26.7.25.1 | supported |
-| 26.6.23.1 · 26.6.9.1 · 26.6.8.1 | supported |
-| 26.5.24.1 | supported — oldest supported release |
-| 26.4.18.1 and older | **not supported** |
 
 RWT moved a core network type between 26.4.18.1 and 26.5.24.1, so releases below
 26.5.24.1 are a different generation. On those, KMH refuses to start rather than
@@ -35,7 +29,7 @@ server running normally.
 KMH API transport enabled (the default since v1.2.0); it's the recommended/required
 path there.**
 
-Update the **KMH Server Addon** and the **KMH Patch** together so both sides match.
+Update the **Colony Nexus Server Addon** and **KMH: Colony Nexus** together so both sides match.
 
 ## What your players get
 
@@ -66,6 +60,11 @@ Update the **KMH Server Addon** and the **KMH Patch** together so both sides mat
 - **Guilds** - ranks, invites, buyable perks paid from the guild vault,
   per-rank daily withdraw limits, MOTDs, and alliance/hostility diplomacy that
   gates guild-only visibility.
+- **Guild Federation** *(on by default)* - guilds on different servers join one
+  federation kept by Colony Nexus Global, with renown, weekly objectives and
+  small local bonuses (3% at most, `Config/Federation.json`). A server nobody
+  set Global up on federates through a private identity that is never listed.
+  No silver, items or resources move between servers.
 - **Sites** - players build production sites on world tiles, staff them
   together for worker XP, and route the output where they choose.
 - **Server Standings** - a full in-game progression hub: player, guild,
@@ -80,12 +79,16 @@ Update the **KMH Server Addon** and the **KMH Patch** together so both sides mat
   returned automatically, and a sender can recall their own unopened attachment
   at any time, so gifts can never strand.
 - **KMH chat** - server-wide, guild, and private channels in one Communications
-  window, with unread counts and a glow on the KMH tab so a message is never
+  window, with unread counts and a glow on the Colony Nexus tab so a message is never
   missed. Recent history survives a reconnect. Players can block someone or mute
   notifications per channel type; staff can remove messages.
 - **Offline notifications** - auction, marketplace, and quest outcomes that fire
   while a player is away are queued and delivered as letters on their next login.
   (Separate from Player mail above, which is player-written.)
+- **Bug reports & suggestions** - players report from inside the game with an
+  optional screenshot and diagnostics they can read before sending. You read them
+  with `kmh reports`; `kmh reports forward on` also passes them to the KMH team
+  through Colony Nexus Global (off by default).
 
 ## What you control as the owner
 
@@ -99,9 +102,12 @@ Update the **KMH Server Addon** and the **KMH Patch** together so both sides mat
   pool. Either system can be switched off entirely from `Config/Features.json`.
 - **Discord bridge** *(optional)* - two-way chat, account linking, trading by
   friendly item names, showcase/WTB boards that edit in place, join/leave
-  announces, slash commands, a live console feed, and branded embeds with
-  bundled icons. KMH chat can be bridged to its own Discord channel with each
-  direction toggled independently; linked accounts post under the player's
+  announces, slash commands and a live console feed. Nothing is posted as an
+  embed: each leaderboard is one image a day, drawn by the server and edited
+  live; the marketplace gets a live market board and a daily activity log; the
+  Admin channel gets a live server status and plain-text alerts. KMH chat can
+  be bridged to its own Discord channel with each direction toggled
+  independently; linked accounts post under the player's
   in-game name, and relayed lines are always tagged as coming from Discord.
   Player IPs and host file paths are scrubbed at the boundary, and each piece
   self-disables when its channel isn't configured.
@@ -118,16 +124,26 @@ Update the **KMH Server Addon** and the **KMH Patch** together so both sides mat
   unsecured bind. Forward TCP `5099` for remote players; KMH falls back to chat
   if the port is unreachable. Tune in `Config/Transport.json`; verify with
   `kmh transport-test`.
+- **Your listing on Colony Nexus** *(optional)* - with Colony Nexus Global set
+  up and visibility *Public*, the `Listing` block in `Config/Global.json` is what
+  players see on the website and in the in-game browser: description, region,
+  languages, tags, a tagline, play style, whether new players are welcome, a
+  whitelist and where to apply, rules and Workshop collection links, an
+  announcement and a maintenance message. Listing changes pass Colony Nexus
+  moderation; a held or refused change is reported in the console in plain words.
 - **Admin tools** - the `kmh` command family in console and `/kmh` in chat:
-  `status`, `diag`, `transport`, grant silver, drain the house pool, live config
-  reloads, enforcement management, fire events / global quests, and season rolls.
+  `doctor` (every health check in one list, worst first, each with its fix),
+  `status`, `diag`, `transport`, `perf` (traffic, compression, send queues),
+  `reports`, grant silver, drain the house pool, live config reloads, enforcement
+  management, fire events / global quests, and season rolls.
 - **Reliability & recovery** - automatic backups of `KMH-Data` on boot and
   before any data-format migration, a startup integrity scan, a guard that
   refuses to corrupt data across versions, an append-only economy ledger, and
   recovery commands: `verify`, `backup`/`backups`, `save`, `inspect`, `cancel`
   (refund a stuck auction/want/quest), `ledger`, `rebuild-standings`, and
-  `smoketest` (live health). `kmh selftest` runs the build's contract suite -
-  a developer/support tool, not a health metric; see `kmh help advanced`.
+  `smoketest` (live health). `kmh selftest` is the build's contract suite and
+  runs only in the offline self-test runner - a live server refuses it, because
+  its suites seed and clear real stores.
 - **Extensions** - drop community DLLs into `kmh-extensions/`; the SDK gives
   authors a stable API plus storage, events, and command hooks. See
   [EXTENSIONS.md](EXTENSIONS.md).
@@ -140,14 +156,14 @@ Keep the whole folder together: the zip also carries `KMH-Data` with the icons
 and notes, and the `-selfcontained` build puts the .NET runtime beside the
 executable.
 
-It needs the **.NET 8 runtime** on the server, and it loads RWT's own DLLs from
+It needs the **.NET 10 runtime** on the server, and it loads RWT's own DLLs from
 that folder at runtime — RimWorld Together is never bundled. On Linux the file
 is `KMHServerAddon` with no extension, and a zip cannot carry the execute bit,
 so `chmod +x KMHServerAddon` once after extracting. Full steps in
 [SETUP.txt](SETUP.txt).
 
-On a host without .NET 8 — or one with no internet to fetch a runtime — use the
-**`-selfcontained`** zip for your platform. It carries .NET 8 inside it, so
+On a host without .NET 10 — or one with no internet to fetch a runtime — use the
+**`-selfcontained`** zip for your platform. It carries .NET 10 inside it, so
 nothing needs installing or downloading on the server. Every architecture has
 one: `win-x64`, `win-x86`, `win-arm64`, `linux-x64`, `linux-arm`, `linux-arm64`.
 Managed panels (Bisect, Pterodactyl, …) that run a fixed `GameServer` launcher
@@ -157,7 +173,7 @@ are covered in the *Managed / panel hosts* section of [SETUP.txt](SETUP.txt).
 other people under other licences, so KMH fetches them rather than shipping
 them: run `Tools\get-media-tools.ps1` (or the `.sh`) from inside the extracted
 server and both land where KMH looks. The same scripts are published on their
-own as **`KMH-MediaTools-v1.3.0.zip`**. Either one runs on any machine with
+own as **`KMH-MediaTools-v1.3.1.zip`**. Either one runs on any machine with
 internet, so a server without any is fine — fetch elsewhere, copy the `Tools`
 folder over. Details in [SETUP.txt](SETUP.txt).
 

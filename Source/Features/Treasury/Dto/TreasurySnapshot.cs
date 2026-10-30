@@ -43,6 +43,9 @@ namespace KMHServerAddon.Features.Treasury.Dto
         // A lower generation arriving means the client loaded an older save, which is the duplication rollback.
         [JsonProperty("last_save_generation")] public long LastSaveGeneration { get; set; } = 0;
 
+        // Per colony ledger: a generation counts saves of one game, so another colony's low number is no rollback.
+        [JsonProperty("ledger_generations")] public Dictionary<string, long> LedgerGenerations { get; set; } = new Dictionary<string, long>();
+
         // Computed per caller when the snapshot is built, because they depend on rank and ownership.
         [JsonProperty("can_deposit")]          public bool CanDeposit  { get; set; } = false;
         [JsonProperty("can_withdraw")]         public bool CanWithdraw { get; set; } = false;
@@ -86,7 +89,7 @@ namespace KMHServerAddon.Features.Treasury.Dto
         [JsonProperty("txn_id")]          public string TxnId          { get; set; } = "";
         [JsonProperty("username")]        public string Username       { get; set; } = "";
         [JsonProperty("created_utc")]     public long   CreatedUtcTicks{ get; set; } = 0;
-        [JsonProperty("committed_utc")]   public long   CommittedUtcTicks { get; set; } = 0;   // set when it became spendable
+        [JsonProperty("committed_utc")]   public long   CommittedUtcTicks { get; set; } = 0;
         [JsonProperty("state")]           public string State          { get; set; } = StatePending;
         [JsonProperty("kind")]            public string Kind           { get; set; } = KindSilver;
 
@@ -100,6 +103,11 @@ namespace KMHServerAddon.Features.Treasury.Dto
         // Held aside and credited to the house pool only on commit, never on a revert.
         [JsonProperty("fee")]             public int    Fee            { get; set; } = 0;
         [JsonProperty("guild_name")]      public string GuildName      { get; set; } = "";
+        // The incarnation the donation was made to; a commit credits only that guild, never whoever holds the name now.
+        [JsonProperty("guild_id")]        public string GuildIdentity  { get; set; } = "";
+        // The colony ledger and save generation that made it durable; that colony going back past it undoes it.
+        [JsonProperty("ledger_id")]       public string LedgerId       { get; set; } = "";
+        [JsonProperty("confirmed_gen")]   public long   ConfirmedGeneration { get; set; } = 0;
     }
 
     // Payloads gone from the vault under a take marker but not yet named by a transaction row; the vault owns them until a row does.

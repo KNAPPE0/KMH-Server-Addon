@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Threading;
 using Newtonsoft.Json;
@@ -12,13 +12,15 @@ namespace KMHServerAddon.Transactions
         // Client-stable across a reconnect, so a retry cannot run the action twice.
         [JsonProperty("req_key")]    public string     RequestKey    { get; set; } = "";
         [JsonProperty("player")]     public string     Player        { get; set; } = "";
-        [JsonProperty("guild")]      public string     Guild         { get; set; } = "";   // "" when not guild-related
-        [JsonProperty("save_gen")]   public long       SaveGeneration { get; set; } = 0;   // for rollback reconciliation (v1.4.0)
-        [JsonProperty("source")]     public string     Source        { get; set; } = "";   // owning system
+        [JsonProperty("guild")]      public string     Guild         { get; set; } = "";
+        // The incarnation a guild-vault take came from, so a refund can never land in a re-created guild of that name.
+        [JsonProperty("guild_id")]   public string     GuildIdentity { get; set; } = "";
+        [JsonProperty("save_gen")]   public long       SaveGeneration { get; set; } = 0;   // reserved; nothing writes it yet
+        [JsonProperty("source")]     public string     Source        { get; set; } = "";
         [JsonProperty("type")]       public KmhTxType  Type          { get; set; }
-        [JsonProperty("dest")]       public string     Destination   { get; set; } = "";   // receiving system
-        [JsonProperty("requested")]  public string     Requested     { get; set; } = "";   // what was asked for
-        [JsonProperty("validated")]  public string     Validated     { get; set; } = "";   // what the server accepted
+        [JsonProperty("dest")]       public string     Destination   { get; set; } = "";
+        [JsonProperty("requested")]  public string     Requested     { get; set; } = "";
+        [JsonProperty("validated")]  public string     Validated     { get; set; } = "";
 
         // What was actually taken from the source - refundable, so boot recovery can settle a crashed move.
         [JsonProperty("esc_silver")] public long       EscrowSilver  { get; set; } = 0;
@@ -27,6 +29,8 @@ namespace KMHServerAddon.Transactions
 
         // After a reset or restore the same target id names something else, so a replayed move must match the generation.
         [JsonProperty("target_id")]  public long       TargetId      { get; set; } = 0;
+        // Which store TargetId names; ids overlap between stores, so the number alone cannot be looked up.
+        [JsonProperty("target_kind")] public string    TargetKind    { get; set; } = "";
         [JsonProperty("target_gen")] public long       TargetGeneration { get; set; } = 0;
 
         // Seller goods go back to the seller, never to a resurrected listing - that is how a refunded listing sells twice.
@@ -42,6 +46,17 @@ namespace KMHServerAddon.Transactions
         public string TakeMarker    => Id + ":w";
         public string RefundMarker  => Id + ":r";
         public string CounterMarker => Id + ":cp";
+        // A want fill pays three parties, so its surplus and the seller's payout each get their own marker.
+        public string SurplusMarker => Id + ":s";
+        public string PayoutMarker  => Id + ":p";
+        [JsonProperty("payout")]     public long       PayoutSilver  { get; set; } = 0;
+        [JsonProperty("tax_house")]  public long       HouseTax      { get; set; } = 0;
+        [JsonProperty("tax_guild")]  public long       GuildTax      { get; set; } = 0;
+        [JsonProperty("tax_guild_name")] public string TaxGuild      { get; set; } = "";
+        // Blank on rows written before guild identities were recorded; those settle against whoever holds the name.
+        [JsonProperty("tax_guild_id")]   public string TaxGuildIdentity { get; set; } = "";
+        // Further takes this row answers for, each on its own marker (a gear pick is its own vault commit).
+        [JsonProperty("take_markers")] public List<string> ExtraTakeMarkers { get; set; } = new List<string>();
 
         public bool HasCounterEscrow
             => CounterSilver > 0

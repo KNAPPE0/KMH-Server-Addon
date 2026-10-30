@@ -74,13 +74,20 @@ namespace KMHServerAddon.Features.Discord
         private static void Enqueue(object o, string prefix, Printer.Verbosity v)
         {
             if (!_enabled || o == null) return;
-            if (!PassesVerbosity(v)) return;               // respect the server's verbosity, like the console does
-            string line = o.ToString();
-            if (string.IsNullOrEmpty(line)) return;
-            if (line.Contains("Discord:")) return;
+            if (!PassesVerbosity(v)) return;
+            string formatted = FeedLine(o.ToString(), prefix);
+            if (formatted == null) return;
             if (_queue.Count >= MaxQueued) { _queue.TryDequeue(out _); _dropped++; }
-            // Console lines can carry player chat, so a ping would otherwise ride out to the admin channel.
-            _queue.Enqueue(prefix + DiscordText.NoMentions(line));
+            _queue.Enqueue(formatted);
+        }
+
+        internal static string FeedLine(string line, string prefix)
+        {
+            if (string.IsNullOrEmpty(line)) return null;
+            // Only Colony Nexus's own Discord lines are skipped, so a player cannot hide theirs by typing "Discord:".
+            if (line.StartsWith(Constants.LogPrefix + " Discord:", StringComparison.Ordinal)) return null;
+            // Console lines can carry player chat: a ping would ride out to the admin channel, and a newline would forge a line.
+            return prefix + DiscordText.NoFenceBreak(DiscordText.NoMentions(DiscordText.OneLine(line)));
         }
 
         // Mirrors RWT's own filter, so Discord never receives a line the server console would have suppressed.
@@ -93,7 +100,7 @@ namespace KMHServerAddon.Features.Discord
             {
                 case Printer.Verbosity.Verbose: return configured >= 1;
                 case Printer.Verbosity.Extreme: return configured >= 2;
-                default:                        return true; // Normal (and anything unknown) always shows
+                default:                        return true;
             }
         }
 
@@ -115,7 +122,8 @@ namespace KMHServerAddon.Features.Discord
             if (sb.Length > 0) PostBlock(ch, sb.ToString());
         }
 
-        private static void PostBlock(ulong ch, string body)
-            => DiscordBridge.PostToChannel(ch, $"```\n{body.TrimEnd()}\n```");
+        internal static string Block(string body) => $"```\n{DiscordText.NoFenceBreak(body).TrimEnd()}\n```";
+
+        private static void PostBlock(ulong ch, string body) => DiscordBridge.PostToChannel(ch, Block(body));
     }
 }

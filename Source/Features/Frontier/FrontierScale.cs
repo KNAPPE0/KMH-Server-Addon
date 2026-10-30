@@ -2,7 +2,7 @@ using System;
 
 namespace KMHServerAddon.Features.Frontier
 {
-    // Reclaim cost and reward move together with the population: a busier server is a bigger contest, not a cheaper one.
+    // Reclaim cost and reward move with the population: a busier server is a bigger contest, not a cheaper one.
     internal static class FrontierScale
     {
         // Pure, so the curve can be proven without a server: the caller supplies both counts.
@@ -38,15 +38,21 @@ namespace KMHServerAddon.Features.Frontier
             try
             {
                 foreach (TCPNetwork.ServerClient c in TCPNetwork.Network.ServerClients.Keys)
-                    if (c?.IsVerified == true) n++;
+                    if (c?.IsVerified == true && Simulation.SimulatedAccounts.IsPerson(c.GetData<UserFile>()?.Username)) n++;
             }
             catch { }
             return n;
         }
 
+        // People only: simulated playtest accounts have no colony to send to an outpost.
         private static int KnownCount()
         {
-            try { return PlayerStats.PlayerStatsStore.PlayerCount; }
+            try
+            {
+                int n = 0;
+                foreach (string u in PlayerStats.PlayerStatsStore.UsernamesByLastSeen()) if (Simulation.SimulatedAccounts.IsPerson(u)) n++;
+                return n;
+            }
             catch { return 0; }
         }
     }

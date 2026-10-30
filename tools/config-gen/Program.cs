@@ -21,7 +21,7 @@ class P
         string root = Path.Combine(Path.GetTempPath(), "kmh-configgen-" + Guid.NewGuid().ToString("N").Substring(0, 8));
         Directory.CreateDirectory(root);
 
-        // Pointing Master.MainPath at a temp folder is what makes this a real first boot, not a read of my own server.
+        // Master.MainPath at a temp folder makes this a real first boot, not a read of an existing server's data.
         if (!TrySetMainPath(root, out string how)) { Console.Error.WriteLine("could not set Master.MainPath: " + how); return 2; }
         Console.WriteLine("data root: " + root + "  (" + how + ")");
         Console.WriteLine();

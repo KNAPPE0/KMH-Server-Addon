@@ -21,20 +21,20 @@ namespace KMHServerAddon.Features.Guilds.Contributions
                     ? s : new State();
         }
 
-        // The sequence is taken under the lock but serializing happens outside, since the ledger only ever grows.
-        private static void Save(State s, long seq)
+        // A copy taken under the lock is serialized outside it, so an append racing the write cannot tear it.
+        private static bool Save(State s, long seq)
         {
-            try { JsonFileStore.Save(KmhDataPaths.GuildContributionsFile, s, seq); }
-            catch (Exception ex) { ServerLog.Warn($"Guild contributions: save failed ({ex.Message})."); }
+            try { return JsonFileStore.Save(KmhDataPaths.GuildContributionsFile, s, seq); }
+            catch (Exception ex) { ServerLog.Warn($"Guild contributions: save failed ({ex.Message})."); return false; }
         }
 
         // Boot materializes the file so the next integrity scan reads an empty ledger instead of reporting it missing.
-        public static void SaveToDisk()
+        public static bool SaveToDisk()
         {
             State s;
             long  seq;
-            lock (_lock) { s = _state; seq = JsonFileStore.NextSequence(); }
-            Save(s, seq);
+            lock (_lock) { s = KmhDeepCopy.Of(_state); seq = JsonFileStore.NextSequence(); }
+            return Save(s, seq);
         }
 
         public static void RecordSilver(string guild, string player, long amount, string txId = "")
@@ -62,7 +62,7 @@ namespace KMHServerAddon.Features.Guilds.Contributions
         {
             State s;
             long  seq;
-            lock (_lock) { _state.Records.Add(c); s = _state; seq = JsonFileStore.NextSequence(); }
+            lock (_lock) { _state.Records.Add(c); s = KmhDeepCopy.Of(_state); seq = JsonFileStore.NextSequence(); }
             Save(s, seq);
         }
 
@@ -77,6 +77,34 @@ namespace KMHServerAddon.Features.Guilds.Contributions
 
         public static KmhContributionSummary SummaryFor(string guild, string player)
             => KmhContributions.Derive(ForPlayer(guild, player));
+
+        // Records from sinceUtcTicks on, so a guild re-created under an old name never answers for the old one's donations.
+        public static KmhContributionSummary SummaryFor(string guild, string player, long sinceUtcTicks)
+            => KmhContributions.Derive(ForPlayer(guild, player).FindAll(c => sinceUtcTicks <= 0 || TicksOf(c) >= sinceUtcTicks));
+
+        private static long TicksOf(KmhGuildContribution c)
+            => DateTime.TryParse(c.TimestampUtc, System.Globalization.CultureInfo.InvariantCulture,
+                                 System.Globalization.DateTimeStyles.RoundtripKind, out DateTime t) ? t.ToUniversalTime().Ticks : 0;
+
+        public static void RecordReturn(string guild, string player, long amount, string txId, string reason)
+        {
+            if (string.IsNullOrEmpty(guild) || string.IsNullOrEmpty(player) || amount <= 0) return;
+            Append(new KmhGuildContribution
+            {
+                Id = Guid.NewGuid().ToString("N"), GuildId = guild, PlayerId = player, TransactionId = txId ?? "",
+                Type = KmhContributionType.Return, SilverValue = amount, Reason = reason ?? "",
+                TimestampUtc = DateTime.UtcNow.ToString("o"),
+            });
+        }
+
+        public static List<string> GuildsOf(string player)
+        {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            lock (_lock)
+                foreach (KmhGuildContribution c in _state.Records)
+                    if (c != null && Eq(c.PlayerId, player) && !string.IsNullOrEmpty(c.GuildId)) seen.Add(c.GuildId);
+            return new List<string>(seen);
+        }
 
         public static List<string> PlayersIn(string guild)
         {

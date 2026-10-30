@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The one process in a KMH fleet that holds a Discord gateway connection. It runs on its own host and is
+       never part of a game server's output. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>KmhDiscordCoordinator</AssemblyName>
+    <RootNamespace>KmhDiscordCoordinator</RootNamespace>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Discord.Net" Version="3.16.0" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+  </ItemGroup>
+
+  <!-- Compiled, not copied: the wire contract has exactly one definition and both sides build from it. -->
+  <ItemGroup>
+    <Compile Include="..\Source\Features\Discord\Contract\*.cs" LinkBase="Contract" />
+  </ItemGroup>
+
+</Project>

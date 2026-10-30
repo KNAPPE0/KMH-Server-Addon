@@ -42,7 +42,7 @@ namespace KMHServerAddon.Features.Chat
         // Only a real change is charged, or repeating a setting would trip a limit aimed at a script.
         internal static bool RefuseForChurn(Util.KmhRateWindow window, string blocker, bool willChange, long nowTicks, ChatConfig cfg)
             => willChange && window != null && cfg != null
-               && !window.Allow(blocker, nowTicks, cfg.MaxBlockChangesPerWindow, cfg.BlockChangeWindowSeconds);
+               && !window.Allow(blocker, nowTicks, cfg.Blocking.MaxChangesPerWindow, cfg.Blocking.ChangeWindowSeconds);
 
         // Nothing checks the target is a real player, so without the caps below a script could grow this file unbounded.
         public static bool SetBlock(string blocker, string target, bool on, out string refusal)
@@ -52,7 +52,7 @@ namespace KMHServerAddon.Features.Chat
                 || string.Equals(blocker, target, StringComparison.OrdinalIgnoreCase)) return false;
             bool changed;
             ChatConfig cfg = ChatConfig.Current;
-            int max = cfg.MaxBlocksPerUser;
+            int max = cfg.Blocking.MaxPerUser;
             long now = DateTime.UtcNow.Ticks;
             lock (_lock)
             {

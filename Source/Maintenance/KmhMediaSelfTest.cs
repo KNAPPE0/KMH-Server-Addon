@@ -112,14 +112,21 @@ namespace KMHServerAddon.Maintenance
                        == "https://static.klipy.com/ii/a/b/c.webp",
                    Features.Chat.ChatMediaUrl.ResolverSourceFor(cfg, wrappedWebp)));
 
-            // ...and the owner can still shut that door, which is the half that has to keep working.
-            var openMedia = new Features.Media.MediaConfig(); openMedia.Clamp();
+            // The owner must still be able to shut that door; a shipped default and a deliberately emptied list differ.
+            var openMedia = new Features.Media.MediaConfig
+            { Fetch = new Features.Media.MediaFetchSettings { SourceHostAllowList = new string[0] } };
+            openMedia.Clamp();
+            var shippedMedia = new Features.Media.MediaConfig(); shippedMedia.Clamp();
             var lockedMedia = new Features.Media.MediaConfig
-            { SourceHostAllowList = new[] { "cdn.discordapp.com" } };
+            { Fetch = new Features.Media.MediaFetchSettings { SourceHostAllowList = new[] { "cdn.discordapp.com" } } };
             lockedMedia.Clamp();
-            r.Add(("media: by default the server may fetch any https host",
+            r.Add(("media: an explicitly emptied source list still means any https host",
                    Features.Media.KmhMediaFetch.AllowedForTest("https://static.klipy.com/x.webp", openMedia, out _),
                    ""));
+            bool shippedAllowsCdn = Features.Media.KmhMediaFetch.AllowedForTest("https://cdn.discordapp.com/x.webp", shippedMedia, out _);
+            bool shippedRefusesOther = !Features.Media.KmhMediaFetch.AllowedForTest("https://static.klipy.com/x.webp", shippedMedia, out string shippedWhy);
+            r.Add(("media: the shipped default allows Discord's CDN and refuses an unlisted host",
+                   shippedAllowsCdn && shippedRefusesOther, shippedWhy));
             r.Add(("media: an owner-set source list refuses a host outside it",
                    !Features.Media.KmhMediaFetch.AllowedForTest("https://static.klipy.com/x.webp", lockedMedia, out string lockedWhy)
                    && Features.Media.KmhMediaFetch.AllowedForTest("https://cdn.discordapp.com/x.webp", lockedMedia, out _),
@@ -148,13 +155,13 @@ namespace KMHServerAddon.Maintenance
             if (anim.Ok)
             {
                 int reread = 0;
-                try { using (Image img = Image.Load(anim.Bytes)) reread = img.Frames.Count; } catch { }
+                try { using (Image img = Image.Load(Features.Media.KmhMediaTranscode.Decoding(), anim.Bytes)) reread = img.Frames.Count; } catch { }
                 r.Add(("media: the converted gif really holds every frame", reread == 5, reread + " frame(s)"));
                 r.Add(("media: dimensions survive the conversion", anim.Width == 40 && anim.Height == 30,
                        $"{anim.Width}x{anim.Height}"));
             }
 
-            // Expiring the id -> url registration alongside the byte cache made an older gif fall back to a flattened still.
+            // The id -> url registration must outlive the byte cache, or an older gif falls back to a flattened still.
             const long old = 100L, fresh = 900L, cut = 500L;
             r.Add(("media: the cache TTL releases bytes and never a registration",
                    Features.Media.KmhMediaCache.ExpiresOnTtl(true, old, cut)
@@ -165,7 +172,7 @@ namespace KMHServerAddon.Maintenance
                    Features.Media.KmhMediaCache.MaxRegistrations >= 10_000, ""));
 
             // Measured on a real 498x498 klipy source: 5.4MB of gif became 2.5MB at 320px, with all 42 frames intact.
-            var capped = new Features.Media.MediaConfig { AnimationMaxHeight = 64 }; capped.Clamp();
+            var capped = Img(i => i.AnimationMaxHeight = 64); capped.Clamp();
             byte[] tallAnim = MakeWebp(frames: 4, w: 200, h: 200);
             var shrunk = Features.Media.KmhMediaTranscode.Convert(tallAnim, capped);
             r.Add(("media: a tall animation is sent at chat size, keeping every frame",
@@ -179,18 +186,17 @@ namespace KMHServerAddon.Maintenance
                    && stillTall.Ok && stillTall.Width == 200 && stillTall.Height == 200,
                    $"short={shortAnim.Width}x{shortAnim.Height} still={stillTall.Width}x{stillTall.Height}"));
             r.Add(("media: the size cap is owner-editable and can be turned off",
-                   new Features.Media.MediaConfig().AnimationMaxHeight > 0
+                   new Features.Media.MediaConfig().Images.AnimationMaxHeight > 0
                    && Features.Media.KmhMediaTranscode.Convert(
-                          tallAnim, Clamped(new Features.Media.MediaConfig { AnimationMaxHeight = 0 })).Height == 200, ""));
+                          tallAnim, Clamped(Img(i => i.AnimationMaxHeight = 0))).Height == 200, ""));
 
-            // Formats the client already reads are handed back untouched rather than re-encoded.
             byte[] png = Features.Media.KmhMediaTranscode.Convert(stillWebp, mcfg).Bytes;
             var passed = Features.Media.KmhMediaTranscode.Convert(png, mcfg);
             r.Add(("media: an already-decodable format passes through without re-encoding",
                    passed.Ok && passed.PassedThrough && ReferenceEquals(passed.Bytes, png), ""));
 
             // Each limit is the only thing between a hostile file and the server.
-            var tiny = new Features.Media.MediaConfig { MaxFrames = 2 }; tiny.Clamp();
+            var tiny = Img(i => i.MaxFrames = 2); tiny.Clamp();
             var tooMany = Features.Media.KmhMediaTranscode.Convert(animWebp, tiny);
             r.Add(("media: too many frames is refused", !tooMany.Ok && tooMany.Error.Contains("frames"), tooMany.Error));
 
@@ -198,33 +204,33 @@ namespace KMHServerAddon.Maintenance
             byte[] bigWebp  = MakeWebp(frames: 1, w: 300, h: 300);
             byte[] bigAnim  = MakeWebp(frames: 8, w: 300, h: 300);
 
-            var narrow = new Features.Media.MediaConfig { MaxDimension = 64 }; narrow.Clamp();
+            var narrow = Img(i => i.MaxDimension = 64); narrow.Clamp();
             var tooWide = Features.Media.KmhMediaTranscode.Convert(bigWebp, narrow);
             r.Add(("media: an over-sized image is refused on its header, before decoding",
                    !tooWide.Ok && tooWide.Error.Contains("side limit"), tooWide.Error));
 
-            var fewPixels = new Features.Media.MediaConfig { MaxPixels = 4096, MaxDimension = 4096 }; fewPixels.Clamp();
+            var fewPixels = Img(i => { i.MaxPixels = 4096; i.MaxDimension = 4096; }); fewPixels.Clamp();
             var tooBig = Features.Media.KmhMediaTranscode.Convert(bigWebp, fewPixels);
             r.Add(("media: a pixel-count bomb is refused", !tooBig.Ok && tooBig.Error.Contains("pixels"), tooBig.Error));
 
             // ImageSharp materialises every frame in one Load, so the fixture must exceed the clamp floor to fire the bound.
             byte[] memBomb = MakeWebp(frames: 12, w: 400, h: 400);
-            var tightMem = new Features.Media.MediaConfig { MaxDecodedMegabytes = 4, MaxFrames = 500 }; tightMem.Clamp();
+            var tightMem = Img(i => { i.MaxDecodedMegabytes = 4; i.MaxFrames = 500; }); tightMem.Clamp();
             var bomb = Features.Media.KmhMediaTranscode.Convert(memBomb, tightMem);
             r.Add(("media: total decoded animation cost is bounded, not just per-frame pixels",
                    !bomb.Ok && bomb.Error.Contains("decoding would need"),
-                   bomb.Ok ? $"NOT REFUSED: {bomb.Width}x{bomb.Height} {bomb.Frames}f, cap {tightMem.MaxDecodedBytes}B, src {memBomb.Length}B"
+                   bomb.Ok ? $"NOT REFUSED: {bomb.Width}x{bomb.Height} {bomb.Frames}f, cap {tightMem.Images.MaxDecodedBytes}B, src {memBomb.Length}B"
                            : bomb.Error));
             r.Add(("media: the decoded-memory bound is its own number, not derived from the others",
-                   new Features.Media.MediaConfig().MaxDecodedBytes > 0
-                   && new Features.Media.MediaConfig { MaxDecodedMegabytes = 1 }.MaxDecodedMegabytes >= 1, ""));
+                   new Features.Media.MediaConfig().Images.MaxDecodedBytes > 0
+                   && Clamped(Img(i => i.MaxDecodedMegabytes = 1)).Images.MaxDecodedMegabytes >= 1, ""));
 
-            var smallOut = new Features.Media.MediaConfig { MaxOutputBytes = 16 * 1024 }; smallOut.Clamp();
+            var smallOut = Img(i => i.MaxOutputBytes = 16 * 1024); smallOut.Clamp();
             var tooFat = Features.Media.KmhMediaTranscode.Convert(bigAnim, smallOut);
             r.Add(("media: output has its own cap, separate from the source cap",
                    !tooFat.Ok && tooFat.Error.Contains("output limit"), tooFat.Error));
             r.Add(("media: source and output caps are genuinely separate numbers",
-                   new Features.Media.MediaConfig().MaxSourceBytes != new Features.Media.MediaConfig().MaxOutputBytes, ""));
+                   new Features.Media.MediaConfig().Images.MaxSourceBytes != new Features.Media.MediaConfig().Images.MaxOutputBytes, ""));
 
             bool threw = false;
             Features.Media.KmhMediaTranscode.Result junk = null, empty = null, html = null;
@@ -266,28 +272,35 @@ namespace KMHServerAddon.Maintenance
                    && (chunk * 3 + chunk - 1) / chunk == 3, ""));
 
             r.Add(("media: the resolver ships on, and can be turned off",
-                   new Features.Media.MediaConfig().ServerMediaResolverEnabled, ""));
+                   new Features.Media.MediaConfig().Images.ResolverEnabled, ""));
             var wild = new Features.Media.MediaConfig
             {
-                MaxSourceBytes = -5, MaxOutputBytes = int.MaxValue, MaxPixels = 0,
-                MaxFrames = -1, TimeoutSeconds = 0, MaxRedirects = 99, CacheTtlMinutes = 0, MaxVideoSeconds = 1,
+                Images = new Features.Media.MediaImageSettings
+                { MaxSourceBytes = -5, MaxOutputBytes = int.MaxValue, MaxPixels = 0, MaxFrames = -1 },
+                Fetch  = new Features.Media.MediaFetchSettings { TimeoutSeconds = 0, MaxRedirects = 99 },
+                Cache  = new Features.Media.MediaCacheSettings { TtlMinutes = 0 },
+                Video  = new Features.Media.MediaVideoSettings { MaxSeconds = 1 },
             };
             wild.Clamp();
             r.Add(("media: a hand-edited config cannot disable a guard",
-                   wild.MaxSourceBytes >= 16 * 1024 && wild.MaxOutputBytes <= 64 * 1024 * 1024
-                   && wild.MaxPixels > 0 && wild.MaxFrames >= 1 && wild.TimeoutSeconds >= 2
-                   && wild.MaxRedirects <= 10 && wild.CacheTtlMinutes >= 1 && wild.MaxVideoSeconds >= 5, ""));
+                   wild.Images.MaxSourceBytes >= 16 * 1024 && wild.Images.MaxOutputBytes <= 64 * 1024 * 1024
+                   && wild.Images.MaxPixels > 0 && wild.Images.MaxFrames >= 1 && wild.Fetch.TimeoutSeconds >= 2
+                   && wild.Fetch.MaxRedirects <= 10 && wild.Cache.TtlMinutes >= 1 && wild.Video.MaxSeconds >= 5, ""));
             r.Add(("media: a zero video limit means no limit, not a limit of zero",
-                   new Features.Media.MediaConfig { MaxVideoSeconds = 0 }.MaxVideoSeconds == 0, ""));
+                   Clamped(Vid(v => v.MaxSeconds = 0)).Video.MaxSeconds == 0, ""));
 
-            var watch = new Features.Media.MediaConfig { WatchMaxHeight = 4000, WatchMaxSeconds = 2, VideoCacheMaxMegabytes = 1 };
+            var watch = new Features.Media.MediaConfig
+            {
+                Watch = new Features.Media.MediaWatchSettings { MaxHeight = 4000, MaxSeconds = 2 },
+                Video = new Features.Media.MediaVideoSettings { CacheMaxMegabytes = 1 },
+            };
             watch.Clamp();
             r.Add(("media: a hand-edited watch config keeps a usable height, length and cache size",
-                   watch.WatchMaxHeight <= 1080 && watch.WatchMaxSeconds >= 5
-                   && watch.VideoCacheMaxMegabytes >= 64, ""));
+                   watch.Watch.MaxHeight <= 1080 && watch.Watch.MaxSeconds >= 5
+                   && watch.Video.CacheMaxMegabytes >= 64, ""));
             r.Add(("media: watch playback ships on, with no length limit of its own",
-                   new Features.Media.MediaConfig().WatchPagePlayback
-                   && new Features.Media.MediaConfig().WatchMaxSeconds == 0, ""));
+                   new Features.Media.MediaConfig().Watch.PagePlayback
+                   && new Features.Media.MediaConfig().Watch.MaxSeconds == 0, ""));
 
             // It listens publicly, so what it will hand out is the whole of its safety.
             r.Add(("video: only files inside this server's own video cache can ever be served",
@@ -327,6 +340,40 @@ namespace KMHServerAddon.Maintenance
                    && !Range("pages=1-2", 1000, out _, out _)
                    && !Range("", 1000, out _, out _), ""));
 
+            bool reversed = !Range("bytes=500-100", 1000, out long za, out long zb) && za == 0 && zb == 999
+                         && !Range("bytes=5--5", 1000, out _, out _);
+            r.Add(("video: a range that ends before it starts is ignored, never sent with a negative length", reversed,
+                   $"bytes=500-100 -> {za}-{zb}"));
+
+            {
+                var first = new ServerClient(null, null, createListener: false);
+                var second = new ServerClient(null, null, createListener: false);
+                var told = new List<(ServerClient Client, string Url)>();
+                SubProtocol.KmhRouter.OutboundForTest = (c, kind, data) =>
+                {
+                    if (kind == SubProtocol.KmhProtocol.Kind.VideoResolved)
+                        told.Add((c, Newtonsoft.Json.Linq.JObject.FromObject(data)["watch_url"]?.ToString()));
+                };
+                try
+                {
+                    Features.Media.KmhVideoHandler.WaitForTest("selftest-waiters|360", "selftest_video", first, "https://youtu.be/abc123defgh");
+                    Features.Media.KmhVideoHandler.WaitForTest("selftest-waiters|360", "selftest_video", second,
+                                                               "https://www.youtube.com/watch?v=abc123defgh&t=9");
+                    Features.Media.KmhVideoHandler.Finish("selftest-waiters|360", "", "", "selftest: nothing fetched");
+                }
+                finally
+                {
+                    SubProtocol.KmhRouter.OutboundForTest = null;
+                    Features.Media.KmhVideoHandler.ForgetForTest("selftest_video");
+                }
+                // Clients match the answer by their own exact text, so one sent back in another form is never seen.
+                bool own = told.Count == 2
+                        && told.Exists(t => ReferenceEquals(t.Client, first) && t.Url == "https://youtu.be/abc123defgh")
+                        && told.Exists(t => ReferenceEquals(t.Client, second) && t.Url == "https://www.youtube.com/watch?v=abc123defgh&t=9");
+                r.Add(("video: each player waiting on one fetch is answered with the link they sent", own,
+                       string.Join(" | ", told.ConvertAll(t => t.Url))));
+            }
+
             r.Add(("video: a partial answer declares the span it is actually sending",
                    Features.Media.KmhVideoRelay.ResponseHead(true, 100, 199, 1000, "video/mp4")
                        .Contains("Content-Range: bytes 100-199/1000")
@@ -349,21 +396,223 @@ namespace KMHServerAddon.Maintenance
                    && !Features.Media.KmhVideoHelper.Format(480).Contains("av01"),
                    Features.Media.KmhVideoHelper.Format(480)));
 
-            string fetchArgs = Features.Media.KmhVideoHelper.FetchArguments(
-                "https://youtu.be/abc123defgh", 480, @"C:\tmp\x.mp4", @"C:\tools\ffmpeg.exe", 2048);
+            var fetchArgs = Features.Media.KmhVideoHelper.FetchArguments(
+                "https://www.youtube.com/watch?v=abc123defgh", 480, @"C:\tmp\x.mp4", @"C:\tools\ffmpeg.exe", 2048);
+            string fetchShown = string.Join(" ", fetchArgs);
+
+            bool Pair(IReadOnlyList<string> args, string flag, string value)
+            {
+                for (int i = 0; i + 1 < args.Count; i++)
+                    if (args[i] == flag && args[i + 1] == value) return true;
+                return false;
+            }
+
             r.Add(("video: an animated png is not mistaken for a still by the image policy",
                    Features.Chat.ChatImagePolicy.LooksLikeImage(cfg, "/stickers/1234.png")
                    && !Features.Chat.ChatMediaUrl.NeedsResolver(cfg, "https://media.discordapp.net/stickers/1234.png"), ""));
 
             r.Add(("video: a fetch merges into one mp4 with its index at the front",
-                   fetchArgs.Contains("--merge-output-format mp4")
-                   && fetchArgs.Contains("+faststart")
-                   && fetchArgs.Contains("--ffmpeg-location")
-                   && fetchArgs.Contains("--no-playlist"), fetchArgs));
+                   Pair(fetchArgs, "--merge-output-format", "mp4")
+                   && Pair(fetchArgs, "--postprocessor-args", "ffmpeg:-movflags +faststart")
+                   && Pair(fetchArgs, "--ffmpeg-location", @"C:\tools\ffmpeg.exe")
+                   && fetchArgs.Contains("--no-playlist"), fetchShown));
 
             // 60fps is twice the decoding work for a difference nobody sees in a chat panel.
             r.Add(("video: at the same resolution the lighter frame rate is preferred",
-                   fetchArgs.Contains("-S \"res,+fps\""), fetchArgs));
+                   Pair(fetchArgs, "-S", "res,+fps"), fetchShown));
+
+            // A machine-wide yt-dlp config could otherwise add arguments of its own to every fetch KMH runs.
+            r.Add(("video: the helper is run without whatever config the machine happens to carry",
+                   fetchArgs.Count > 0 && fetchArgs[0] == "--ignore-config"
+                   && Features.Media.KmhVideoHelper.ProbeArguments("https://www.youtube.com/watch?v=abc123defgh")[0]
+                      == "--ignore-config", fetchShown));
+
+            // The link is the last entry and "--" is the one before it, so it can never be read as an option.
+            bool Trails(IReadOnlyList<string> args, string url)
+                => args.Count >= 2 && args[args.Count - 1] == url && args[args.Count - 2] == "--";
+
+            r.Add(("video: the link is the last argument and sits behind --",
+                   Trails(fetchArgs, "https://www.youtube.com/watch?v=abc123defgh")
+                   && Trails(Features.Media.KmhVideoHelper.ProbeArguments("https://www.youtube.com/watch?v=abc123defgh"),
+                             "https://www.youtube.com/watch?v=abc123defgh"), fetchShown));
+
+            string[] hostile =
+            {
+                "https://youtu.be/abc123defgh\" --exec \"calc.exe",
+                "https://youtu.be/abc123defgh' --exec 'id",
+                "https://youtu.be/abc123defgh --exec id",
+                "https://youtu.be/abc123defgh;id",
+                "https://youtu.be/abc123defgh|id",
+                "https://youtu.be/abc123defgh&id",
+                "https://youtu.be/abc123defgh&&id",
+                "https://youtu.be/abc123defgh$(id)",
+                "https://youtu.be/abc123defgh`id`",
+                "https://youtu.be/abc123defgh>out",
+                "https://youtu.be/abc123defgh\nid",
+                "https://youtu.be/abc123defgh\r\n--exec id",
+                "https://youtu.be/abc123defgh\tid",
+                "https://youtu.be/abc123defgh\u0000id",
+                "https://youtu.be/abc 123defgh",
+                "--exec=id",
+                "-o/tmp/owned",
+                "--exec id https://youtu.be/abc123defgh",
+                "https://youtu.be/abc123defgh%22%20--exec%20id",
+                "https://www.youtube.com/watch?v=abc123defgh%22--exec%20id",
+                "https://www.youtube.com/watch?v=%2D%2Dexec%20id",
+                "https://youtu.be/abc123defgh#\" --exec \"id",
+                "file:///etc/passwd",
+                "https://user:pass@youtu.be/abc123defgh",
+            };
+
+            // Trailing query junk ('&t=9') is ordinary, so it is not refused here; rebuilding from the id makes it harmless.
+            string[] mustRefuse =
+            {
+                "https://youtu.be/abc123defgh\" --exec \"calc.exe",
+                "https://youtu.be/abc123defgh' --exec 'id",
+                "https://youtu.be/abc123defgh --exec id",
+                "https://youtu.be/abc123defgh|id",
+                "https://youtu.be/abc123defgh`id`",
+                "https://youtu.be/abc123defgh>out",
+                "https://youtu.be/abc123defgh\nid",
+                "https://youtu.be/abc123defgh\r\n--exec id",
+                "https://youtu.be/abc123defgh\tid",
+                "https://youtu.be/abc123defgh\u0000id",
+                "https://youtu.be/abc 123defgh",
+                "--exec=id",
+                "-o/tmp/owned",
+                "--exec id https://youtu.be/abc123defgh",
+                "https://youtu.be/abc123defgh#\" --exec \"id",
+                "file:///etc/passwd",
+                "https://user:pass@youtu.be/abc123defgh",
+                "https://youtu.be/abc123defgh%22%20--exec%20id",
+                "https://www.youtube.com/watch?v=abc123defgh%22--exec%20id",
+                "https://www.youtube.com/watch?v=%2D%2Dexec%20id",
+            };
+            var admitted = new List<string>();
+            foreach (string bad in mustRefuse)
+                if (Features.Media.KmhVideoHelper.SafeWatchUrlShape(bad, out _)) admitted.Add(bad);
+            r.Add(("video: a link carrying another argument or a shell character is refused before anything runs",
+                   admitted.Count == 0,
+                   admitted.Count == 0 ? $"{mustRefuse.Length} shapes" : "ADMITTED: " + string.Join(" | ", admitted)));
+
+            var survived = new List<string>();
+            foreach (string bad in hostile)
+            {
+                string id = Features.Media.KmhVideoHandler.VideoIdOf(bad);
+                if (id.Length == 0) continue;                       // never got as far as a fetch
+                string canonical = Features.Media.KmhVideoHelper.CanonicalWatchUrl(id);
+                if (canonical != "https://www.youtube.com/watch?v=" + id) { survived.Add(bad); continue; }
+                var built = Features.Media.KmhVideoHelper.FetchArguments(canonical, 480, @"C:\tmp\x.mp4", @"C:\tools\ffmpeg.exe", 2048);
+                if (built.Count != fetchArgs.Count || !Trails(built, canonical)) { survived.Add(bad); continue; }
+                foreach (string a in built)
+                    if (a.Contains("--exec") || a.Contains("`") || a.Contains("$(") || a.Contains("\n") || a.Contains("\""))
+                    { survived.Add(bad); break; }
+            }
+            r.Add(("video: nothing a player pasted survives into what the helper is actually given",
+                   survived.Count == 0,
+                   survived.Count == 0 ? $"{hostile.Length} shapes" : "SURVIVED: " + string.Join(" | ", survived)));
+
+            int benignCount = fetchArgs.Count;
+            var leaked = new List<string>();
+            foreach (string bad in hostile)
+            {
+                var args = Features.Media.KmhVideoHelper.FetchArguments(bad, 480, @"C:\tmp\x.mp4", @"C:\tools\ffmpeg.exe", 2048);
+                if (args.Count != benignCount || !Trails(args, bad)) leaked.Add(bad);
+            }
+            r.Add(("video: even handed straight to the builder a hostile link stays one argument and adds none",
+                   leaked.Count == 0,
+                   leaked.Count == 0 ? $"{hostile.Length} shapes, {benignCount} arguments each" : "LEAKED: " + string.Join(" | ", leaked)));
+
+            r.Add(("video: the link the helper is given is rebuilt from the id, never carried over",
+                   Features.Media.KmhVideoHelper.CanonicalWatchUrl("abc123defgh") == "https://www.youtube.com/watch?v=abc123defgh"
+                   && Features.Media.KmhVideoHelper.CanonicalWatchUrl("abc123defg\"") == ""
+                   && Features.Media.KmhVideoHelper.CanonicalWatchUrl("abc 23defgh") == ""
+                   && Features.Media.KmhVideoHelper.CanonicalWatchUrl("--exec=id") == ""
+                   && Features.Media.KmhVideoHelper.CanonicalWatchUrl("") == "",
+                   Features.Media.KmhVideoHelper.CanonicalWatchUrl("abc123defgh")));
+
+            // A Unicode digit passes IsLetterOrDigit and then maps to '_' in the cache name, so two ids share a file.
+            // It has to arrive through the query, which is unescaped: a path segment is percent-encoded before this.
+            r.Add(("video: an id is eleven plain ASCII characters, not eleven of anything Unicode calls a digit",
+                   Features.Media.KmhVideoHandler.VideoIdOf("https://www.youtube.com/watch?v=abc123defg%D9%A0") == ""
+                   && Features.Media.KmhVideoHandler.VideoIdOf("https://www.youtube.com/watch?v=abc123defg%EF%BC%91") == ""
+                   && Features.Media.KmhVideoHandler.VideoIdOf("https://www.youtube.com/watch?v=abc123defgh") == "abc123defgh",
+                   Features.Media.KmhVideoHandler.VideoIdOf("https://www.youtube.com/watch?v=abc123defg%D9%A0")));
+
+            // The shapes players actually paste must still work, or the guard breaks the feature.
+            string[] genuine =
+            {
+                "https://www.youtube.com/watch?v=abc123defgh",
+                "https://www.youtube.com/watch?v=abc123defgh&t=42s",
+                "https://youtu.be/abc123defgh",
+                "https://youtu.be/abc123defgh?t=42",
+                "https://www.youtube.com/shorts/abc123defgh",
+                "https://www.youtube.com/embed/abc123defgh",
+                "https://m.youtube.com/watch?v=abc123defgh",
+                "http://youtube.com/watch?v=abc123defgh",
+            };
+            var refused = new List<string>();
+            foreach (string good in genuine)
+            {
+                string id = Features.Media.KmhVideoHandler.VideoIdOf(good);
+                string canonical = Features.Media.KmhVideoHelper.CanonicalWatchUrl(id);
+                if (id != "abc123defgh" || canonical != "https://www.youtube.com/watch?v=abc123defgh"
+                    || !Features.Media.KmhVideoHelper.SafeWatchUrlShape(good, out _)
+                    || !Features.Media.KmhVideoHelper.SafeWatchUrlShape(canonical, out _))
+                    refused.Add(good);
+            }
+            r.Add(("video: the links players really paste all still resolve to the same fetch",
+                   refused.Count == 0,
+                   refused.Count == 0 ? $"{genuine.Length} shapes" : "REFUSED: " + string.Join(" | ", refused)));
+
+            // Checks what production hands the OS: a concatenated command line would pass every check above.
+            string hostileUrl = "https://youtu.be/abc123defgh\" --exec \"calc.exe";
+            var startInfo = Features.Media.KmhVideoHelper.BuildStartInfo(
+                @"C:\tools\yt-dlp.exe",
+                Features.Media.KmhVideoHelper.FetchArguments(hostileUrl, 480, @"C:\tmp\x.mp4", @"C:\tools\ffmpeg.exe", 2048));
+            r.Add(("video: the helper is started from an argument list, never from a command line KMH built",
+                   startInfo.Arguments.Length == 0
+                   && !startInfo.UseShellExecute
+                   && startInfo.CreateNoWindow
+                   && startInfo.RedirectStandardOutput && startInfo.RedirectStandardError
+                   && startInfo.ArgumentList.Count == fetchArgs.Count
+                   && startInfo.ArgumentList[startInfo.ArgumentList.Count - 1] == hostileUrl
+                   && startInfo.ArgumentList[startInfo.ArgumentList.Count - 2] == "--",
+                   $"Arguments='{startInfo.Arguments}' list={startInfo.ArgumentList.Count}"));
+
+            // The helper is told where to write, so a target outside this server's own cache is refused outright.
+            string outsideErr;
+            Features.Media.KmhVideoHelper.Fetch("https://www.youtube.com/watch?v=abc123defgh", 480,
+                                                Path.Combine(Path.GetTempPath(), "kmh-not-the-cache.mp4"), out outsideErr);
+            r.Add(("video: the helper is never told to write outside the video cache",
+                   outsideErr == "the video server would not write that file", outsideErr));
+
+            // A configured helper path is how a shell would get named, so only the two binaries KMH looks for pass.
+            string toolProbe = Path.Combine(Path.GetTempPath(), "kmh-toolpath-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            bool toolRules;
+            try
+            {
+                Directory.CreateDirectory(toolProbe);
+                string real = Path.Combine(toolProbe, "yt-dlp.exe");
+                string shell = Path.Combine(toolProbe, "cmd.exe");
+                File.WriteAllText(real, "x");
+                File.WriteAllText(shell, "x");
+                toolRules = Features.Media.KmhVideoHelper.IsSafeToolPath(real, "yt-dlp", out _)
+                         && !Features.Media.KmhVideoHelper.IsSafeToolPath(shell, "yt-dlp", out _)
+                         && !Features.Media.KmhVideoHelper.IsSafeToolPath(real, "ffmpeg", out _)
+                         && !Features.Media.KmhVideoHelper.IsSafeToolPath(toolProbe, "yt-dlp", out _)
+                         && !Features.Media.KmhVideoHelper.IsSafeToolPath("", "yt-dlp", out _)
+                         && !Features.Media.KmhVideoHelper.IsSafeToolPath(Path.Combine(toolProbe, "missing.exe"), "yt-dlp", out _);
+            }
+            catch { toolRules = false; }
+            finally { try { Directory.Delete(toolProbe, true); } catch { } }
+            r.Add(("video: only a real yt-dlp or ffmpeg file is ever started, never a shell", toolRules, ""));
+
+            // Anything a helper prints ends up in a log line, and a control character there rewrites what it reads as.
+            r.Add(("video: a helper's own output cannot carry control characters into a log line",
+                   !Features.Media.KmhVideoHelper.Trim("boom\r\n2026-01-01 ERROR forged").Contains("\n")
+                   && !Features.Media.KmhVideoHelper.Trim("a\u0000b").Contains("\u0000")
+                   && Features.Media.KmhVideoHelper.Trim(new string('x', 400)).Length <= 140, ""));
 
             r.Add(("video: a served range keeps the connection open for the next one",
                    Features.Media.KmhVideoRelay.ResponseHead(true, 0, 99, 1000, "video/mp4").Contains("keep-alive")
@@ -396,7 +645,7 @@ namespace KMHServerAddon.Maintenance
 
             // Run against its own folder, or the sweep evicts what players are currently watching.
             bool sweepRules;
-            int keptHours = Features.Media.MediaConfig.Current.VideoCacheHours;
+            int keptHours = Features.Media.MediaConfig.Current.Video.CacheHours;
             string sandbox = Path.Combine(Path.GetTempPath(), "KMH-SelfTest-VideoCache");
             try
             {
@@ -443,24 +692,24 @@ namespace KMHServerAddon.Maintenance
             r.Add(("video: a cached video remembers its title, and an empty one never overwrites it", titleRules, ""));
 
             // Every fetch is a process, a download and a merge, so a hand-edited number cannot ask for a hundred.
-            var wildFetches = new Features.Media.MediaConfig { VideoMaxConcurrentFetches = 999 };
-            var noFetches   = new Features.Media.MediaConfig { VideoMaxConcurrentFetches = 0 };
+            var wildFetches = Vid(v => v.MaxConcurrentFetches = 999);
+            var noFetches   = Vid(v => v.MaxConcurrentFetches = 0);
             wildFetches.Clamp();
             noFetches.Clamp();
             r.Add(("video: concurrent fetches are held between one and a number a server can survive",
-                   wildFetches.VideoMaxConcurrentFetches <= 8 && noFetches.VideoMaxConcurrentFetches >= 1
-                   && new Features.Media.MediaConfig().VideoMaxConcurrentFetches == 2,
-                   $"{wildFetches.VideoMaxConcurrentFetches}/{noFetches.VideoMaxConcurrentFetches}"));
+                   wildFetches.Video.MaxConcurrentFetches <= 8 && noFetches.Video.MaxConcurrentFetches >= 1
+                   && new Features.Media.MediaConfig().Video.MaxConcurrentFetches == 2,
+                   $"{wildFetches.Video.MaxConcurrentFetches}/{noFetches.Video.MaxConcurrentFetches}"));
 
-            var wildAge = new Features.Media.MediaConfig { VideoCacheHours = 999_999, VideoMaxFileMegabytes = 999_999 };
-            var noAge   = new Features.Media.MediaConfig { VideoCacheHours = 0 };
+            var wildAge = Vid(v => { v.CacheHours = 999_999; v.MaxFileMegabytes = 999_999; });
+            var noAge   = Vid(v => v.CacheHours = 0);
             wildAge.Clamp();
             noAge.Clamp();
             r.Add(("video: a hand-edited cache age is held in a sane range, and zero still means no age limit",
-                   wildAge.VideoCacheHours > 0 && wildAge.VideoCacheHours <= 8_760
-                   && wildAge.VideoMaxFileMegabytes <= 32_768
-                   && noAge.VideoCacheHours == 0,
-                   wildAge.VideoCacheHours + "h"));
+                   wildAge.Video.CacheHours > 0 && wildAge.Video.CacheHours <= 8_760
+                   && wildAge.Video.MaxFileMegabytes <= 32_768
+                   && noAge.Video.CacheHours == 0,
+                   wildAge.Video.CacheHours + "h"));
 
             // Without this an owner has to know to flatten the ffmpeg archive they unzipped into Tools.
             string toolRoot = Path.Combine(Path.GetTempPath(), "kmh-toolscan-" + Guid.NewGuid().ToString("N").Substring(0, 8));
@@ -478,12 +727,41 @@ namespace KMHServerAddon.Maintenance
             }
             finally { try { Directory.Delete(toolRoot, true); } catch { } }
 
+            // ImageSharp's advisories sit in TIFF, EXR and ICC code. A closed decoder set and unparsed profiles keep a
+            // future one there unreachable; going back to Configuration.Default would reopen them with every test green.
+            {
+                var names = new List<string>();
+                SixLabors.ImageSharp.Formats.DecoderOptions decoding = Features.Media.KmhMediaTranscode.Decoding();
+                foreach (SixLabors.ImageSharp.Formats.IImageFormat f in decoding.Configuration.ImageFormats)
+                    names.Add(f.Name.ToUpperInvariant());
+                names.Sort(StringComparer.Ordinal);
+                bool closed = string.Join(",", names) == "BMP,GIF,JPEG,PNG,WEBP" && decoding.SkipMetadata
+                           && decoding.ColorProfileHandling == SixLabors.ImageSharp.Formats.ColorProfileHandling.Preserve;
+                r.Add(("media: the image decoder set is exactly PNG, JPEG, GIF, WebP and BMP, with metadata skipped and ICC never converted", closed,
+                       string.Join(",", names) + " icc=" + decoding.ColorProfileHandling));
+
+                // A minimal little-endian TIFF: header, one IFD with a 1x1 image. Refused before any TIFF code runs.
+                byte[] tiff = { 0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+                string tiffVerdict;
+                try { using (Image.Load(Features.Media.KmhMediaTranscode.Decoding(), tiff)) tiffVerdict = "DECODED"; }
+                catch (UnknownImageFormatException) { tiffVerdict = "refused as an unknown format"; }
+                catch (Exception ex) { tiffVerdict = "threw " + ex.GetType().Name; }
+                r.Add(("media: a TIFF never reaches ImageSharp's TIFF decoder", tiffVerdict == "refused as an unknown format", tiffVerdict));
+            }
+
             return r;
         }
 
-        // A genuine WebP, so the decoder is fed the real format with no network and no checked-in binary.
         private static Features.Media.MediaConfig Clamped(Features.Media.MediaConfig c) { c.Clamp(); return c; }
 
+        // One block overridden on an otherwise stock config, so a clamping check reads as the value it is about.
+        private static Features.Media.MediaConfig Img(System.Action<Features.Media.MediaImageSettings> set)
+        { var c = new Features.Media.MediaConfig(); set(c.Images); return c; }
+
+        private static Features.Media.MediaConfig Vid(System.Action<Features.Media.MediaVideoSettings> set)
+        { var c = new Features.Media.MediaConfig(); set(c.Video); return c; }
+
+        // A genuine WebP, so the decoder is fed the real format with no network and no checked-in binary.
         private static byte[] MakeWebp(int frames, int w, int h)
         {
             // Deliberately noisy: a flat-colour fixture compresses so far that the output-cap check proves nothing.

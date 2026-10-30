@@ -9,24 +9,7 @@ namespace KMHServerAddon.Maintenance
     // A badge is only worth showing if it cannot be claimed.
     internal static class KmhStaffIdentitySelfTest
     {
-        private static string ReadSource(string relative)
-        {
-            try
-            {
-                // Assembly.Location is empty inside a single-file bundle, which is how the addon ships.
-                string dir = Path.GetDirectoryName(AppContext.BaseDirectory.TrimEnd('\\', '/'));
-                for (int i = 0; i < 8 && dir != null; i++)
-                {
-                    string candidate = Path.Combine(dir, "Source", relative);
-                    if (File.Exists(candidate)) return File.ReadAllText(candidate);
-                    candidate = Path.Combine(dir, relative);
-                    if (File.Exists(candidate)) return File.ReadAllText(candidate);
-                    dir = Path.GetDirectoryName(dir);
-                }
-            }
-            catch { }
-            return null;
-        }
+        private static string ReadSource(string relative) => KmhSecurityAuditSelfTest.ReadSource(relative);
 
         public static List<(string Name, bool Ok, string Detail)> Run()
         {
@@ -48,7 +31,6 @@ namespace KMHServerAddon.Maintenance
             r.Add(("roles: every listed role has a default label and colour",
                    AllHaveDefaults(), ""));
 
-            // RWT's answer is passed in, so the rule is testable without a live server.
             var cfg = new StaffConfig
             {
                 Owners     = new List<string> { "Knappe" },
@@ -100,7 +82,7 @@ namespace KMHServerAddon.Maintenance
             r.Add(("staff config: a blank label falls back to KMH's own",
                    blank.LabelFor(StaffRoles.Moderator) == "Mod" && blank.LabelFor(StaffRoles.Owner) == "Owner", ""));
             r.Add(("staff config: an owner's own label is used as set",
-                   new StaffConfig { LabelModerator = "Warden" }.LabelFor(StaffRoles.Moderator) == "Warden", ""));
+                   new StaffConfig { Badges = { Moderator = { Label = "Warden" } } }.LabelFor(StaffRoles.Moderator) == "Warden", ""));
             r.Add(("staff config: a non-role has no label and no colour",
                    blank.LabelFor("archmage") == "" && blank.ColorFor("archmage") == "", ""));
 
@@ -114,7 +96,7 @@ namespace KMHServerAddon.Maintenance
             string store = ReadSource(Path.Combine("Features", "PlayerStats", "PlayerStatsStore.cs"));
             if (store == null)
             {
-                r.Add(("staff: store source not available (shipped build) - stamping checks skipped", true, ""));
+                r.Add(Diagnostics.KmhSelfTestResult.Skipped("staff: identities are stamped on write", "store source not available (shipped build)"));
             }
             else
             {

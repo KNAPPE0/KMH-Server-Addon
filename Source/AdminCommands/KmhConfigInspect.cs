@@ -18,7 +18,10 @@ namespace KMHServerAddon.AdminCommands
         }
 
         // Compared as JSON so scalars, arrays and nested objects all work without per-type handling.
-        public static List<FieldDiff> Diff(object live, object def)
+        public static List<FieldDiff> Diff(object live, object def) => Diff(live, def, "");
+
+        // Recurses into grouped settings, so an owner is told which value differs rather than that some block does.
+        private static List<FieldDiff> Diff(object live, object def, string prefix)
         {
             var outp = new List<FieldDiff>();
             if (live == null || def == null) return outp;
@@ -26,17 +29,34 @@ namespace KMHServerAddon.AdminCommands
             {
                 if (!p.CanRead || p.GetIndexParameters().Length > 0) continue;
                 if (p.GetCustomAttribute<JsonIgnoreAttribute>() != null) continue;   // derived, not real config
+
+                string name = prefix + p.Name;
+                object lo, don;
+                try { lo = p.GetValue(live); don = p.GetValue(def); } catch { continue; }
+
+                if (IsBlock(p.PropertyType) && lo != null && don != null)
+                {
+                    outp.AddRange(Diff(lo, don, name + "."));
+                    continue;
+                }
+
                 string lv, dv;
-                try { lv = JsonConvert.SerializeObject(p.GetValue(live)); dv = JsonConvert.SerializeObject(p.GetValue(def)); }
+                try { lv = JsonConvert.SerializeObject(lo); dv = JsonConvert.SerializeObject(don); }
                 catch { continue; }
                 bool changed = lv != dv;
                 if (IsSensitive(p.Name))   // never print a bot token / secret; show only whether it's set
-                    outp.Add(new FieldDiff(p.Name, changed ? "***set***" : "(unset)", "(unset)", changed));
+                    outp.Add(new FieldDiff(name, changed ? "***set***" : "(unset)", "(unset)", changed));
                 else
-                    outp.Add(new FieldDiff(p.Name, Short(lv), Short(dv), changed));
+                    outp.Add(new FieldDiff(name, Short(lv), Short(dv), changed));
             }
             return outp;
         }
+
+        // A grouped settings block of KMH's own, never a string, array or list - those are values, not groups.
+        private static bool IsBlock(Type t)
+            => t.IsClass && t != typeof(string) && !t.IsArray
+               && !typeof(System.Collections.IEnumerable).IsAssignableFrom(t)
+               && t.Assembly == typeof(KmhConfigInspect).Assembly;
 
         private static bool IsSensitive(string name)
         {
@@ -70,7 +90,10 @@ namespace KMHServerAddon.AdminCommands
             ("media",       () => Features.Media.MediaConfig.Current,            () => new Features.Media.MediaConfig()),
             ("staff",       () => Features.Identity.StaffConfig.Current,         () => new Features.Identity.StaffConfig()),
             ("mail",        () => Features.Mail.MailConfig.Current,              () => new Features.Mail.MailConfig()),
+            ("federation",  () => Features.Global.Federation.FederationConfig.Current, () => new Features.Global.Federation.FederationConfig()),
+            ("mods",        () => Features.Mods.ModPolicyConfig.Current,         () => new Features.Mods.ModPolicyConfig()),
             ("frontier",    () => Features.Frontier.FrontierConfig.Current,      () => new Features.Frontier.FrontierConfig()),
+            ("global",      () => Features.Global.GlobalConfig.Current,          () => new Features.Global.GlobalConfig()),
         };
 
         public static void Run(string[] args, Action<string> reply)
@@ -80,7 +103,7 @@ namespace KMHServerAddon.AdminCommands
 
             if (area == null || area == "all")
             {
-                reply("=== KMH config (fields you've changed from default) ===");
+                reply("=== Colony Nexus config (fields you've changed from default) ===");
                 reply("'kmh config <area>' shows one area's changes; add 'all' to see every field.");
                 foreach ((string a, Func<object> live, Func<object> def) in Areas)
                 {

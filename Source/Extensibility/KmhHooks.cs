@@ -79,7 +79,7 @@ namespace KMHServerAddon.Extensibility
             return next.ToArray();
         }
 
-        // The visibility hook runs once per listing per viewer, so one broken extension buried the console.
+        // The visibility hook runs once per listing per viewer, so one broken extension could bury the console.
         private const int    HookErrorsPerWindow  = 1;
         private const int    HookErrorWindowSecs  = 60;
         private static readonly object _errLock = new object();

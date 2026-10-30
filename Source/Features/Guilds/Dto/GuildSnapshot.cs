@@ -48,6 +48,9 @@ namespace KMHServerAddon.Features.Guilds.Dto
         // Wire-only: filled from TreasuryStore at build time, and the persisted copy is never read back.
         [JsonProperty("guild_silver")]           public long GuildSilver { get; set; } = 0;
         [JsonProperty("guild_treasury_enabled")] public bool GuildTreasuryEnabled { get; set; } = true;
+        // Wire-only like guild_silver: the vault's goods, full-state stacks grouped and without their saved state.
+        [JsonProperty("guild_items")]    public Dictionary<string, int> GuildItems { get; set; } = new Dictionary<string, int>();
+        [JsonProperty("guild_payloads")] public List<KMHServerAddon.Items.KmhThingPayload> GuildPayloads { get; set; } = new List<KMHServerAddon.Items.KmhThingPayload>();
 
         // Visible but not spendable, so it is deliberately excluded from guild_silver.
         [JsonProperty("pending_donations_silver")] public long PendingDonationsSilver { get; set; } = 0;
@@ -55,6 +58,9 @@ namespace KMHServerAddon.Features.Guilds.Dto
         [JsonProperty("relationships")]
         public Dictionary<string, string> Relationships
             { get; set; } = new Dictionary<string, string>();
+
+        // Wire-only like guild_silver: guilds whose proposal to this one waits for an answer, read from their records.
+        [JsonProperty("incoming_proposals")] public List<string> IncomingProposals { get; set; } = new List<string>();
 
         [JsonProperty("open_join")]       public bool OpenJoin { get; set; } = false;
         [JsonProperty("pending_invites")] public List<string> PendingInvites { get; set; } = new List<string>();
@@ -85,7 +91,7 @@ namespace KMHServerAddon.Features.Guilds.Dto
     {
         [JsonProperty("has_hall")]          public bool   HasHall         { get; set; } = false;
         [JsonProperty("tile")]              public int    Tile            { get; set; } = -1;
-        [JsonProperty("leader")]            public string Leader          { get; set; } = "";  // who set it
+        [JsonProperty("leader")]            public string Leader          { get; set; } = "";
         [JsonProperty("radius_tiles")]      public int    RadiusTiles     { get; set; } = 0;
         [JsonProperty("created_utc_ticks")] public long   CreatedUtcTicks { get; set; } = 0;
 

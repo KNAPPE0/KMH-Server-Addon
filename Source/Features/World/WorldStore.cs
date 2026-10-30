@@ -5,7 +5,6 @@ using KMHServerAddon.Persistence;
 
 namespace KMHServerAddon.Features.World
 {
-    // Authoritative World Engine state, persisted to KMH-Data/World/World.json. All access under _lock.
     internal static class WorldStore
     {
         private static readonly object _lock = new object();
@@ -13,7 +12,6 @@ namespace KMHServerAddon.Features.World
         private static readonly List<ServerQuestDto> _quests = new List<ServerQuestDto>();
         private static long _nextId = 1;
 
-        // Completed/expired quests linger on the board before pruning.
         private static readonly long EndedQuestGraceTicks = TimeSpan.FromMinutes(30).Ticks;
 
         private sealed class PersistedState
@@ -21,6 +19,86 @@ namespace KMHServerAddon.Features.World
             public List<WorldEventDto> Events { get; set; } = new List<WorldEventDto>();
             public List<ServerQuestDto> Quests { get; set; } = new List<ServerQuestDto>();
             public long NextId { get; set; } = 1;
+            public Dictionary<long, Dictionary<string, long>> PendingPayouts { get; set; } = new Dictionary<long, Dictionary<string, long>>();
+            public List<KeyValuePair<string, int>> RecentDeliveries { get; set; } = new List<KeyValuePair<string, int>>();
+        }
+
+        // Server-side only, saved with the quests: rewards a completion owes until each is paid, and which ledger rows
+        // a delivery credited, so recovery can tell a delivery that landed from one that did not.
+        private static readonly Dictionary<long, Dictionary<string, long>> _pendingPayouts = new Dictionary<long, Dictionary<string, long>>();
+        private static readonly List<KeyValuePair<string, int>> _recentDeliveries = new List<KeyValuePair<string, int>>();
+        private const int MaxRecentDeliveries = 2000;
+
+        internal static bool RecordedDelivery(string txId, out int amount)
+        {
+            amount = 0;
+            if (string.IsNullOrEmpty(txId)) return false;
+            lock (_lock)
+                foreach (KeyValuePair<string, int> kv in _recentDeliveries)
+                    if (kv.Key == txId) { amount = kv.Value; return true; }
+            return false;
+        }
+
+        internal static Dictionary<long, Dictionary<string, long>> PendingPayoutsCopy()
+        {
+            var copy = new Dictionary<long, Dictionary<string, long>>();
+            lock (_lock)
+                foreach (KeyValuePair<long, Dictionary<string, long>> kv in _pendingPayouts)
+                    copy[kv.Key] = new Dictionary<string, long>(kv.Value, StringComparer.OrdinalIgnoreCase);
+            return copy;
+        }
+
+        internal static void ClearPendingPayout(long questId, string user)
+        {
+            bool changed = false;
+            lock (_lock)
+                if (_pendingPayouts.TryGetValue(questId, out Dictionary<string, long> owed) && owed.Remove(user))
+                {
+                    if (owed.Count == 0) _pendingPayouts.Remove(questId);
+                    changed = true;
+                }
+            if (changed) SaveToDisk();
+        }
+
+        internal static void DropPendingPayouts(long questId)
+        {
+            bool changed;
+            lock (_lock) changed = _pendingPayouts.Remove(questId);
+            if (changed) SaveToDisk();
+        }
+
+        internal static void PlantPendingPayoutForTest(long questId, string user, long amount)
+        {
+            lock (_lock)
+            {
+                if (!_pendingPayouts.TryGetValue(questId, out Dictionary<string, long> owed))
+                    _pendingPayouts[questId] = owed = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+                owed[user] = amount;
+            }
+        }
+
+        // The caller saves: a reset writes this down as one of its steps.
+        internal static int DropPendingPayoutsFor(string user)
+        {
+            if (string.IsNullOrEmpty(user)) return 0;
+            int dropped = 0;
+            lock (_lock)
+                foreach (long questId in new List<long>(_pendingPayouts.Keys))
+                {
+                    Dictionary<string, long> owed = _pendingPayouts[questId];
+                    if (!owed.Remove(user)) continue;
+                    dropped++;
+                    if (owed.Count == 0) _pendingPayouts.Remove(questId);
+                }
+            return dropped;
+        }
+
+        private static ServerQuestDto DeepCopy(ServerQuestDto q)
+        {
+            ServerQuestDto c = q.ShallowClone();
+            c.Contributors = new Dictionary<string, int>(q.Contributors, StringComparer.OrdinalIgnoreCase);
+            c.ContributorFirstUtc = new Dictionary<string, long>(q.ContributorFirstUtc, StringComparer.OrdinalIgnoreCase);
+            return c;
         }
 
         public static void LoadFromDisk()
@@ -32,17 +110,24 @@ namespace KMHServerAddon.Features.World
                 if (s.Events != null) _events.AddRange(s.Events);
                 if (s.Quests != null) _quests.AddRange(s.Quests);
                 _nextId = Math.Max(1, s.NextId);
+                _pendingPayouts.Clear();
+                if (s.PendingPayouts != null)
+                    foreach (KeyValuePair<long, Dictionary<string, long>> kv in s.PendingPayouts)
+                        if (kv.Value != null && kv.Value.Count > 0) _pendingPayouts[kv.Key] = new Dictionary<string, long>(kv.Value, StringComparer.OrdinalIgnoreCase);
+                _recentDeliveries.Clear();
+                if (s.RecentDeliveries != null) _recentDeliveries.AddRange(s.RecentDeliveries);
             }
-            Diagnostics.ServerLog.Info($"World: loaded {s.Events?.Count ?? 0} event(s), {s.Quests?.Count ?? 0} server quest(s)");
+            Diagnostics.ServerLog.Diag($"World: loaded {s.Events?.Count ?? 0} event(s), {s.Quests?.Count ?? 0} server quest(s)");
         }
 
         public static void ClearForNewSeason()
         {
-            lock (_lock) { _events.Clear(); _quests.Clear(); _nextId = 1; }
+            // Quest rewards owed to the old season go with it: their vaults are wiped, and quest ids restart at 1, so an
+            // old quest #N payout would make the new quest #N's reward to the same player a no-op.
+            lock (_lock) { _events.Clear(); _quests.Clear(); _pendingPayouts.Clear(); _nextId = 1; }
             SaveToDisk();
         }
 
-        // Admin-cleanup residual detector: active global quests the user has contributed to (read-only).
         public static int GlobalQuestContributionsOf(string user)
         {
             if (string.IsNullOrEmpty(user)) return 0;
@@ -53,16 +138,21 @@ namespace KMHServerAddon.Features.World
             return n;
         }
 
-        public static void SaveToDisk()
+        // False means in-memory only: a delivery or completion the disk never took must be undone, not paid.
+        public static bool SaveToDisk()
         {
             PersistedState s = new PersistedState();
+            long seq;
             lock (_lock)
             {
-                s.Events.AddRange(_events);
-                s.Quests.AddRange(_quests);
+                s.Events.AddRange(KmhDeepCopy.OfList(_events));
+                s.Quests.AddRange(KmhDeepCopy.OfList(_quests));
                 s.NextId = _nextId;
+                foreach (KeyValuePair<long, Dictionary<string, long>> kv in _pendingPayouts) s.PendingPayouts[kv.Key] = new Dictionary<string, long>(kv.Value);
+                s.RecentDeliveries.AddRange(_recentDeliveries);
+                seq = JsonFileStore.NextSequence();
             }
-            JsonFileStore.Save(KmhDataPaths.WorldFile, s);
+            return JsonFileStore.Save(KmhDataPaths.WorldFile, s, seq);
         }
 
         // One active event per type; new events replace old ones.
@@ -101,7 +191,7 @@ namespace KMHServerAddon.Features.World
             return n;
         }
 
-        // Drops stranded 0-end rows left in World.json by builds before AddEvent stopped writing that sentinel.
+        // Drops stranded 0-end rows that older builds wrote to World.json.
         public static int PurgeEndlessEvents()
         {
             int n;
@@ -165,6 +255,7 @@ namespace KMHServerAddon.Features.World
 
         public static double MarketPayoutMultiplierFor(string itemDefName)
         {
+            if (_boomDefForTest != null && string.Equals(_boomDefForTest, itemDefName, StringComparison.OrdinalIgnoreCase)) return _boomForTest;
             double m = MarketPayoutMultiplier();
             WorldEventDto shortage = FindActive(WorldEventDto.ResourceShortage, DateTime.UtcNow.Ticks);
             if (shortage != null
@@ -174,13 +265,24 @@ namespace KMHServerAddon.Features.World
             return m < 0 ? 0 : m;
         }
 
+        // A boom cannot be staged offline, so the sale-split test sets one for a single def.
+        private static string _boomDefForTest;
+        private static double _boomForTest;
+
+        internal static IDisposable BoomForTest(string def, double mult)
+        {
+            _boomDefForTest = def; _boomForTest = mult;
+            return new EndBoom();
+        }
+
+        private sealed class EndBoom : IDisposable { public void Dispose() => _boomDefForTest = null; }
+
         public static double WorkerXpMultiplier()
         {
             WorldEventDto e = FindActive(WorldEventDto.DoubleWorkerXp, DateTime.UtcNow.Ticks);
             return e != null && e.Magnitude > 0 ? e.Magnitude / 100.0 : 1.0;
         }
 
-        // Completion result for quest contribution updates.
         public sealed class QuestContribution
         {
             public bool Changed { get; set; }
@@ -242,7 +344,7 @@ namespace KMHServerAddon.Features.World
             return false;
         }
 
-        // The live record: never enumerate its contributor dictionaries outside this lock, because a delivery mutates them.
+        // The live record: a delivery mutates its contributor dictionaries, so never enumerate them outside this lock.
         public static ServerQuestDto FindQuest(long questId)
         {
             lock (_lock)
@@ -251,6 +353,8 @@ namespace KMHServerAddon.Features.World
                 return null;
             }
         }
+
+        internal static List<ServerQuestDto> AllQuestsForTest() { lock (_lock) return new List<ServerQuestDto>(_quests); }
 
         public static List<ServerQuestDto> ActiveQuests()
         {
@@ -262,16 +366,12 @@ namespace KMHServerAddon.Features.World
             }
         }
 
-        // Live quests carrying a Frontier consequence - what the director's reference list is reconciled against.
         public static List<long> ActiveOperationIds()
         {
             var outp = new List<long>();
             lock (_lock)
                 foreach (ServerQuestDto x in _quests)
-                    if (x != null && IsActive(x)
-                        && !string.IsNullOrEmpty(x.Consequence)
-                        && !string.Equals(x.Consequence, ServerQuestDto.ConsequenceNone, StringComparison.OrdinalIgnoreCase))
-                        outp.Add(x.Id);
+                    if (IsLiveOperation(x)) outp.Add(x.Id);
             return outp;
         }
 
@@ -281,12 +381,14 @@ namespace KMHServerAddon.Features.World
             var outp = new HashSet<int>();
             lock (_lock)
                 foreach (ServerQuestDto x in _quests)
-                    if (x != null && IsActive(x) && x.TargetSiteTile >= 0
-                        && !string.IsNullOrEmpty(x.Consequence)
-                        && !string.Equals(x.Consequence, ServerQuestDto.ConsequenceNone, StringComparison.OrdinalIgnoreCase))
-                        outp.Add(x.TargetSiteTile);
+                    if (IsLiveOperation(x) && x.TargetSiteTile >= 0) outp.Add(x.TargetSiteTile);
             return outp;
         }
+
+        private static bool IsLiveOperation(ServerQuestDto x)
+            => x != null && IsActive(x)
+               && !string.IsNullOrEmpty(x.Consequence)
+               && !string.Equals(x.Consequence, ServerQuestDto.ConsequenceNone, StringComparison.OrdinalIgnoreCase);
 
         public static bool IsActiveQuest(long questId)
         {
@@ -324,7 +426,7 @@ namespace KMHServerAddon.Features.World
                 r.Changed = true; save = true;
 
                 Dictionary<string, long> payouts = RecomputeAndMaybeComplete(q, user, val);
-                if (payouts != null) { r.Completed = true; r.Payouts = payouts; }
+                if (payouts != null) { r.Completed = true; r.Payouts = payouts; _pendingPayouts[q.Id] = new Dictionary<string, long>(payouts, StringComparer.OrdinalIgnoreCase); }
             }
             if (save) SaveToDisk();
             return r;
@@ -340,9 +442,10 @@ namespace KMHServerAddon.Features.World
             public int Surplus { get; set; }
             public ServerQuestDto Quest { get; set; }
             public Dictionary<string, long> Payouts { get; set; }
+            public bool SaveFailed { get; set; }
         }
 
-        // Read-only, so the caller withdraws exactly this much from the treasury BEFORE asking for credit - progress must be backed by owned goods.
+        // Read-only: the caller withdraws exactly this much BEFORE asking for credit, so progress is backed by goods.
         public static int DeliverableRoom(long questId, string user, string itemDef)
         {
             if (string.IsNullOrEmpty(user) || string.IsNullOrEmpty(itemDef)) return 0;
@@ -358,20 +461,20 @@ namespace KMHServerAddon.Features.World
             }
         }
 
-        // Additive delivery credit for active matching deliver quests only.
-        public static DeliveryResult AddDelivery(long questId, string user, string itemDef, int qty)
+        // txId names the ledger row whose goods these are; it is written in the same save as the credit.
+        public static DeliveryResult AddDelivery(long questId, string user, string itemDef, int qty, string txId = null)
         {
             DeliveryResult r = new DeliveryResult();
             if (string.IsNullOrEmpty(user) || qty <= 0) return r;
-            bool save = false;
             lock (_lock)
             {
                 ServerQuestDto q = null;
-                foreach (ServerQuestDto x in _quests) if (x.Id == questId) { q = x; break; }
+                int at = -1;
+                for (int i = 0; i < _quests.Count; i++) if (_quests[i].Id == questId) { q = _quests[i]; at = i; break; }
                 if (q == null
                     || !string.Equals(q.Objective, ServerQuestDto.ObjDeliver, StringComparison.OrdinalIgnoreCase)
                     || !string.Equals(q.TargetDefName, itemDef, StringComparison.OrdinalIgnoreCase))
-                    return r;   // unknown / wrong objective / target mismatch
+                    return r;
 
                 r.Quest = q;
                 if (!IsActive(q)) return r;   // matched but ended - no credit, no refund
@@ -379,19 +482,30 @@ namespace KMHServerAddon.Features.World
                 q.Contributors.TryGetValue(user, out int prev);
                 // Room only: over-accepting inflates progress past the goal and buys a Frontier claim outright.
                 int amount = Math.Min(qty, Math.Max(0, RoomLeftFor(q, prev)));
-                if (amount <= 0) { r.Surplus = qty; return r; }   // nothing left to give: all of it goes back
+                if (amount <= 0) { r.Surplus = qty; return r; }
 
+                ServerQuestDto before = DeepCopy(q);
                 r.Amount = amount;
                 r.Surplus = qty - amount;
                 if (!q.ContributorFirstUtc.ContainsKey(user)) q.ContributorFirstUtc[user] = DateTime.UtcNow.Ticks;
                 q.Contributors[user] = (int)Math.Min(int.MaxValue, (long)prev + amount);
                 r.State = DeliveryResult.Outcome.Applied;
-                save = true;
 
                 Dictionary<string, long> payouts = RecomputeAndMaybeComplete(q, user, q.Contributors[user]);
-                if (payouts != null) { r.Completed = true; r.Payouts = payouts; }
+                if (payouts != null) { r.Completed = true; r.Payouts = payouts; _pendingPayouts[q.Id] = new Dictionary<string, long>(payouts, StringComparer.OrdinalIgnoreCase); }
+                if (!string.IsNullOrEmpty(txId))
+                {
+                    _recentDeliveries.Add(new KeyValuePair<string, int>(txId, amount));
+                    while (_recentDeliveries.Count > MaxRecentDeliveries) _recentDeliveries.RemoveAt(0);
+                }
+                if (!SaveToDisk())
+                {
+                    _quests[at] = before;
+                    _pendingPayouts.Remove(q.Id);
+                    if (!string.IsNullOrEmpty(txId)) _recentDeliveries.RemoveAll(kv => kv.Key == txId);
+                    return new DeliveryResult { Quest = before, SaveFailed = true };
+                }
             }
-            if (save) SaveToDisk();
             return r;
         }
 
@@ -405,7 +519,6 @@ namespace KMHServerAddon.Features.World
             return room <= 0 ? 0 : (int)Math.Min(int.MaxValue, room);
         }
 
-        // Recomputes progress, completes the quest, and returns payouts when finished.
         private static Dictionary<string, long> RecomputeAndMaybeComplete(ServerQuestDto q, string user, int userTotal)
         {
             bool comp = string.Equals(q.Kind, ServerQuestDto.KindCompetitive, StringComparison.OrdinalIgnoreCase);
@@ -420,7 +533,25 @@ namespace KMHServerAddon.Features.World
             return comp ? WinnerTakeAll(q, user) : SplitByShare(q);
         }
 
-        // Cancels an active quest and returns the reserved reward for refund.
+        // Taken once, so a quest that finished without paying hands its house-pool reserve back exactly once.
+        public static long TakeUnpaidReserve(long questId)
+        {
+            long back = 0;
+            lock (_lock)
+            {
+                foreach (ServerQuestDto q in _quests)
+                    if (q.Id == questId && q.ReservedFromPool > 0)
+                    {
+                        back = q.ReservedFromPool;
+                        q.ReservedFromPool = 0;
+                        q.RewardPool = 0;
+                        break;
+                    }
+            }
+            if (back > 0) SaveToDisk();
+            return back;
+        }
+
         public static long CancelQuest(long questId)
         {
             lock (_lock)
@@ -440,7 +571,6 @@ namespace KMHServerAddon.Features.World
             return -1;
         }
 
-        // Expires unfinished quests and prunes ended quests after the grace window.
         public static List<ServerQuestDto> CollectEndedQuests(long now)
         {
             List<ServerQuestDto> expired = new List<ServerQuestDto>();
@@ -492,7 +622,6 @@ namespace KMHServerAddon.Features.World
             return p;
         }
 
-        // Splits reward by contribution share; remainder goes to the top contributor.
         private static Dictionary<string, long> SplitByShare(ServerQuestDto q)
         {
             Dictionary<string, long> p = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
@@ -524,7 +653,7 @@ namespace KMHServerAddon.Features.World
             {
                 snap.Revision = Util.KmhSnapshotRevision.Next();
                 foreach (WorldEventDto e in _events) snap.Events.Add(e.ShallowClone());
-                foreach (ServerQuestDto q in _quests) snap.ServerQuests.Add(CopyQuest(q));   // active + recently-ended
+                foreach (ServerQuestDto q in _quests) snap.ServerQuests.Add(CopyQuest(q));
             }
             return snap;
         }

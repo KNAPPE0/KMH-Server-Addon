@@ -17,7 +17,7 @@ namespace KMHServerAddon.Features.Sites.Dto
         [JsonProperty("archetypes")]        public List<SiteArchetypeInfo> Archetypes { get; set; } = new List<SiteArchetypeInfo>();
         // False means nobody has pushed metadata yet, so the picker must not pretend items are ineligible.
         [JsonProperty("archetypes_ready")]  public bool ArchetypesReady    { get; set; } = false;
-        // The catalog the server ADOPTED, so a client can tell "my push was applied" from "my push was sent"; empty when it holds none.
+        // The catalog the server ADOPTED, so a client can tell "applied" from "sent"; empty when it holds none.
         [JsonProperty("catalog_fingerprint")] public string CatalogFingerprint { get; set; } = "";
     }
 
@@ -33,9 +33,8 @@ namespace KMHServerAddon.Features.Sites.Dto
         [JsonProperty("est_cycle_min")] public int    EstCycleMinutes{ get; set; } = 0;   // base cycle at max amount
         [JsonProperty("allowed")]       public bool   Allowed        { get; set; } = true;
         [JsonProperty("block_reason")]  public string BlockReason    { get; set; } = "";
-        // plant / forestry / mineral / animal / crafted / construction / unknown
         [JsonProperty("family")]        public string Family         { get; set; } = "unknown";
-        // Comma-separated archetype ids, computed server-side because Roadworks eligibility is a predicate, not a family.
+        // Comma-separated archetype ids, server-computed because Roadworks eligibility is a predicate, not a family.
         [JsonProperty("arch")]          public string AllowedArchetypes { get; set; } = "";
     }
 

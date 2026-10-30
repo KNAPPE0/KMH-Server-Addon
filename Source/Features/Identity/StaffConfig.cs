@@ -6,6 +6,9 @@ namespace KMHServerAddon.Features.Identity
     // Admins are not listed here by default: RWT already knows its own, and a second list would drift from it.
     internal sealed class StaffConfig
     {
+        // Every other config carries one; without it a future breaking change here has no migration hook.
+        public int SchemaVersion { get; set; } = 1;
+
         // Off also stops the roster leaving the server, for an owner who wants staff unidentifiable in game.
         public bool ShowStaffBadges { get; set; } = true;
 
@@ -19,26 +22,28 @@ namespace KMHServerAddon.Features.Identity
         // On by default, so the people already running the server need not edit a second list to be recognised.
         public bool TreatRwtAdminsAsStaff { get; set; } = true;
 
-        // Plain text only, because RimWorld's font draws a Discord custom-emoji id as its literal digits.
-        public string LabelOwner     { get; set; } = StaffRoles.DefaultLabel(StaffRoles.Owner);
-        public string LabelDeveloper { get; set; } = StaffRoles.DefaultLabel(StaffRoles.Developer);
-        public string LabelAdmin     { get; set; } = StaffRoles.DefaultLabel(StaffRoles.Admin);
-        public string LabelModerator { get; set; } = StaffRoles.DefaultLabel(StaffRoles.Moderator);
-        public string LabelOp        { get; set; } = StaffRoles.DefaultLabel(StaffRoles.Op);
+        public StaffBadges Badges { get; set; } = new StaffBadges();
 
-        // The label always shows alongside, so a badge never depends on colour alone to be readable.
-        public string ColorOwner     { get; set; } = StaffRoles.DefaultColor(StaffRoles.Owner);
-        public string ColorDeveloper { get; set; } = StaffRoles.DefaultColor(StaffRoles.Developer);
-        public string ColorAdmin     { get; set; } = StaffRoles.DefaultColor(StaffRoles.Admin);
-        public string ColorModerator { get; set; } = StaffRoles.DefaultColor(StaffRoles.Moderator);
-        public string ColorOp        { get; set; } = StaffRoles.DefaultColor(StaffRoles.Op);
+        // Where each key of an older Staff.json lives now.
+        internal static readonly IReadOnlyList<(string From, string To)> Moves = BuildMoves();
+
+        private static IReadOnlyList<(string From, string To)> BuildMoves()
+        {
+            var moves = new List<(string, string)>();
+            foreach (string role in new[] { "Owner", "Developer", "Admin", "Moderator", "Op" })
+            {
+                moves.Add(("Label" + role, "Badges." + role + ".Label"));
+                moves.Add(("Color" + role, "Badges." + role + ".Color"));
+            }
+            return moves;
+        }
 
         private static StaffConfig _current;
         public static StaffConfig Current => _current ?? (_current = LoadOrDefault());
 
         public static StaffConfig LoadOrDefault()
         {
-            StaffConfig cfg = JsonFileStore.TryLoad(KmhDataPaths.StaffConfigFile, out StaffConfig loaded) && loaded != null
+            StaffConfig cfg = JsonFileStore.TryLoad(KmhDataPaths.StaffConfigFile, Moves, out StaffConfig loaded) && loaded != null
                             ? loaded : new StaffConfig();
             cfg.Normalize();
             return cfg;
@@ -56,17 +61,14 @@ namespace KMHServerAddon.Features.Identity
             Ops        = Clean(Ops);
 
             // Backfilled rather than clamped, so an older file says what is actually in use; a set label is untouched.
-            LabelOwner     = LabelOr(LabelOwner,     StaffRoles.Owner);
-            LabelDeveloper = LabelOr(LabelDeveloper, StaffRoles.Developer);
-            LabelAdmin     = LabelOr(LabelAdmin,     StaffRoles.Admin);
-            LabelModerator = LabelOr(LabelModerator, StaffRoles.Moderator);
-            LabelOp        = LabelOr(LabelOp,        StaffRoles.Op);
-
-            ColorOwner     = ColorOr(ColorOwner,     StaffRoles.Owner);
-            ColorDeveloper = ColorOr(ColorDeveloper, StaffRoles.Developer);
-            ColorAdmin     = ColorOr(ColorAdmin,     StaffRoles.Admin);
-            ColorModerator = ColorOr(ColorModerator, StaffRoles.Moderator);
-            ColorOp        = ColorOr(ColorOp,        StaffRoles.Op);
+            Badges ??= new StaffBadges();
+            foreach (string role in StaffRoles.All)
+            {
+                StaffBadge b = Badges.For(role);
+                if (b == null) continue;
+                b.Label = LabelOr(b.Label, role);
+                b.Color = ColorOr(b.Color, role);
+            }
         }
 
         private static string LabelOr(string set, string role)
@@ -101,38 +103,22 @@ namespace KMHServerAddon.Features.Identity
             if (string.IsNullOrWhiteSpace(label)) return "";
             string t = label.Trim();
             if (t.IndexOf('<') >= 0 || t.IndexOf('>') >= 0) return "";
+            // This server's roles, never Colony Nexus's: such a label falls back to the plain one.
+            if (Moderation.KmhBrandWords.ClaimsAuthority(t)) return "";
             return t.Length > 12 ? t.Substring(0, 12) : t;
         }
 
         public string LabelFor(string role)
         {
-            string set;
-            switch (StaffRoles.Normalize(role))
-            {
-                case StaffRoles.Owner:     set = LabelOwner;     break;
-                case StaffRoles.Developer: set = LabelDeveloper; break;
-                case StaffRoles.Admin:     set = LabelAdmin;     break;
-                case StaffRoles.Moderator: set = LabelModerator; break;
-                case StaffRoles.Op:        set = LabelOp;        break;
-                default: return "";
-            }
-            string clamped = ClampLabel(set);
-            return string.IsNullOrEmpty(clamped) ? StaffRoles.DefaultLabel(role) : clamped;
+            StaffBadge b = (Badges ?? new StaffBadges()).For(StaffRoles.Normalize(role));
+            return b == null ? "" : LabelOr(b.Label, role);
         }
 
         public string ColorFor(string role)
         {
-            string set;
-            switch (StaffRoles.Normalize(role))
-            {
-                case StaffRoles.Owner:     set = ColorOwner;     break;
-                case StaffRoles.Developer: set = ColorDeveloper; break;
-                case StaffRoles.Admin:     set = ColorAdmin;     break;
-                case StaffRoles.Moderator: set = ColorModerator; break;
-                case StaffRoles.Op:        set = ColorOp;        break;
-                default: return "";
-            }
-            return string.IsNullOrWhiteSpace(set) ? StaffRoles.DefaultColor(role) : set.Trim().TrimStart('#');
+            StaffBadge b = (Badges ?? new StaffBadges()).For(StaffRoles.Normalize(role));
+            if (b == null) return "";
+            return string.IsNullOrWhiteSpace(b.Color) ? StaffRoles.DefaultColor(role) : b.Color.Trim().TrimStart('#');
         }
 
         // One packed field instead of ten keys, and an older client simply ignores the one it does not know.
@@ -176,23 +162,42 @@ namespace KMHServerAddon.Features.Identity
             return sb.ToString();
         }
 
-        // Topped up on later boots, because an owner can only tune a setting they can actually see in the file.
+        // Create only; new fields arrive through the shared boot backfill.
         public static void EnsureGenerated()
         {
             if (!System.IO.File.Exists(KmhDataPaths.StaffConfigFile))
-            {
                 JsonFileStore.Save(KmhDataPaths.StaffConfigFile, new StaffConfig());
-                return;
-            }
+        }
+    }
 
-            try
+    internal sealed class StaffBadge
+    {
+        public string Label { get; set; } = "";
+        public string Color { get; set; } = "";
+    }
+
+    internal sealed class StaffBadges
+    {
+        public StaffBadge Owner     { get; set; } = Default(StaffRoles.Owner);
+        public StaffBadge Developer { get; set; } = Default(StaffRoles.Developer);
+        public StaffBadge Admin     { get; set; } = Default(StaffRoles.Admin);
+        public StaffBadge Moderator { get; set; } = Default(StaffRoles.Moderator);
+        public StaffBadge Op        { get; set; } = Default(StaffRoles.Op);
+
+        private static StaffBadge Default(string role)
+            => new StaffBadge { Label = StaffRoles.DefaultLabel(role), Color = StaffRoles.DefaultColor(role) };
+
+        public StaffBadge For(string role)
+        {
+            switch (role)
             {
-                string existing = System.IO.File.ReadAllText(KmhDataPaths.StaffConfigFile);
-                StaffConfig cfg = LoadOrDefault();
-                if (JsonFileStore.ToJson(cfg).Trim() != existing.Trim())
-                    JsonFileStore.Save(KmhDataPaths.StaffConfigFile, cfg);
+                case StaffRoles.Owner:     return Owner ??= Default(StaffRoles.Owner);
+                case StaffRoles.Developer: return Developer ??= Default(StaffRoles.Developer);
+                case StaffRoles.Admin:     return Admin ??= Default(StaffRoles.Admin);
+                case StaffRoles.Moderator: return Moderator ??= Default(StaffRoles.Moderator);
+                case StaffRoles.Op:        return Op ??= Default(StaffRoles.Op);
+                default:                   return null;
             }
-            catch { }
         }
     }
 }

@@ -5,12 +5,12 @@ namespace KMHServerAddon.Features.Notifications
     // Not Player Mail (Features.Mail): this carries no value and is never player-to-player.
     internal static class KmhNotify
     {
+        // Written down first, then delivered: queueing only on a failed send loses notices this path must keep.
         public static void ToUser(string username, string tone, string title, string body)
         {
             if (string.IsNullOrEmpty(username)) return;
-            bool online = KmhRouter.SendToUsername(username, KmhProtocol.Kind.Notice,
-                                                   new { level = string.IsNullOrEmpty(tone) ? "neutral" : tone, text = body });
-            if (!online) NotificationStore.Enqueue(username, tone, title, body);
+            NotificationStore.Enqueue(username, tone, title, body);
+            NotificationHandler.DeliverQueuedTo(KmhRouter.ResolveClient(username));
         }
 
         // Unlike ToUser this never queues for the offline, so a player who must not miss it needs ToUser.

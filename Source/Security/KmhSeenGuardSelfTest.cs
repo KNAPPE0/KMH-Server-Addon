@@ -13,10 +13,10 @@ namespace KMHServerAddon.Security
 
             var g = new KmhSeenGuard(TimeSpan.FromMinutes(10));
             bool firstNew = g.MarkIfNew("a", t0);
-            bool dupSame  = !g.MarkIfNew("a", t0 + min);            // 1 min later, inside 10-min window -> duplicate
+            bool dupSame  = !g.MarkIfNew("a", t0 + min);
             r.Add(("SeenGuard: new then duplicate", firstNew && dupSame, "first new, repeat suppressed"));
 
-            bool newAfterWindow = g.MarkIfNew("a", t0 + TimeSpan.FromMinutes(11).Ticks);   // past window -> new again
+            bool newAfterWindow = g.MarkIfNew("a", t0 + TimeSpan.FromMinutes(11).Ticks);
             r.Add(("SeenGuard: expires after window", newAfterWindow, "re-usable after 10 min"));
 
             var g2 = new KmhSeenGuard(TimeSpan.FromMinutes(10), pruneAt: 64);

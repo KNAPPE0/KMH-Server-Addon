@@ -42,7 +42,7 @@ namespace KMHServerAddon.Maintenance
                                 Title = "selftest race", Description = "probe",
                                 BountySilver = bounty, TargetItemDefName = "Steel", TargetItemQty = 1,
                             };
-                            gate.SignalAndWait();   // both threads enter PostDraft together
+                            gate.SignalAndWait();
                             return QuestStore.PostDraft(who, draft, 1, out _);
                         });
                         Task<long> a = Post(), b = Post();

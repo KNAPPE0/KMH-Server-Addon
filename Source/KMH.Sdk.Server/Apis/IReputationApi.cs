@@ -3,10 +3,8 @@ using KMH.Sdk.Server.Records;
 
 namespace KMH.Sdk.Server.Apis
 {
-    /// <summary>
-    /// Read player quest-reputation. Scores are server-owned and move only on quest activity, so this is read-only;
-    /// subscribe to <see cref="IKmhEvents.ReputationChanged"/> to react when one shifts.
-    /// </summary>
+    /// <summary>Read-only player quest reputation; scores are server-owned and move only on quest activity.</summary>
+    /// <remarks>Subscribe to <see cref="IKmhEvents.ReputationChanged"/> to react when one shifts.</remarks>
     public interface IReputationApi
     {
         /// <summary>Score for a username (0 if unseen). Higher is better.</summary>

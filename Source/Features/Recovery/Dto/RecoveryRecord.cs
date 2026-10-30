@@ -8,7 +8,7 @@ namespace KMHServerAddon.Features.Recovery.Dto
         [JsonProperty("id")]          public long   Id { get; set; }
         [JsonProperty("utc_ticks")]   public long   UtcTicks { get; set; }
         [JsonProperty("user")]        public string User { get; set; } = "";     // intended owner (may be empty = orphaned)
-        [JsonProperty("source")]      public string Source { get; set; } = "";   // e.g. "auction #12 refund", "want #5 return"
+        [JsonProperty("source")]      public string Source { get; set; } = "";
         [JsonProperty("reason")]      public string Reason { get; set; } = "";
         [JsonProperty("kind")]        public string Kind { get; set; } = "item"; // "item" | "silver"
         [JsonProperty("silver")]      public long   Silver { get; set; }         // when kind == "silver"

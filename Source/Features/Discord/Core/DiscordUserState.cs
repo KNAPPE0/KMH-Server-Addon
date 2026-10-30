@@ -258,7 +258,7 @@ namespace KMHServerAddon.Features.Discord
                 {
                     _users = new Dictionary<string, UserState>(state.Users, StringComparer.OrdinalIgnoreCase);
                 }
-                ServerLog.Info($"DiscordUserState: loaded state for {state.Users.Count} user(s)");
+                ServerLog.Diag($"DiscordUserState: loaded state for {state.Users.Count} user(s)");
             }
         }
 
@@ -267,7 +267,7 @@ namespace KMHServerAddon.Features.Discord
             PersistedState state = new PersistedState();
             lock (_lock)
             {
-                state.Users = new Dictionary<string, UserState>(_users, StringComparer.OrdinalIgnoreCase);
+                state.Users = KmhDeepCopy.Of(new Dictionary<string, UserState>(_users, StringComparer.OrdinalIgnoreCase));
             }
             JsonFileStore.Save(KmhDataPaths.DiscordUserStateFile, state);
         }

@@ -55,7 +55,7 @@ namespace KMHServerAddon.Maintenance
                 missing.Count == 0 ? $"{RequiredKeys.Length} required key(s) present"
                                    : "MISSING from the player snapshot: " + string.Join(", ", missing)));
 
-            // "mail" once meant the notice queue - reusing it would change what archived records mean.
+            // "mail" means the notice queue in archived records, so reusing it would change what they mean.
             results.Add(("Snapshot: no ambiguous 'mail' key", !included.Contains("mail", StringComparer.Ordinal),
                 included.Contains("mail", StringComparer.Ordinal)
                     ? "'mail' is ambiguous - use notifications / player_mail"
@@ -64,7 +64,7 @@ namespace KMHServerAddon.Maintenance
             return results;
         }
 
-        // Stable, and carries the marker the boot sweep uses to clear rows left by the old random-name build.
+        // Stable, and carries the marker the boot sweep uses to clear rows left by older random-name probes.
         internal const string ProbeUser = "__kmh_snapshot_probe__diag";
 
         private static void Cleanup(string probe)

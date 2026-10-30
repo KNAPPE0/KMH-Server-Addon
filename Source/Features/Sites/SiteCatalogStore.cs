@@ -6,7 +6,7 @@ using KMHServerAddon.Persistence;
 
 namespace KMHServerAddon.Features.Sites
 {
-    // The first catalog establishes a fingerprint, and a differing client is ignored rather than allowed to overwrite it.
+    // The first catalog sets the fingerprint, and a differing client is ignored rather than allowed to overwrite it.
     internal static class SiteCatalogStore
     {
         private static readonly object _lock = new object();
@@ -14,6 +14,8 @@ namespace KMHServerAddon.Features.Sites
             new Dictionary<string, SiteOutputMetadata>(StringComparer.OrdinalIgnoreCase);
 
         private static string _fingerprint = "";
+        // Hash of the pushed classification itself: the fingerprint is the pusher's own label and is broadcast to all.
+        private static string _contentHash = "";
         private static string _establishedBy = "";
         private static DateTime _establishedUtc;
         private static int _rejectedPushes;
@@ -53,6 +55,7 @@ namespace KMHServerAddon.Features.Sites
             fingerprint = (fingerprint ?? "").Trim();
             if (chunkTotal <= 0) chunkTotal = 1;
             if (chunkIndex <= 0) chunkIndex = 1;
+            if (chunkTotal > MaxChunks || chunkIndex > MaxChunks) { detail = $"over {MaxChunks} chunks"; return PushResult.Ignored; }
 
             lock (_lock)
             {
@@ -66,6 +69,8 @@ namespace KMHServerAddon.Features.Sites
                 }
 
                 if (!p.SeenChunks.Add(chunkIndex)) { detail = $"duplicate chunk {chunkIndex}"; return PushResult.Ignored; }
+                if (p.Meta.Count + meta.Count > MaxEntries)
+                { _pending.Remove(username); detail = $"over {MaxEntries} entries"; return PushResult.Ignored; }
                 p.Total = Math.Max(p.Total, chunkTotal);
                 p.Meta.AddRange(meta);
 
@@ -95,21 +100,65 @@ namespace KMHServerAddon.Features.Sites
                 return PushResult.Rejected;
             }
 
+            string hash = ContentHash(p.Meta);
+            if (!first)
+            {
+                // Same catalog again (a reconnect): nothing to do, and no settle to pay for.
+                if (string.Equals(hash, _contentHash, StringComparison.Ordinal)) { detail = "unchanged"; return PushResult.Ignored; }
+                _rejectedPushes++;
+                detail = $"content differs from the catalog established by {_establishedBy} under the same fingerprint";
+                ServerLog.Warn($"Site catalog: REFUSED a catalog from '{username}' - {detail}. The established catalog is unchanged; "
+                             + "run 'kmh site-catalog reset' if the owner changed the modpack.");
+                return PushResult.Rejected;
+            }
+
             Classify(p.Meta);
 
-            _byDef.Clear();
-            foreach (SiteOutputMetadata m in p.Meta)
-            {
-                if (m == null || string.IsNullOrWhiteSpace(m.DefName)) continue;
-                _byDef[m.DefName.Trim()] = m;
-            }
+            ReplaceDefsLocked(p.Meta);
             _fingerprint   = p.Fingerprint;
+            _contentHash   = hash;
             _establishedBy = username;
             _establishedUtc = DateTime.UtcNow;
             _dirty = true;
 
             detail = $"{_byDef.Count} def(s), fingerprint {_fingerprint}";
             return first ? PushResult.Accepted : PushResult.Refreshed;
+        }
+
+        private static void ReplaceDefsLocked(List<SiteOutputMetadata> meta)
+        {
+            _byDef.Clear();
+            foreach (SiteOutputMetadata m in meta)
+            {
+                if (m == null || string.IsNullOrWhiteSpace(m.DefName)) continue;
+                _byDef[m.DefName.Trim()] = m;
+            }
+        }
+
+        internal const int MaxChunks = 64;
+        internal const int MaxEntries = 60_000;
+
+        // Only what a client pushes and the classifier reads; the label is display text and varies by language.
+        internal static string ContentHash(IEnumerable<SiteOutputMetadata> meta)
+        {
+            var lines = new List<string>();
+            foreach (SiteOutputMetadata m in meta ?? new List<SiteOutputMetadata>())
+            {
+                if (m == null || string.IsNullOrWhiteSpace(m.DefName)) continue;
+                lines.Add(string.Join("|", m.DefName.Trim().ToLowerInvariant(), Sorted(m.Categories), Sorted(m.StuffCategories),
+                                      Sorted(m.Tags), m.IsIngestible ? "1" : "0"));
+            }
+            lines.Sort(StringComparer.Ordinal);
+            using (var sha = System.Security.Cryptography.SHA256.Create())
+                return BitConverter.ToString(sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(string.Join("\n", lines)))).Replace("-", "");
+        }
+
+        private static string Sorted(List<string> xs)
+        {
+            var copy = new List<string>();
+            foreach (string x in xs ?? new List<string>()) if (!string.IsNullOrEmpty(x)) copy.Add(x.Trim().ToLowerInvariant());
+            copy.Sort(StringComparer.Ordinal);
+            return string.Join(",", copy);
         }
 
         // An owner override beats the classifier, so a modded item can be corrected without patching KMH.
@@ -129,14 +178,14 @@ namespace KMHServerAddon.Features.Sites
                 else
                 {
                     string classified = SiteOutputClassifier.Classify(m);
-                    m.Family = ResolveFamily(classified, cfg?.UnknownOutputFamily);
+                    m.Family = ResolveFamily(classified, cfg?.Output.UnknownFamily);
                     m.Source = m.Family == classified ? "classifier" : "unknown-default";
                 }
                 m.Skill = SiteOutputFamilies.SkillFor(m.Family);
             }
         }
 
-        // Empty leaves it unclassified, which every archetype refuses - guessing a family is what made this exploitable.
+        // Empty leaves it unclassified, which every archetype refuses: guessing a family would make this exploitable.
         internal static string ResolveFamily(string classified, string unknownFallback)
         {
             if (classified != SiteOutputFamilies.Unknown) return classified;
@@ -155,7 +204,6 @@ namespace KMHServerAddon.Features.Sites
             foreach (string k in stale) _pending.Remove(k);
         }
 
-
         public static SiteOutputMetadata Lookup(string defName)
         {
             if (string.IsNullOrWhiteSpace(defName)) return null;
@@ -173,7 +221,6 @@ namespace KMHServerAddon.Features.Sites
             return m == null ? "" : (m.Skill ?? "");
         }
 
-
         internal sealed class PersistedState
         {
             public string Fingerprint { get; set; } = "";
@@ -189,23 +236,20 @@ namespace KMHServerAddon.Features.Sites
             Classify(state.Meta);
             lock (_lock)
             {
-                _byDef.Clear();
-                foreach (SiteOutputMetadata m in state.Meta)
-                {
-                    if (m == null || string.IsNullOrWhiteSpace(m.DefName)) continue;
-                    _byDef[m.DefName.Trim()] = m;
-                }
+                ReplaceDefsLocked(state.Meta);
                 _fingerprint    = state.Fingerprint ?? "";
+                _contentHash    = _byDef.Count > 0 ? ContentHash(_byDef.Values) : "";
                 _establishedBy  = state.EstablishedBy ?? "";
                 _establishedUtc = state.EstablishedUtcTicks > 0 ? new DateTime(state.EstablishedUtcTicks, DateTimeKind.Utc) : DateTime.MinValue;
                 _dirty = false;
             }
-            ServerLog.Info($"Site catalog: loaded {Count} classified def(s) (fingerprint {Fingerprint}).");
+            ServerLog.Diag($"Site catalog: loaded {Count} classified def(s) (fingerprint {Fingerprint}).");
         }
 
         public static void SaveToDisk()
         {
             PersistedState state;
+            long seq;
             lock (_lock)
             {
                 state = new PersistedState
@@ -213,11 +257,13 @@ namespace KMHServerAddon.Features.Sites
                     Fingerprint = _fingerprint,
                     EstablishedBy = _establishedBy,
                     EstablishedUtcTicks = _establishedUtc == DateTime.MinValue ? 0 : _establishedUtc.Ticks,
-                    Meta = new List<SiteOutputMetadata>(_byDef.Values),
+                    Meta = KmhDeepCopy.OfList(_byDef.Values),
                 };
                 _dirty = false;
+                seq = JsonFileStore.NextSequence();
             }
-            JsonFileStore.Save(KmhDataPaths.SiteCatalogFile, state);
+            // Still dirty after a failed write, so SaveIfDirty tries again instead of losing the adopted catalog.
+            if (!JsonFileStore.Save(KmhDataPaths.SiteCatalogFile, state, seq)) lock (_lock) _dirty = true;
         }
 
         public static bool Dirty { get { lock (_lock) return _dirty; } }
@@ -229,7 +275,7 @@ namespace KMHServerAddon.Features.Sites
             lock (_lock)
             {
                 _byDef.Clear(); _pending.Clear();
-                _fingerprint = ""; _establishedBy = ""; _establishedUtc = DateTime.MinValue;
+                _fingerprint = ""; _contentHash = ""; _establishedBy = ""; _establishedUtc = DateTime.MinValue;
                 _rejectedPushes = 0; _dirty = true;
             }
             ServerLog.Warn("Site catalog: reset - the next client push will establish a new catalog.");

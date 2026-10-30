@@ -1,6 +1,6 @@
 using System;
 using System.Collections.Generic;
-using Discord;
+using Kmh.Discord.Wire;
 using KMHServerAddon.Features.ItemLabels;
 using KMHServerAddon.Features.LinkedAccounts;
 
@@ -10,7 +10,7 @@ namespace KMHServerAddon.Features.Discord
     {
         private const int MaxFields = 25;
 
-        public static Embed Build(string username, string tagline, List<DiscordUserState.WtbEntry> entries)
+        public static KmhEmbedSpec Build(string username, string tagline, List<DiscordUserState.WtbEntry> entries)
         {
             string title = $"{username} is buying";
             if (LinkedAccountsStore.TryGetLink(username, out string discord) && !string.IsNullOrEmpty(discord))
@@ -18,14 +18,15 @@ namespace KMHServerAddon.Features.Discord
                 title += $"  ·  {discord}";
             }
 
-            EmbedBuilder eb = new EmbedBuilder()
+            KmhEmbedSpecBuilder eb = new KmhEmbedSpecBuilder()
                 .WithTitle(title)
-                .WithColor(new Color(0xBA, 0x84, 0xF6))
+                .WithColor(0xBA84F6)
                 .WithCurrentTimestamp();
 
             if (!string.IsNullOrEmpty(tagline))
             {
-                eb.WithDescription($"_{tagline}_");
+                // Escaped like a name: a tagline is player text, and "[x](url)" would post as a disguised link.
+                eb.WithDescription($"_{DiscordText.SafeName(tagline)}_");
             }
 
             if (entries == null || entries.Count == 0)

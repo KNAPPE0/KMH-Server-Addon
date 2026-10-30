@@ -16,7 +16,9 @@ namespace KMHServerAddon.Maintenance
             ["MetaFile"]              = "the data-format stamp itself, read before the scan runs",
             ["StatusFile"]            = "liveness heartbeat, rewritten every ~60s",
             ["SnapshotRequestFile"]   = "one-line marker consumed on the sweep",
+            ["ForceMigrationFile"]    = "owner marker consumed by the migration that honours it",
             ["MigrationReportLatest"] = "plain text report, not JSON",
+            ["ConfigReadmeFile"]      = "plain text guide to the config files, rewritten on regeneration",
         };
 
         public static List<(string Name, bool Ok, string Detail)> Run()
@@ -52,7 +54,7 @@ namespace KMHServerAddon.Maintenance
 
                 string full;
                 try { full = Path.GetFullPath(path); } catch { continue; }
-                if (!full.StartsWith(folder, StringComparison.OrdinalIgnoreCase)) continue;  // outside KMH-Data
+                if (!full.StartsWith(folder, StringComparison.OrdinalIgnoreCase)) continue;
                 if (!Path.HasExtension(full)) continue;                                      // a directory, not a file
 
                 considered.Add(p.Name);

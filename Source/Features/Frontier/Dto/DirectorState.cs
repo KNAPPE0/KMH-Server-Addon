@@ -7,13 +7,12 @@ namespace KMHServerAddon.Features.Frontier.Dto
     // Coordination only: Sites and server quests stay the truth, so nothing here may become a second copy of either.
     public class DirectorState
     {
-        // Unwritten today on purpose; it is what a future migration keys on rather than dead state.
+        // Never bumped yet: it is the key a future migration reads, not dead state.
         [JsonProperty("schema")]   public int  Schema   { get; set; } = 1;
         [JsonProperty("revision")] public long Revision { get; set; } = 0;
 
         [JsonProperty("next_eligible_utc")] public long NextEligibleUtcTicks { get; set; } = 0;
 
-        // tile -> earliest utc this location may be acted on again.
         [JsonProperty("target_cooldowns")] public Dictionary<string, long> TargetCooldowns { get; set; }
             = new Dictionary<string, long>(StringComparer.Ordinal);
 
@@ -36,7 +35,7 @@ namespace KMHServerAddon.Features.Frontier.Dto
             c.TargetCooldowns    = new Dictionary<string, long>(TargetCooldowns, StringComparer.Ordinal);
             c.ActiveOperationIds = new List<long>(ActiveOperationIds);
             c.OutpostTiles       = new List<int>(OutpostTiles);
-            // Deep, because TryAdvanceResolution edits Phase in place and would change a shared record under the reader.
+            // Deep: TryAdvanceResolution edits Phase in place, which would change a shared record under the reader.
             c.Resolutions = new List<ResolutionRecord>(Resolutions.Count);
             foreach (ResolutionRecord r in Resolutions) if (r != null) c.Resolutions.Add(r.Clone());
             if (PendingPlacement != null) c.PendingPlacement = PendingPlacement.CloneForRead();

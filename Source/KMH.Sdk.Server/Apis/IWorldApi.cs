@@ -3,7 +3,7 @@ using KMH.Sdk.Server.Records;
 
 namespace KMH.Sdk.Server.Apis
 {
-    /// <summary>World Engine API for server-wide events and house-pool-funded global quests, respecting World.json limits and funding rules.</summary>
+    /// <summary>World Engine API: server-wide events and house-pool-funded global quests, within World.json limits.</summary>
     public interface IWorldApi
     {
         /// <summary>Active live events.</summary>
@@ -12,13 +12,14 @@ namespace KMH.Sdk.Server.Apis
         /// <summary>Active and recently-ended global quests still inside the board grace window.</summary>
         IReadOnlyList<ServerQuestRecord> GetServerQuests();
 
-        /// <summary>Fires a world event using config defaults/clamps; false with a reason if disabled or invalid. durationMinutes is bare minutes, 0 = configured default.</summary>
+        /// <summary>Fires a world event within config clamps; a <paramref name="durationMinutes"/> of 0 uses the default.</summary>
+        /// <returns>False, with a reason, if disabled or invalid.</returns>
         bool FireEvent(string type, double magnitude, string target, int durationMinutes, out string reason);
 
         /// <summary>Force-ends active events of this type; returns false if none are running.</summary>
         bool EndEvent(string type, out string reason);
 
-        /// <summary>Creates a cooperative/competitive global quest and reserves its house-pool reward; false with a reason on invalid input.</summary>
+        /// <summary>Creates a cooperative or competitive global quest, reserving its house-pool reward; false if invalid.</summary>
         bool CreateQuest(string kind, string objective, string targetDefName, int goalQty, long reward,
                          int durationMinutes, string title, string description, out string reason);
 

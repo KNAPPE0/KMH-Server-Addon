@@ -5,14 +5,14 @@
     {
         public const string Enabled           = "enabled";
         public const string Access            = "access";              // KmhAccessMode value
-        public const string RequireLocation   = "requireLocation";     // must act at a required spot (e.g. guild hall)
-        public const string AllowRemote       = "allowRemote";         // usable from off-map / caravan
+        public const string RequireLocation   = "requireLocation";
+        public const string AllowRemote       = "allowRemote";
         public const string FeePercent        = "feePercent";
         public const string MaxPerTransaction = "maxPerTransaction";   // -1 = unlimited
         public const string CooldownSeconds   = "cooldownSeconds";
         public const string BlockedDuringRaid = "blockedDuringRaid";
         public const string Logging           = "logging";
-        public const string TargetRuleSet     = "targetRuleSet";       // name of the target-rule set that applies, or ""
+        public const string TargetRuleSet     = "targetRuleSet";
 
         // These strings are the on-disk section keys in Policies.json - renaming one orphans owner overrides.
         public static class System
@@ -32,10 +32,10 @@
 
     internal static class KmhAccessMode
     {
-        public const string Open       = "open";        // any connected player
-        public const string GuildOnly  = "guild_only";  // guild members only
-        public const string OwnerOnly  = "owner_only";  // the owner of the vault/listing only
-        public const string Restricted = "restricted";  // gated by a target/permission rule
-        public const string Disabled   = "disabled";    // no access
+        public const string Open       = "open";
+        public const string GuildOnly  = "guild_only";
+        public const string OwnerOnly  = "owner_only";
+        public const string Restricted = "restricted";
+        public const string Disabled   = "disabled";
     }
 }

@@ -3,50 +3,66 @@ using KMHServerAddon.Persistence;
 
 namespace KMHServerAddon.Features.Chat
 {
+    internal sealed class ChatLimits
+    {
+        public int MaxMessageLength    { get; set; } = 512;
+        public int MaxRecentPerChannel { get; set; } = 100;
+        public int MaxSendsPerWindow   { get; set; } = 20;
+        public int SendWindowSeconds   { get; set; } = 30;
+        public int RetentionHours      { get; set; } = 168;
+
+        // Persists the same bounded ring a reconnecting client is served, so it adds durability but no retention.
+        public bool PersistHistory { get; set; } = true;
+    }
+
+    internal sealed class ChatBlocking
+    {
+        public bool Enabled { get; set; } = true;
+
+        // Nothing upstream checks a blocked name is real, so without a ceiling one client could fill the disk.
+        public int MaxPerUser { get; set; } = 200;
+
+        // The cap bounds list size; this bounds rewrite churn, which toggling one name would otherwise cause forever.
+        public int MaxChangesPerWindow { get; set; } = 20;
+        public int ChangeWindowSeconds { get; set; } = 60;
+    }
+
+    internal sealed class ChatTheme
+    {
+        public string Accent     { get; set; } = "";
+        public string ServerChat { get; set; } = "";
+        public string GuildChat  { get; set; } = "";
+        public string DirectMsg  { get; set; } = "";
+        public string Discord    { get; set; } = "";
+
+        // Names and bodies are separate so branding author names does not wash out the log itself.
+        public string NameNormal  { get; set; } = "";
+        public string TextNormal  { get; set; } = "";
+        public string NameDiscord { get; set; } = "";
+        public string TextDiscord { get; set; } = "";
+
+        // World-map marker rims. Outpost states keep KMH's colours: a warning styled into calm is worse than none.
+        public string MarkerMine   { get; set; } = "";
+        public string MarkerTheirs { get; set; } = "";
+
+        // The one cue that does not depend on colour, so it can never be blanked or carry markup.
+        public string DiscordMarker { get; set; } = "◈";
+    }
+
     // Every caller reads through Current, so an edited file takes effect without a restart.
     internal sealed class ChatConfig
     {
         public int SchemaVersion { get; set; } = 1;
 
-        public int  MaxMessageLength    { get; set; } = 512;
-        public int  MaxRecentPerChannel { get; set; } = 100;   // history kept per channel (reconnect context)
-        public int  MaxSendsPerWindow   { get; set; } = 20;    // rate limit: sends allowed per window
-        public int  SendWindowSeconds   { get; set; } = 30;
-        public int  RetentionHours      { get; set; } = 48;
-        public bool BlockingEnabled     { get; set; } = true;  // players can block others
-
-        // Persists the same bounded ring a reconnecting client is served, so it adds durability but no retention.
-        public bool PersistHistory      { get; set; } = true;
-
-        // Nothing upstream checks a blocked name is real, so without a ceiling one client could fill the disk.
-        public int  MaxBlocksPerUser    { get; set; } = 200;
-
-        // The cap bounds list size; this bounds rewrite churn, which toggling one name would otherwise cause forever.
-        public int  MaxBlockChangesPerWindow { get; set; } = 20;
-        public int  BlockChangeWindowSeconds { get; set; } = 60;
+        public ChatLimits   Limits   { get; set; } = new ChatLimits();
+        public ChatBlocking Blocking { get; set; } = new ChatBlocking();
 
         // Presentation only, never permissions or identity, and the client lifts anything unreadable.
-        public string ThemeAccent      { get; set; } = "";
-        public string ThemeServerChat  { get; set; } = "";
-        public string ThemeGuildChat   { get; set; } = "";
-        public string ThemeDirectMsg   { get; set; } = "";
-        public string ThemeDiscord     { get; set; } = "";
+        public ChatTheme Theme { get; set; } = new ChatTheme();
 
-        // Names and bodies are separate so branding author names does not wash out the log itself.
-        public string ThemeNameNormal  { get; set; } = "";
-        public string ThemeTextNormal  { get; set; } = "";
-        public string ThemeNameDiscord { get; set; } = "";
-        public string ThemeTextDiscord { get; set; } = "";
-
-        // World-map marker rims. Outpost states keep KMH's colours: a warning an owner could style into calm is worse than none.
-        public string MarkerMine       { get; set; } = "";
-        public string MarkerTheirs     { get; set; } = "";
-
-        // The one cue that does not depend on colour, so it can never be blanked or carry markup.
-        public string DiscordMarker    { get; set; } = "◈";
-
-        // Off by default because a preview makes a player's own client contact a third-party host.
-        public bool AllowImagePreviews { get; set; } = false;
+        // On for new servers only. There is deliberately no defaults-upgrade entry: a chosen false and a
+        // generated false are the same byte, so migrating one would flip the other.
+        public bool AllowImagePreviews { get; set; } = true;
 
         // Matched exactly or by subdomain, never as a substring, so cdn.discordapp.com.evil.example is refused.
         public string[] ImageHostAllowList { get; set; } = DefaultImageHosts();
@@ -60,9 +76,12 @@ namespace KMHServerAddon.Features.Chat
             "discordapp.com",     // cdn.discordapp.com - attachments
             "discordapp.net",     // media. and images-ext-N. - Discord's re-hosted embed media
             "media.tenor.com",
-            "i.giphy.com",
-            "media.giphy.com",
+            "giphy.com",          // i., media. and media0-4. - the GIF picker's and shared links' hosts
             "i.imgur.com",
+            "i.redd.it",
+            "upload.wikimedia.org",
+            "images.steamusercontent.com",
+            "steamuserimages-a.akamaihd.net",
         };
 
         // Generous because the client's own decoder caps frames and pixels, so a huge file truncates rather than grows.
@@ -86,8 +105,8 @@ namespace KMHServerAddon.Features.Chat
         // Only these honour ?format=; appending it elsewhere would be ignored at best and break the url at worst.
         public string[] TranscodeHosts { get; set; } = new[] { "discordapp.net", "discordapp.com" };
 
-        // Separate from the Discord path, because an attachment passed through the owner's own Discord.
-        public bool AllowTypedImageUrls { get; set; } = false;
+        // Typed links preview only from ImageHostAllowList, over https, within the Media limits; off keeps them as text.
+        public bool AllowTypedImageUrls { get; set; } = true;
 
         private static ChatConfig _current;
         public static ChatConfig Current => _current ?? (_current = LoadOrDefault());
@@ -103,15 +122,18 @@ namespace KMHServerAddon.Features.Chat
         // Clamped so a hand-edited config cannot disable the guards.
         public void Clamp()
         {
-            MaxMessageLength    = Clamp(MaxMessageLength,    16, 4000);
-            MaxRecentPerChannel = Clamp(MaxRecentPerChannel, 10, 1000);
-            MaxSendsPerWindow   = Clamp(MaxSendsPerWindow,    1, 240);
-            SendWindowSeconds   = Clamp(SendWindowSeconds,    1, 3600);
-            RetentionHours      = Clamp(RetentionHours,       1, 720);
-            MaxBlocksPerUser    = Clamp(MaxBlocksPerUser,     1, 5000);
-            MaxBlockChangesPerWindow = Clamp(MaxBlockChangesPerWindow, 1, 1000);
-            BlockChangeWindowSeconds = Clamp(BlockChangeWindowSeconds, 1, 3600);
-            DiscordMarker            = ClampMarker(DiscordMarker);
+            Limits   ??= new ChatLimits();
+            Blocking ??= new ChatBlocking();
+            Limits.MaxMessageLength    = Clamp(Limits.MaxMessageLength,    16, 4000);
+            Limits.MaxRecentPerChannel = Clamp(Limits.MaxRecentPerChannel, 10, 1000);
+            Limits.MaxSendsPerWindow   = Clamp(Limits.MaxSendsPerWindow,    1, 240);
+            Limits.SendWindowSeconds   = Clamp(Limits.SendWindowSeconds,    1, 3600);
+            Limits.RetentionHours      = Clamp(Limits.RetentionHours,       1, 720);
+            Blocking.MaxPerUser          = Clamp(Blocking.MaxPerUser,          1, 5000);
+            Blocking.MaxChangesPerWindow = Clamp(Blocking.MaxChangesPerWindow, 1, 1000);
+            Blocking.ChangeWindowSeconds = Clamp(Blocking.ChangeWindowSeconds, 1, 3600);
+            Theme ??= new ChatTheme();
+            Theme.DiscordMarker      = ClampMarker(Theme.DiscordMarker);
             ImageHostAllowList       = ImageHostAllowList ?? new string[0];
             if (AutoAddNewImageHosts) ImageHostAllowList = MergeHosts(ImageHostAllowList, DefaultImageHosts());
             MaxImageBytes            = Clamp(MaxImageBytes, 16 * 1024, 64 * 1024 * 1024);
@@ -143,23 +165,38 @@ namespace KMHServerAddon.Features.Chat
             return m.Length > 4 ? m.Substring(0, 4) : m;
         }
 
-        // Rewritten from its own loaded values, so a field added by an update becomes visible instead of staying hidden.
+        // Create only. New fields arrive through the shared boot backfill; a full reserialize here would also
+        // drop any key this build does not know about.
         public static void EnsureGenerated()
         {
             if (!System.IO.File.Exists(KmhDataPaths.ChatConfigFile))
-            {
                 JsonFileStore.Save(KmhDataPaths.ChatConfigFile, new ChatConfig());
-                return;
-            }
+        }
 
+        // Clamp merges these at load anyway; this only keeps the file honest for an owner reading it.
+        public static void MergeShippedImageHosts()
+        {
+            string path = KmhDataPaths.ChatConfigFile;
+            if (!System.IO.File.Exists(path)) return;
             try
             {
-                string existing = System.IO.File.ReadAllText(KmhDataPaths.ChatConfigFile);
-                ChatConfig cfg = LoadOrDefault();
-                if (JsonFileStore.ToJson(cfg).Trim() != existing.Trim())
-                    JsonFileStore.Save(KmhDataPaths.ChatConfigFile, cfg);
+                var file = Newtonsoft.Json.Linq.JObject.Parse(System.IO.File.ReadAllText(path));
+                if (file["AutoAddNewImageHosts"] is Newtonsoft.Json.Linq.JValue auto && auto.Type == Newtonsoft.Json.Linq.JTokenType.Boolean
+                    && !(bool)auto.Value) return;
+                if (!(file["ImageHostAllowList"] is Newtonsoft.Json.Linq.JArray list)) return;
+
+                var seen = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
+                foreach (Newtonsoft.Json.Linq.JToken t in list) seen.Add((t.ToString() ?? "").Trim());
+
+                var added = new List<string>();
+                foreach (string h in DefaultImageHosts())
+                    if (seen.Add(h)) { list.Add(h); added.Add(h); }
+
+                if (added.Count == 0) return;
+                JsonFileStore.Save(path, file);
+                Diagnostics.ServerLog.Info($"Chat: added newly shipped image host(s) to Chat.json: {string.Join(", ", added)}");
             }
-            catch (System.Exception ex) { Diagnostics.ServerLog.Warn($"Chat config top-up skipped: {ex.Message}"); }
+            catch (System.Exception ex) { Diagnostics.ServerLog.Warn($"Chat: image host top-up skipped: {ex.Message}"); }
         }
     }
 }

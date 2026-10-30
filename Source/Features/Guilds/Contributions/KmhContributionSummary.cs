@@ -5,10 +5,10 @@ namespace KMHServerAddon.Features.Guilds.Contributions
     // Derived rather than stored, so it can be rebuilt from the ledger at any time.
     internal readonly struct KmhContributionSummary
     {
-        public readonly long Silver;       // net of returns
-        public readonly long ItemValue;    // net of returns
+        public readonly long Silver;
+        public readonly long ItemValue;
         public readonly long Returned;
-        public readonly int  Count;        // excludes returns and adjustments
+        public readonly int  Count;
 
         public KmhContributionSummary(long silver, long itemValue, long returned, int count)
         { Silver = silver; ItemValue = itemValue; Returned = returned; Count = count; }

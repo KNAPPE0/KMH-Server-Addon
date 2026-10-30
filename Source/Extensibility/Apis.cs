@@ -44,10 +44,10 @@ namespace KMHServerAddon.Extensibility
             return result;
         }
 
-        public bool DepositSilver (string u, int amount, string note = "") => KmhSdkGate.Allow("treasury deposit")  && Features.Treasury.TreasuryStore.DepositSilver (u, amount, note);
-        public bool WithdrawSilver(string u, int amount, string note = "") => KmhSdkGate.Allow("treasury withdraw") && Features.Treasury.TreasuryStore.WithdrawSilver(u, amount, note);
-        public bool DepositItem   (string u, string def, int qty, string note = "") => KmhSdkGate.Allow("treasury item deposit")  && Features.Treasury.TreasuryStore.DepositItem  (u, def, qty, note);
-        public bool WithdrawItem  (string u, string def, int qty, string note = "") => KmhSdkGate.Allow("treasury item withdraw") && Features.Treasury.TreasuryStore.WithdrawItem (u, def, qty, note);
+        public bool DepositSilver (string u, int amount, string note = "") => KmhSdkGate.Run("treasury deposit",  () => Features.Treasury.TreasuryStore.DepositSilver (u, amount, note));
+        public bool WithdrawSilver(string u, int amount, string note = "") => KmhSdkGate.Run("treasury withdraw", () => Features.Treasury.TreasuryStore.WithdrawSilver(u, amount, note));
+        public bool DepositItem   (string u, string def, int qty, string note = "") => KmhSdkGate.Run("treasury item deposit",  () => Features.Treasury.TreasuryStore.DepositItem  (u, def, qty, note));
+        public bool WithdrawItem  (string u, string def, int qty, string note = "") => KmhSdkGate.Run("treasury item withdraw", () => Features.Treasury.TreasuryStore.WithdrawItem (u, def, qty, note));
     }
 
     // The router gates inbound packets; an extension reaches the same stores without passing through it.
@@ -56,16 +56,20 @@ namespace KMHServerAddon.Extensibility
         private static readonly object _lock = new object();
         private static readonly Util.KmhRateWindow _log = new Util.KmhRateWindow();
 
-        // Through admission, not the maintenance gate directly: a reset must refuse an extension as it refuses a player.
-        public static bool Allow(string what)
+        // Through admission, so a reset refuses an extension as it refuses a player and waits for a move it started.
+        public static Maintenance.KmhValueOps.Scope Begin(string what)
         {
-            if (Maintenance.KmhAdmission.AllowsValueMutation(Maintenance.KmhIngress.Sdk, out string refusal)) return true;
+            Maintenance.KmhValueOps.Scope op = Maintenance.KmhValueOps.Begin(Maintenance.KmhIngress.Sdk, out string refusal);
+            if (op != null) return op;
             // One line a minute per call site: an extension retrying in a loop must not bury the console.
             bool say;
             lock (_lock) say = _log.Allow(what, System.DateTime.UtcNow.Ticks, 1, 60);
             if (say) Diagnostics.ServerLog.Warn($"SDK: refused an extension's {what} - {refusal}");
-            return false;
+            return null;
         }
+
+        public static bool Run(string what, Func<bool> move) { using (Maintenance.KmhValueOps.Scope op = Begin(what)) return op != null && move(); }
+        public static long Run(string what, Func<long> move) { using (Maintenance.KmhValueOps.Scope op = Begin(what)) return op != null ? move() : 0L; }
     }
 
     internal sealed class MarketplaceApiImpl : IMarketplaceApi
@@ -98,16 +102,16 @@ namespace KMHServerAddon.Extensibility
         }
 
         public long Post(string seller, string def, int qty, int price, string visibility = "public", int expiresHours = 0)
-            => KmhSdkGate.Allow("marketplace post") ? Features.Marketplace.MarketplaceStore.Post(seller, def, qty, price, visibility, expiresHours) : 0L;
-
+            => KmhSdkGate.Run("marketplace post", () => Features.Marketplace.MarketplaceStore.Post(seller, def, qty, price, visibility, expiresHours));
 
         public bool Cancel(string caller, long listingId)
-            => KmhSdkGate.Allow("marketplace cancel") && Features.Marketplace.MarketplaceStore.Cancel(caller, listingId);
+            => KmhSdkGate.Run("marketplace cancel", () => Features.Marketplace.MarketplaceStore.Cancel(caller, listingId));
 
         public bool Buy(string buyer, long listingId, int qty, out string sellerUsername)
         {
             sellerUsername = null;
-            return KmhSdkGate.Allow("marketplace buy") && Features.Marketplace.MarketplaceStore.Buy(buyer, listingId, qty, out sellerUsername);
+            using (Maintenance.KmhValueOps.Scope op = KmhSdkGate.Begin("marketplace buy"))
+                return op != null && Features.Marketplace.MarketplaceStore.Buy(buyer, listingId, qty, out sellerUsername);
         }
     }
 
@@ -144,20 +148,21 @@ namespace KMHServerAddon.Extensibility
             return result;
         }
 
+        // Posting escrows the poster's vault, so it is gated: a post landing mid-reset survives as a refundable bounty.
         public long PostDeliverItem(string poster, string title, string desc, int bounty,
                                     string targetDef, int targetQty, string visibility = "public", int expiresHours = 0)
-            => Features.Quests.QuestStore.Post(poster, Features.Quests.Dto.QuestEntry.KindDeliverItem, visibility,
-                title, desc, bounty, targetDef, targetQty, expiresHours);
+            => KmhSdkGate.Run("quest post", () => Features.Quests.QuestStore.Post(poster, Features.Quests.Dto.QuestEntry.KindDeliverItem, visibility,
+                title, desc, bounty, targetDef, targetQty, expiresHours));
 
         public long PostBounty(string poster, string title, string desc, int bounty,
                                string visibility = "public", int expiresHours = 0)
-            => Features.Quests.QuestStore.Post(poster, Features.Quests.Dto.QuestEntry.KindBounty, visibility,
-                title, desc, bounty, targetItemDefName: "", targetItemQty: 0, expiresInHours: expiresHours);
+            => KmhSdkGate.Run("quest post", () => Features.Quests.QuestStore.Post(poster, Features.Quests.Dto.QuestEntry.KindBounty, visibility,
+                title, desc, bounty, targetItemDefName: "", targetItemQty: 0, expiresInHours: expiresHours));
 
-        public bool Claim   (string user, long id) => KmhSdkGate.Allow("quest claim")   && Features.Quests.QuestStore.Claim   (user, id);
-        public bool Submit  (string user, long id) => KmhSdkGate.Allow("quest submit")  && Features.Quests.QuestStore.Submit  (user, id, out _);
-        public bool Approve (string user, long id) => KmhSdkGate.Allow("quest approve") && Features.Quests.QuestStore.Approve (user, id, out _);
-        public bool Cancel  (string user, long id) => KmhSdkGate.Allow("quest cancel")  && Features.Quests.QuestStore.Cancel  (user, id);
+        public bool Claim   (string user, long id) => KmhSdkGate.Run("quest claim",   () => Features.Quests.QuestStore.Claim   (user, id));
+        public bool Submit  (string user, long id) => KmhSdkGate.Run("quest submit",  () => Features.Quests.QuestStore.Submit  (user, id, out _));
+        public bool Approve (string user, long id) => KmhSdkGate.Run("quest approve", () => Features.Quests.QuestStore.Approve (user, id, out _));
+        public bool Cancel  (string user, long id) => KmhSdkGate.Run("quest cancel",  () => Features.Quests.QuestStore.Cancel  (user, id));
     }
 
     internal sealed class GuildApiImpl : IGuildApi
@@ -183,17 +188,17 @@ namespace KMHServerAddon.Extensibility
 
         // Membership and rank decide who may spend a guild's silver later, so they are gated like a value move.
         public bool CreateGuild(string name)
-            => KmhSdkGate.Allow("guild create") && Features.Guilds.GuildStore.CreateGuild(name);
+            => KmhSdkGate.Run("guild create", () => Features.Guilds.GuildStore.CreateGuild(name));
         public bool AddMember(string username, string guildName, string rank = "member")
-            => KmhSdkGate.Allow("guild add member") && Features.Guilds.GuildStore.AddMember(username, guildName, rank);
+            => KmhSdkGate.Run("guild add member", () => Features.Guilds.GuildStore.AddMember(username, guildName, rank));
         public bool SetMotd(string guildName, string motd)
-            => KmhSdkGate.Allow("guild motd") && Features.Guilds.GuildStore.SetMotdByName(guildName, motd);
+            => KmhSdkGate.Run("guild motd", () => Features.Guilds.GuildStore.SetMotdByName(guildName, motd));
 
         public long GetGuildSilver(string guildName)                      => Features.Treasury.TreasuryStore.GetGuildSilver(guildName);
         public bool DepositGuildSilver(string guildName, int amount, string contributor, string note = "")
-            => KmhSdkGate.Allow("guild vault deposit") && Features.Treasury.TreasuryStore.DepositGuildSilver(guildName, amount, contributor, note);
+            => KmhSdkGate.Run("guild vault deposit", () => Features.Treasury.TreasuryStore.DepositGuildSilver(guildName, amount, contributor, note));
         public bool WithdrawGuildSilver(string guildName, int amount, string actor, string note = "")
-            => KmhSdkGate.Allow("guild vault withdraw") && Features.Treasury.TreasuryStore.WithdrawGuildSilver(guildName, amount, actor, note);
+            => KmhSdkGate.Run("guild vault withdraw", () => Features.Treasury.TreasuryStore.WithdrawGuildSilver(guildName, amount, actor, note));
     }
 
     internal sealed class LinkedAccountsApiImpl : ILinkedAccountsApi
@@ -322,25 +327,29 @@ namespace KMHServerAddon.Extensibility
 
         public long Post(string sellerUsername, string itemDefName, string stuffDefName, int quality, int qty,
                          long startingBid, long minIncrement, long buyoutSilver, int durationHours, string visibility = "public")
-            => KmhSdkGate.Allow("auction post")
-             ? Features.Auctions.AuctionStore.Post(sellerUsername, itemDefName, stuffDefName, quality, qty,
-                                                   startingBid, minIncrement, buyoutSilver, durationHours, visibility).id
-             : 0L;
+            => KmhSdkGate.Run("auction post", () => Features.Auctions.AuctionStore.Post(sellerUsername, itemDefName, stuffDefName, quality, qty,
+                                                   startingBid, minIncrement, buyoutSilver, durationHours, visibility).id);
 
         public bool Bid(string bidderUsername, long auctionId, long amount, out string reason)
         {
-            if (!KmhSdkGate.Allow("auction bid")) { reason = Maintenance.KmhMaintenanceGate.Describe(); return false; }
-            Features.Auctions.AuctionStore.BidResult r = Features.Auctions.AuctionStore.Bid(bidderUsername, auctionId, amount);
-            reason = r.Reason;
-            return r.Ok;
+            using (Maintenance.KmhValueOps.Scope op = KmhSdkGate.Begin("auction bid"))
+            {
+                if (op == null) { reason = Maintenance.KmhMaintenanceGate.Describe(); return false; }
+                Features.Auctions.AuctionStore.BidResult r = Features.Auctions.AuctionStore.Bid(bidderUsername, auctionId, amount);
+                reason = r.Reason;
+                return r.Ok;
+            }
         }
 
         public bool Cancel(string sellerUsername, long auctionId, out string reason)
         {
-            if (!KmhSdkGate.Allow("auction cancel")) { reason = Maintenance.KmhMaintenanceGate.Describe(); return false; }
-            (bool ok, string why) = Features.Auctions.AuctionStore.Cancel(sellerUsername, auctionId);
-            reason = why;
-            return ok;
+            using (Maintenance.KmhValueOps.Scope op = KmhSdkGate.Begin("auction cancel"))
+            {
+                if (op == null) { reason = Maintenance.KmhMaintenanceGate.Describe(); return false; }
+                (bool ok, string why) = Features.Auctions.AuctionStore.Cancel(sellerUsername, auctionId);
+                reason = why;
+                return ok;
+            }
         }
     }
 
@@ -377,38 +386,29 @@ namespace KMHServerAddon.Extensibility
         }
 
         public bool FireEvent(string type, double magnitude, string target, int durationMinutes, out string reason)
-        {
-            if (!KmhSdkGate.Allow("world event")) { reason = Maintenance.KmhMaintenanceGate.Describe(); return false; }
-            (bool ok, string why) = Features.World.WorldEngine.FireEvent(type, magnitude, target, durationMinutes, Actor);
-            reason = why;
-            return ok;
-        }
+            => Gated("world event", out reason, () => Features.World.WorldEngine.FireEvent(type, magnitude, target, durationMinutes, Actor));
 
         public bool EndEvent(string type, out string reason)
-        {
-            if (!KmhSdkGate.Allow("world event end")) { reason = Maintenance.KmhMaintenanceGate.Describe(); return false; }
-            (bool ok, string why) = Features.World.WorldEngine.EndEvent(type);
-            reason = why;
-            return ok;
-        }
+            => Gated("world event end", out reason, () => Features.World.WorldEngine.EndEvent(type));
 
         // Creating one reserves silver from the house pool and ending one returns it, so both are value moves.
         public bool CreateQuest(string kind, string objective, string targetDefName, int goalQty, long reward,
                                 int durationMinutes, string title, string description, out string reason)
-        {
-            if (!KmhSdkGate.Allow("world quest create")) { reason = Maintenance.KmhMaintenanceGate.Describe(); return false; }
-            (bool ok, string why) = Features.World.WorldEngine.CreateWorldQuest(kind, objective, targetDefName, goalQty,
-                                                                               reward, durationMinutes, title, description, Actor);
-            reason = why;
-            return ok;
-        }
+            => Gated("world quest create", out reason, () => Features.World.WorldEngine.CreateWorldQuest(kind, objective, targetDefName, goalQty,
+                                                                                                      reward, durationMinutes, title, description, Actor));
 
         public bool EndQuest(long questId, out string reason)
+            => Gated("world quest end", out reason, () => Features.World.WorldEngine.EndWorldQuest(questId, Actor));
+
+        private static bool Gated(string what, out string reason, Func<(bool ok, string why)> move)
         {
-            if (!KmhSdkGate.Allow("world quest end")) { reason = Maintenance.KmhMaintenanceGate.Describe(); return false; }
-            (bool ok, string why) = Features.World.WorldEngine.EndWorldQuest(questId, Actor);
-            reason = why;
-            return ok;
+            using (Maintenance.KmhValueOps.Scope op = KmhSdkGate.Begin(what))
+            {
+                if (op == null) { reason = Maintenance.KmhMaintenanceGate.Describe(); return false; }
+                (bool ok, string why) = move();
+                reason = why;
+                return ok;
+            }
         }
 
         public bool   IsTaxHoliday()                            => Features.World.WorldStore.IsTaxHoliday();

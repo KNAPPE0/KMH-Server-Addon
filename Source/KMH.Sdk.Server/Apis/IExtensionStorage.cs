@@ -1,9 +1,7 @@
 namespace KMH.Sdk.Server.Apis
 {
-    /// <summary>
-    /// Per-extension persistence rooted at <c>kmh-data/extensions/&lt;extension-name&gt;/</c>, created on first use.
-    /// Writes are atomic, so a save interrupted mid-write leaves the previous file intact.
-    /// </summary>
+    /// <summary>Per-extension persistence under <c>kmh-data/extensions/&lt;extension-name&gt;/</c>, created on first use.</summary>
+    /// <remarks>Writes are atomic: a save interrupted mid-write leaves the previous file intact.</remarks>
     public interface IExtensionStorage
     {
         /// <summary>Absolute path to this extension's folder.</summary>

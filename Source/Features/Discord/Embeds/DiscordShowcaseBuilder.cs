@@ -1,6 +1,6 @@
 using System;
 using System.Collections.Generic;
-using Discord;
+using Kmh.Discord.Wire;
 using KMHServerAddon.Util;
 using KMHServerAddon.Features.ItemLabels;
 using KMHServerAddon.Features.LinkedAccounts;
@@ -13,7 +13,21 @@ namespace KMHServerAddon.Features.Discord
         // Discord's own embed field cap.
         private const int MaxFields = 25;
 
-        public static Embed Build(string username, string tagline, List<MarketplaceListing> listings)
+        internal static List<MarketplaceListing> ListingsBy(List<MarketplaceListing> listings, string seller)
+        {
+            List<MarketplaceListing> mine = new List<MarketplaceListing>();
+            if (listings != null)
+            {
+                foreach (MarketplaceListing l in listings)
+                {
+                    if (string.Equals(l.SellerUsername, seller, StringComparison.OrdinalIgnoreCase))
+                        mine.Add(l);
+                }
+            }
+            return mine;
+        }
+
+        public static KmhEmbedSpec Build(string username, string tagline, List<MarketplaceListing> listings)
         {
             string title = $"{username}'s marketplace";
             if (LinkedAccountsStore.TryGetLink(username, out string discord) && !string.IsNullOrEmpty(discord))
@@ -21,14 +35,15 @@ namespace KMHServerAddon.Features.Discord
                 title += $"  ·  {discord}";
             }
 
-            EmbedBuilder eb = new EmbedBuilder()
+            KmhEmbedSpecBuilder eb = new KmhEmbedSpecBuilder()
                 .WithTitle(title)
-                .WithColor(new Color(0xFF, 0xC4, 0x61))
+                .WithColor(0xFFC461)
                 .WithCurrentTimestamp();
 
             if (!string.IsNullOrEmpty(tagline))
             {
-                eb.WithDescription($"_{tagline}_");
+                // Escaped like a name: a tagline is player text, and "[x](url)" would post as a disguised link.
+                eb.WithDescription($"_{DiscordText.SafeName(tagline)}_");
             }
 
             if (listings == null || listings.Count == 0)
@@ -49,7 +64,7 @@ namespace KMHServerAddon.Features.Discord
                 string label = ItemLabelCache.LabelFor(l.ItemDefName, l.StuffDefName, l.QualityIndex);
                 string emoji = DiscordItemIconMap.EmojiFor(l.ItemDefName);
                 eb.AddField(
-                    $"{emoji} #{l.Id} · {label}",
+                    $"{emoji} #{l.Id} · {DiscordText.Escape(label)}",
                     $"**{l.RemainingQty}**× @ `{SilverFmt.Format(l.UnitPriceSilver)}/ea`\n`!kmh-buy {l.Id}`",
                     inline: true);
             }

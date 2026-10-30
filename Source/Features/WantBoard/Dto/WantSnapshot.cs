@@ -19,8 +19,10 @@ namespace KMHServerAddon.Features.WantBoard.Dto
         [JsonProperty("item_def_name")]       public string ItemDefName      { get; set; } = "";
         [JsonProperty("qty_wanted")]          public int    QtyWanted        { get; set; } = 0;
         [JsonProperty("qty_filled")]          public int    QtyFilled        { get; set; } = 0;
-        [JsonProperty("unit_price_silver")]   public int    UnitPriceSilver  { get; set; } = 0;
-        [JsonProperty("escrow_remaining")]    public long   EscrowRemaining  { get; set; } = 0; // unit price * (wanted - filled), held by the board
+        [JsonProperty("unit_price_silver")]   public int    UnitPriceSilver  { get; set; } = 0;   // rounded display / old clients
+        // Canonical price in milli-silver (1000 = 1 silver); 0 on a want posted before decimal prices means UnitPriceSilver * 1000.
+        [JsonProperty("unit_price_milli")]    public long   UnitPriceMilli   { get; set; } = 0;
+        [JsonProperty("escrow_remaining")]    public long   EscrowRemaining  { get; set; } = 0;
         [JsonProperty("listed_utc_ticks")]    public long   ListedUtcTicks   { get; set; } = 0;
         [JsonProperty("ends_utc_ticks")]      public long   EndsUtcTicks     { get; set; } = 0;
         [JsonProperty("visibility")]          public string Visibility       { get; set; } = "public";
@@ -31,6 +33,8 @@ namespace KMHServerAddon.Features.WantBoard.Dto
         [JsonProperty("allow_complex")]       public bool   AllowComplex     { get; set; } = false; // accept full-state items
         [JsonProperty("allow_tainted")]       public bool   AllowTainted     { get; set; } = false;
         [JsonProperty("allow_damaged")]       public bool   AllowDamaged     { get; set; } = false;
+
+        [JsonIgnore] public long EffectiveMilli => UnitPriceMilli > 0 ? UnitPriceMilli : (long)UnitPriceSilver * 1000;
 
         public WantDto ShallowClone() => (WantDto)MemberwiseClone();
     }

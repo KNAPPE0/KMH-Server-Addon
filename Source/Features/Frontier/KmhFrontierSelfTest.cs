@@ -87,7 +87,7 @@ namespace KMHServerAddon.Features.Frontier
                    && FrontierResolution.NeedsResume(FrontierResolution.PhaseConsequenceApplied)
                    && !FrontierResolution.NeedsResume(FrontierResolution.PhaseResolved), ""));
 
-            // The unfinished record sits first on purpose: pruning walks newest-first, so last position would pass by luck.
+            // The unfinished record sits first: pruning walks newest-first, so last position would pass by luck.
             var journal = new List<ResolutionRecord>();
             journal.Add(new ResolutionRecord { OperationId = 99, Phase = FrontierResolution.PhaseResolving });
             for (int i = 1; i <= 20; i++)
@@ -135,13 +135,13 @@ namespace KMHServerAddon.Features.Frontier
                    stale.SpawnBudget == 2 && stale.BudgetRefilledUtcTicks == now,
                    "a trickle-style refill would flood the map on the first tick back"));
 
-            // A refill that leaves its own stamp alone reads as overdue forever, restoring the budget as fast as it is spent.
+            // A refill that leaves its stamp alone reads as overdue forever, restoring the budget as fast as it is spent.
             var b = new DirectorState { SpawnBudget = 2, BudgetRefilledUtcTicks = now };
-            b.SpawnBudget -= 1;                                                    // consume
-            bool noEarly  = !KmhWorldDirector.ApplyRefill(b, bcfg, now + day / 2); // before the window
-            bool onTime   =  KmhWorldDirector.ApplyRefill(b, bcfg, now + day);     // after it
-            b.SpawnBudget -= 1;                                                    // consume one of the refilled
-            bool noRepeat = !KmhWorldDirector.ApplyRefill(b, bcfg, now + day + 1); // must NOT top up again
+            b.SpawnBudget -= 1;
+            bool noEarly  = !KmhWorldDirector.ApplyRefill(b, bcfg, now + day / 2);
+            bool onTime   =  KmhWorldDirector.ApplyRefill(b, bcfg, now + day);
+            b.SpawnBudget -= 1;
+            bool noRepeat = !KmhWorldDirector.ApplyRefill(b, bcfg, now + day + 1);
             bool nextCycle =  KmhWorldDirector.ApplyRefill(b, bcfg, now + day * 2);
             r.Add(("Frontier: a refill happens once per window and never again until the next one",
                    noEarly && onTime && noRepeat && nextCycle && b.SpawnBudget == 2,
@@ -592,7 +592,7 @@ namespace KMHServerAddon.Features.Frontier
             r.Add(("Frontier: an unblocked director opens a placement",
                    KmhWorldDirector.NextStep(idle, cfg, now) == KmhWorldDirector.Step.OpenPlacement, ""));
 
-            // An unanswered question is the observed failure: it must expire into a resolve, not sit open forever.
+            // An unanswered question must expire into a resolve, not sit open forever.
             var waiting = new DirectorState { SpawnBudget = 5 };
             waiting.PendingPlacement = new PlacementToken { Id = "p", ExpiresUtcTicks = now + TimeSpan.FromMinutes(5).Ticks };
             r.Add(("Frontier: an open placement holds the director until its window closes",
@@ -626,10 +626,10 @@ namespace KMHServerAddon.Features.Frontier
             KmhWorldDirector.StatusView v = KmhWorldDirector.Status();
             r.Add(("Frontier: status reports a step and its limits", v != null && v.BudgetMax >= 0 && !string.IsNullOrEmpty(v.Step), v?.Step ?? "null"));
 
-            // Interest is only set by a client's own recent traffic, so filtering an unsolicited question by it asks nobody.
+            // Interest comes only from a client's own traffic, so filtering an unsolicited question by it asks nobody.
             string src = Maintenance.KmhSourceProbe.Read(System.IO.Path.Combine("Features", "Frontier", "FrontierHandler.cs"));
             if (src == null)
-                r.Add(("Frontier: the placement question reaches every verified client", true, "not asked - no source tree beside this build"));
+                r.Add(Diagnostics.KmhSelfTestResult.Skipped("Frontier: the placement question reaches every verified client", "no source tree beside this build"));
             else
             {
                 int ask = src.IndexOf("AskForPlacement", StringComparison.Ordinal);
@@ -662,7 +662,7 @@ namespace KMHServerAddon.Features.Frontier
                    && FrontierScale.Cost(scaleCfg, 5.0) == 750 && FrontierScale.Reward(scaleCfg, 5.0) == 2500,
                    $"x2 -> {FrontierScale.Cost(scaleCfg, 2.0)} for {FrontierScale.Reward(scaleCfg, 2.0)}"));
 
-            // Zeroed weights are how an owner turns this off, and it must then behave exactly as it did before.
+            // Zeroed weights are how an owner turns this off, and reclaim must then be exactly unscaled.
             var flatCfg = new FrontierConfig
             {
                 ReclaimMaterialQty = 150, ReclaimRewardSilver = 500,

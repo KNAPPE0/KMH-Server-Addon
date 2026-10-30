@@ -27,7 +27,7 @@ namespace KMHServerAddon.Features.Sites
             return false;
         }
 
-        // The RimWorld skill a family's work draws on. Unknown has NO skill on purpose - see the classifier.
+        // Unknown has NO skill on purpose - see the classifier.
         public static string SkillFor(string family)
         {
             switch (family)
@@ -60,7 +60,7 @@ namespace KMHServerAddon.Features.Sites
     // Reads RimWorld's own taxonomy rather than def names, which is what makes modded content classify for free.
     internal static class SiteOutputClassifier
     {
-        // First match wins, so Animal is tested before Plant: kibble carries both signals and its animal claim is stronger.
+        // First match wins, so Animal goes before Plant: kibble carries both signals and its animal claim is stronger.
         public static string Classify(SiteOutputMetadata m)
         {
             if (m == null || string.IsNullOrWhiteSpace(m.DefName)) return SiteOutputFamilies.Unknown;
@@ -132,11 +132,10 @@ namespace KMHServerAddon.Features.Sites
             => m.IsCraftedProduct
             || HasCat(m, "Manufactured", "ResourcesManufactured");
 
-        // Comparisons are case-insensitive throughout, because modded category names vary in casing.
-
-        private static bool HasCat(SiteOutputMetadata m, params string[] names)  => Any(m.Categories, names);
-        private static bool HasStuff(SiteOutputMetadata m, params string[] names) => Any(m.StuffCategories, names);
-        private static bool HasTag(SiteOutputMetadata m, params string[] names)   => Any(m.Tags, names);
+        // Case-insensitive, because modded category names vary in casing.
+        internal static bool HasCat(SiteOutputMetadata m, params string[] names)  => Any(m.Categories, names);
+        internal static bool HasStuff(SiteOutputMetadata m, params string[] names) => Any(m.StuffCategories, names);
+        internal static bool HasTag(SiteOutputMetadata m, params string[] names)   => Any(m.Tags, names);
 
         // FoodType arrives as RimWorld's flags string ("Meat, AnimalProduct"), so this is a token test, not a match.
         private static bool HasFood(SiteOutputMetadata m, params string[] flags)

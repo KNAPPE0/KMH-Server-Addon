@@ -5,12 +5,12 @@ using KMHServerAddon.Persistence;
 
 namespace KMHServerAddon.Transactions
 {
-    // A crash can land between any two durable writes of a cross-store move; only two outcomes are acceptable at every boundary: settled exactly once, or still recoverably owed.
+    // A crash between any two durable writes must leave the move settled exactly once, or still recoverably owed.
     internal static class KmhTxRecoverySelfTest
     {
         private static string User() => "selftest_tx_" + Guid.NewGuid().ToString("N").Substring(0, 8);
 
-        // Shaped like a real buy: silver genuinely debited under the take marker, goods on the counterparty leg because they came from a listing, not a vault.
+        // Shaped like a real buy: silver debited under the take marker, goods on the counterparty leg (from a listing).
         private static KmhTransaction Escrowed(string who, long silver, string counterparty, string item, int qty)
         {
             KmhTransaction t = KmhTransaction.Create(who, "marketplace", KmhTxType.Purchase, "selftest");
@@ -277,13 +277,17 @@ namespace KMHServerAddon.Transactions
                 long listing = Features.Marketplace.MarketplaceStore.Post(seller, "Steel", 8, 10, "public", 0, out string why);
                 if (listing == 0) return (false, "post: " + why);
 
-                // Before the ledger existed, a buy whose downstream steps all failed is exactly where both sides' value disappeared on restart.
-                Features.Marketplace.MarketplaceStore.Buy(buyer, listing, 4, out _, out _, out _, "op-" + Guid.NewGuid().ToString("N"));
+                // Stops after the sale is written down, before anyone is paid: where both sides' value can vanish.
+                Features.Marketplace.MarketplaceStore.AtBuyPhaseForTest = p => { if (p == "settled") throw new OperationCanceledException("selftest: stopped"); };
+                try { Features.Marketplace.MarketplaceStore.Buy(buyer, listing, 4, out _, out _, out _, "op-" + Guid.NewGuid().ToString("N")); }
+                catch (OperationCanceledException) { }
+                finally { Features.Marketplace.MarketplaceStore.AtBuyPhaseForTest = null; }
 
                 KmhTransaction owed = null;
                 foreach (KmhTransaction t in KmhTransactionRepository.ForPlayer(buyer))
                     if (t.TargetId == listing) owed = t;
-                bool recorded = owed != null && owed.EscrowSilver == 40 && owed.CounterPlayer == seller;
+                bool recorded = owed != null && owed.EscrowSilver == 40 && owed.CounterPlayer == seller
+                             && owed.PayoutSilver > 0 && owed.CounterItems.Count > 0;
 
                 // What boot recovery would do with it, had the process stopped before the deliveries finished.
                 if (recorded && !KmhTxStateMachine.IsTerminal(owed.State))
@@ -296,7 +300,7 @@ namespace KMHServerAddon.Transactions
                 return (recorded, recorded
                     ? "the exact owed silver and goods survive in the ledger"
                     : owed == null ? "NO DURABLE RECORD OF WHAT EACH SIDE IS OWED"
-                                   : $"silver={owed.EscrowSilver} (expected 40), counterparty={owed.CounterPlayer}");
+                                   : $"silver={owed.EscrowSilver} (expected 40), counterparty={owed.CounterPlayer}, payout={owed.PayoutSilver}, goods={owed.CounterItems.Count}");
             });
 
             Check("Marketplace cancel: a completed cancel returns the goods and owes nothing", () =>
@@ -330,7 +334,7 @@ namespace KMHServerAddon.Transactions
                 KmhTransaction row = null;
                 foreach (KmhTransaction t in KmhTransactionRepository.ForPlayer(seller)) if (t.TargetId == listing) row = t;
                 bool listingKept = Features.Marketplace.MarketplaceStore.OpenSupplyQty("Steel") == 7;
-                // The listing still owns the units, so compensating the row must hand over nothing or the seller gets the stock twice.
+                // The listing still owns the units, so compensating the row must hand over nothing, or the seller gets it twice.
                 bool notOwed = row != null && KmhTxStateMachine.IsTerminal(row.State)
                             && !row.HasEscrow && !row.HasCounterEscrow;
                 KmhTransactionRepository.Compensate(row);
@@ -350,7 +354,7 @@ namespace KMHServerAddon.Transactions
                 long listing = Features.Marketplace.MarketplaceStore.Post(seller, "Steel", 6, 10, "public", 0, out string why);
                 if (listing == 0) return (false, "post: " + why);
 
-                // The listing is durably gone but the treasury cannot take the refund, so the ledger alone knows the units exist.
+                // The listing is durably gone but the treasury cannot take the refund: only the ledger knows the units exist.
                 using (JsonFileStore.FailWritesForTest(p => p == KmhDataPaths.TreasuryFile ? "injected: disk full" : null))
                     Features.Marketplace.MarketplaceStore.Cancel(seller, listing);
 
@@ -572,7 +576,7 @@ namespace KMHServerAddon.Transactions
                 Features.Auctions.AuctionStore.Bid(first, id, 50);
                 long firstAfterBid = TreasuryStore.GetPersonalSilver(first);
 
-                // With no way to record what the displaced bid is owed, the new bid must be refused rather than voiding the old claim.
+                // With no way to record what the displaced bid is owed, the new bid is refused rather than voiding the old claim.
                 Features.Auctions.AuctionStore.BidResult blocked;
                 using (JsonFileStore.FailWritesForTest(p => p == KmhDataPaths.TransactionLedgerFile ? "injected: disk full" : null))
                     blocked = Features.Auctions.AuctionStore.Bid(second, id, 100);
@@ -651,13 +655,13 @@ namespace KMHServerAddon.Transactions
                 bool untouchedByPlanning = Features.Marketplace.MarketplaceStore.HousePoolBalance() == poolSeeded;
 
                 // A boom is not reproducible offline, so the boost is set directly to exercise the commit step.
-                var plan = new Features.Economy.SaleSplit { BuyerCharge = 100, SellerPayout = 150, PoolBoost = 50 };
+                var plan = new Features.Economy.SaleSplit { BuyerCharge = 100, SellerPayout = 150, PoolBoost = 50, Seller = seller };
                 bool committed = plan.CommitBoost("selftest boost");
                 long poolAfter = Features.Marketplace.MarketplaceStore.HousePoolBalance();
                 bool tookExactly = committed && poolAfter == poolSeeded - 50 && plan.SellerPayout == 150;
 
                 // A pool that cannot fund the boost must rebalance rather than pay silver nobody has.
-                var tooBig = new Features.Economy.SaleSplit { BuyerCharge = 100, SellerPayout = 100 + poolAfter + 999, PoolBoost = poolAfter + 999 };
+                var tooBig = new Features.Economy.SaleSplit { BuyerCharge = 100, SellerPayout = 100 + poolAfter + 999, PoolBoost = poolAfter + 999, Seller = seller };
                 bool refused = !tooBig.CommitBoost("selftest boost too big");
                 bool rebalanced = refused && tooBig.PoolBoost == 0 && tooBig.SellerPayout == 100 && tooBig.Balances;
                 bool ok = untouchedByPlanning && tookExactly && rebalanced;
@@ -709,6 +713,9 @@ namespace KMHServerAddon.Transactions
             {
                 string seller = User(), guild = "SelftestGuild" + Guid.NewGuid().ToString("N").Substring(0, 8);
                 string key = "selftest-replay-" + Guid.NewGuid().ToString("N").Substring(0, 8);
+                // A guild that exists: tax for one that does not goes back to the seller (KmhGuildIdentitySelfTest).
+                string founder = User();
+                if (!Features.Guilds.GuildStore.CreateGuildAndJoinAsAdmin(founder, guild, out string gwhy)) return (false, "guild: " + gwhy);
                 long poolBefore  = Features.Marketplace.MarketplaceStore.HousePoolBalance();
                 long guildBefore = TreasuryStore.GetGuildSilver(guild);
 
@@ -722,6 +729,9 @@ namespace KMHServerAddon.Transactions
                 split.Settle(seller, "selftest replay sale", key);
                 bool poolOk  = Features.Marketplace.MarketplaceStore.HousePoolBalance() == poolOnce  && poolOnce  == poolBefore + 10;
                 bool guildOk = TreasuryStore.GetGuildSilver(guild)      == guildOnce && guildOnce == guildBefore + 20;
+                Features.Guilds.GuildStore.Leave(founder, out _);
+                TreasuryStore.PurgeOwnerForTest(founder);
+                TreasuryStore.PurgeOwnerForTest(guild);
                 bool ok = poolOk && guildOk;
                 return (ok, ok ? "house pool and guild vault each credited once across a replay"
                               : $"pool {poolBefore}->{poolOnce}->{Features.Marketplace.MarketplaceStore.HousePoolBalance()}, " +
@@ -755,20 +765,21 @@ namespace KMHServerAddon.Transactions
                 var (id, why) = Features.Auctions.AuctionStore.Post(seller, "Steel", "", 0, 4, 10, 1, 0, 2, "public");
                 if (id == 0) return (false, "post: " + why);
 
-                bool refused; long heldDuring;
+                bool refused, heldDuring;
                 using (JsonFileStore.FailWritesForTest(p => p == KmhDataPaths.TransactionLedgerFile ? "injected: disk full" : null))
                 {
                     refused = !Features.Auctions.AuctionStore.Cancel(seller, id).ok;
-                    heldDuring = Features.Auctions.AuctionStore.EscrowValueFor(seller);
+                    // Not EscrowValueFor: it prices Steel from the item label cache, empty when this suite runs alone.
+                    heldDuring = Features.Auctions.AuctionStore.Exists(id);
                 }
                 // Refused with the goods still on the auction, and no copy handed back beside them.
                 bool notReturned = ItemCount(seller, "Steel") == 0;
                 bool cancelled = Features.Auctions.AuctionStore.Cancel(seller, id).ok;
                 bool returnedAfter = ItemCount(seller, "Steel") == 4;
                 TreasuryStore.PurgeOwnerForTest(seller);
-                bool ok = refused && heldDuring > 0 && notReturned && cancelled && returnedAfter;
+                bool ok = refused && heldDuring && notReturned && cancelled && returnedAfter;
                 return (ok, ok ? "refused while unrecordable, goods stayed on the auction, cancelled cleanly after"
-                              : $"refused={refused}, stillEscrowed={heldDuring > 0}, notReturned={notReturned}, " +
+                              : $"refused={refused}, stillEscrowed={heldDuring}, notReturned={notReturned}, " +
                                 $"cancelledAfter={cancelled}, returnedAfter={returnedAfter}");
             });
 
@@ -794,6 +805,29 @@ namespace KMHServerAddon.Transactions
                 bool ok = nothingMoved && bothBack;
                 return (ok, ok ? "void refused intact, then returned both lots exactly once"
                               : $"nothingMoved={nothingMoved} (done={o.Done}), bothBack={bothBack}");
+            });
+
+            Check("Auction void: a bid that lands while the void runs is refunded, never lost", () =>
+            {
+                string seller = User(), buyer = User();
+                if (!TreasuryStore.DepositItem(seller, "Steel", 5, "selftest seed")) return (false, "seed");
+                if (!TreasuryStore.DepositSilver(buyer, 300, "selftest seed")) return (false, "seed buyer");
+                var (id, why) = Features.Auctions.AuctionStore.Post(seller, "Steel", "", 0, 5, 10, 1, 0, 2, "public");
+                if (id == 0) return (false, "post: " + why);
+                bool bidOk = false;
+                Features.Auctions.AuctionStore.VoidOutcome o;
+                Features.Auctions.AuctionStore.DuringVoidForTest = () =>
+                {
+                    Features.Auctions.AuctionStore.DuringVoidForTest = null;
+                    bidOk = Features.Auctions.AuctionStore.Bid(buyer, id, 40).Ok;
+                };
+                try { o = Features.Auctions.AuctionStore.AdminVoid(id); }
+                finally { Features.Auctions.AuctionStore.DuringVoidForTest = null; }
+                int steel = ItemCount(seller, "Steel");
+                long silver = SilverOf(buyer);
+                TreasuryStore.PurgeOwnerForTest(seller); TreasuryStore.PurgeOwnerForTest(buyer);
+                bool ok = bidOk && o.Done && steel == 5 && silver == 300 && o.RefundedBid == 40;
+                return (ok, $"bid mid-void ok={bidOk}, voided={o.Done}, seller Steel {steel} (want 5), bidder silver {silver} (want 300), refunded {o.RefundedBid}");
             });
 
             Check("Tx ledger: an intent that cannot be written is not kept", () =>

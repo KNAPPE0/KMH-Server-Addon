@@ -58,7 +58,7 @@ namespace KMHServerAddon.Features.Auctions
             KmhRouter.Notify(client, id > 0 ? "positive" : "negative", reason);
             if (id > 0)
             {
-                Push(client, seller);     // item escrowed out of the seller's treasury
+                Push(client, seller);
                 BroadcastSnapshot();
             }
         }
@@ -77,13 +77,13 @@ namespace KMHServerAddon.Features.Auctions
             Push(client, bidder);   // reflects the escrow (or its refund on a lost-race reject)
             if (r.Ok)
             {
-                if (!string.IsNullOrEmpty(r.OutbidUser))   // refunded previous high bidder - tell them
+                if (!string.IsNullOrEmpty(r.OutbidUser))
                 {
                     PushUser(r.OutbidUser);
                     NotifyUser(r.OutbidUser, "neutral", "Outbid",
                         $"You were outbid on {r.Auction.Qty}x {ItemName(r.Auction.ItemDefName)} (top bid {Util.SilverFmt.Format(r.Auction.CurrentBid)}).");
                 }
-                if (r.Settlement != null && r.Settlement.Done)   // buyout settled it
+                if (r.Settlement != null && r.Settlement.Done)
                 {
                     foreach (string u in r.Settlement.Affected) PushUser(u);
                     NotifySettled(r.Settlement);

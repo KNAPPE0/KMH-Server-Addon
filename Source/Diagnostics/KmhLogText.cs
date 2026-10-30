@@ -30,7 +30,7 @@ namespace KMHServerAddon.Diagnostics
             if (string.IsNullOrEmpty(s) || maxBytes <= 0) return "";
             if (Encoding.UTF8.GetByteCount(s) <= maxBytes) return s;
 
-            // Keep the search on plain indices - nudging mid to a codepoint boundary can stop it advancing and spin forever.
+            // Plain indices: nudging mid to a codepoint boundary can stop the search advancing and spin forever.
             char[] chars = s.ToCharArray();
             int lo = 0, hi = s.Length;
             while (lo < hi)

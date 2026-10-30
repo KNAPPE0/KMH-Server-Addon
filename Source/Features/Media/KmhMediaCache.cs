@@ -144,15 +144,15 @@ namespace KMHServerAddon.Features.Media
             if (cfg == null) return;
             lock (_lock)
             {
-                // Bytes only: a byte-less row is the id -> url registration, and expiring THAT turned an older gif back into a still.
-                long cutoff = DateTime.UtcNow.AddMinutes(-cfg.CacheTtlMinutes).Ticks;
+                // Bytes only: byte-less rows are id -> url registrations; expiring one turns an older gif into a still.
+                long cutoff = DateTime.UtcNow.AddMinutes(-cfg.Cache.TtlMinutes).Ticks;
                 foreach (Entry e in _byId.Values.Where(x => ExpiresOnTtl(x.HasBytes, x.LastUsedUtcTicks, cutoff)).ToList())
                     Forget(e);
 
-                if (_totalBytes > cfg.CacheMaxBytes)
+                if (_totalBytes > cfg.Cache.MaxBytes)
                     foreach (Entry e in _byId.Values.Where(x => x.HasBytes).OrderBy(x => x.LastUsedUtcTicks).ToList())
                     {
-                        if (_totalBytes <= cfg.CacheMaxBytes) break;
+                        if (_totalBytes <= cfg.Cache.MaxBytes) break;
                         Forget(e);
                     }
 

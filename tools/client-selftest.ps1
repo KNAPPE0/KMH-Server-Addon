@@ -1,18 +1,12 @@
-# Runs the KMH-Patch client self-test OUTSIDE RimWorld.
-#
-# Almost every client check is pure (item-key encoding shared with the server, off-map wealth valuation, envelope
-# serialisation, display-text neutralisation), so loading the built client assembly with the real RimWorld managed
-# assemblies on the probe path runs them for real, without launching the game.
-#
-# Note: the NuGet Krafs.Rimworld.Ref package will NOT work here - those are metadata-only reference assemblies whose
-# method bodies throw. This needs a real RimWorld install.
-#
-#   .\tools\client-selftest.ps1                     auto-detect RimWorld, run, summarise
-#   .\tools\client-selftest.ps1 -List               print every check
-#   .\tools\client-selftest.ps1 -RimWorldManaged X  point at a specific Managed folder
+﻿# Runs the KMH-Patch client self-test OUTSIDE RimWorld.
+# Needs a real RimWorld install: Krafs.Rimworld.Ref reference assemblies have method bodies that throw.
+# Usage: .\tools\client-selftest.ps1 [-List] [-Flavor Old|New|RT] [-RimWorldManaged <Managed dir>] [-RwtAssemblies <dir>]
 param(
     [string]$RimWorldManaged = "",
+    [string]$RwtAssemblies = "",
     [string]$Flavor = "RT",
+    [int]$MinSuites = 10,
+    [int]$MinChecks = 1170,
     [switch]$List
 )
 
@@ -56,10 +50,33 @@ foreach ($d in (Get-ChildItem -Path $clientRoot, $repoRoot -Recurse -Directory -
     $rwtProbe += $d.FullName
 }
 
-# KMH's extraction deliberately skips Newtonsoft.Json (a second copy with a different identity breaks Harmony's JIT
-# hook), so .rwt-runtime never carries it - find one separately or the client assembly won't load.
-# Must be the OFFICIAL strong-named build: RWT ships a repacked copy that the loader rejects with
-# "A strongly-named assembly is required". Prefer the NuGet cache, then the server's own build output.
+# RWT assemblies must match the flavour: a mismatched generation loads, then throws TypeLoadException on RTShared.
+if (-not $RwtAssemblies) {
+    $RwtAssemblies = switch ($Flavor) {
+        "Old" { Join-Path (Split-Path -Parent $repoRoot) 'rwt-26.5.24.1\1.6\Assemblies' }
+        "New" { Join-Path (Split-Path -Parent $repoRoot) 'rwt-26.6.9.1\1.6\Assemblies' }
+        default { Join-Path (Split-Path -Parent $repoRoot) 'rwt-RTServer\Client' }
+    }
+}
+$rwtMarker = if ($Flavor -eq "Old") { "Shared.dll" } else { "RTShared.dll" }
+if ($RwtAssemblies -and (Test-Path (Join-Path $RwtAssemblies $rwtMarker))) {
+    # Staged, not probed in place: RWT's repacked Newtonsoft.Json is rejected by the loader and takes the suite down.
+    $staged = Join-Path ([IO.Path]::GetTempPath()) ("kmh-rwt-probe-" + $Flavor)
+    New-Item -ItemType Directory -Force -Path $staged | Out-Null
+    Get-ChildItem -Path $RwtAssemblies -Filter "*.dll" |
+        Where-Object { $_.Name -ne "Newtonsoft.Json.dll" } |
+        ForEach-Object { Copy-Item $_.FullName -Destination $staged -Force }
+    $rwtProbe += $staged
+}
+else {
+    # Fatal, not a warning: without these the RWT-backed checks fail or vanish and the run still summarises green.
+    Write-Host "  RWT assemblies for flavour $Flavor were not found ($rwtMarker missing in '$RwtAssemblies')." -ForegroundColor Red
+    Write-Host "  Pass -RwtAssemblies <folder>. Refusing to run a suite that would silently skip the RWT checks."
+    exit 3
+}
+
+# .rwt-runtime never carries Newtonsoft.Json (a second identity breaks Harmony's JIT hook), and RWT's repacked copy
+# is rejected as not strong-named, so find the official build: NuGet cache first, then the server's output.
 $newtonsoft = $null
 $nugetJson = Join-Path $env:USERPROFILE ".nuget\packages\newtonsoft.json"
 if (Test-Path $nugetJson) {
@@ -68,7 +85,7 @@ if (Test-Path $nugetJson) {
                   Sort-Object FullName -Descending | Select-Object -First 1
 }
 if (-not $newtonsoft) {
-    $serverBin = Join-Path $repoRoot "Source\bin\Release\net8.0\Newtonsoft.Json.dll"
+    $serverBin = Join-Path $repoRoot "Source\bin\Release\net10.0\Newtonsoft.Json.dll"
     if (Test-Path $serverBin) { $newtonsoft = Get-Item $serverBin }
 }
 if ($newtonsoft) { $rwtProbe += $newtonsoft.Directory.FullName }
@@ -82,7 +99,24 @@ if (-not (Test-Path (Join-Path $runner "runner.csproj"))) {
 
 if ($List) { $env:KMH_LIST = "1" }
 $probe = @($RimWorldManaged) + $rwtProbe
-& dotnet run --project (Join-Path $runner "runner.csproj") -c Release -- $clientDll @probe
+$output = & dotnet run --project (Join-Path $runner "runner.csproj") -c Release -- $clientDll @probe
 $code = $LASTEXITCODE
 $env:KMH_LIST = $null
+$output | ForEach-Object { Write-Host $_ }
+if ($List) { exit $code }
+
+# A missing probe path shrinks the run instead of failing it, so assert suite and check floors with nothing skipped.
+$summary = $output | Where-Object { $_ -match '^suites:' } | Select-Object -Last 1
+if (-not $summary) { Write-Host "  no suite summary - the run did not complete" -ForegroundColor Red; exit 4 }
+if ($summary -notmatch 'suites:\s*(\d+) run,\s*(\d+) skipped\s*\|\s*checks:\s*(\d+) pass,\s*(\d+) fail') {
+    Write-Host "  could not read the suite summary: $summary" -ForegroundColor Red; exit 4
+}
+$suites = [int]$Matches[1]; $skipped = [int]$Matches[2]; $checks = [int]$Matches[3]
+
+if ($suites -lt $MinSuites -or $checks -lt $MinChecks -or $skipped -gt 0) {
+    Write-Host ("  gate: expected at least $MinSuites suite(s) and $MinChecks check(s) with none skipped; " +
+                "got $suites suite(s), $checks check(s), $skipped skipped.") -ForegroundColor Red
+    Write-Host "  That usually means a probe path is missing, not that the code shrank."
+    exit 5
+}
 exit $code

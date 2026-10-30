@@ -29,7 +29,7 @@ namespace KMHServerAddon.Features.Sites
             r.Add(("Sites: an item with no trusted value is refused, not priced from the client's number",
                    !unpriced.Ok && unpriced.Cost == 0 && !string.IsNullOrEmpty(unpriced.Reason), unpriced.Reason));
 
-            // Priced above the 500 floor on purpose: at floor level every amount costs the same and a misprice still matches.
+            // Above the 500 floor on purpose: at the floor every amount costs the same, so a misprice would still match.
             const float qValue = 500f;
             const int   qAmount = 10;
             // Pinned as the owner would, so the rest exercises the real pricing path rather than the refusal above.

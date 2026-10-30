@@ -5,7 +5,7 @@ using KMHServerAddon.Persistence;
 
 namespace KMHServerAddon.Maintenance
 {
-    // Append durability, profile persistence and ordered shutdown: where the server could say a change landed while the disk did not.
+    // Where the server could report a change as landed while the disk did not.
     internal static class KmhLifecycleSelfTest
     {
         public static List<(string Name, bool Ok, string Detail)> Run()
@@ -31,7 +31,7 @@ namespace KMHServerAddon.Maintenance
                     TransactionLedger.Flush();
                     held = TransactionLedger.PendingCountForTest;
                 }
-                // Dequeuing straight into the write lost the entry from memory and from the file at once.
+                // Dequeuing straight into the write loses the entry from memory and file at once when the write fails.
                 bool kept = held == 1;
 
                 TransactionLedger.Flush();
@@ -89,7 +89,7 @@ namespace KMHServerAddon.Maintenance
 
             Check("Video queue: a backlog is bounded rather than growing until the process dies", () =>
             {
-                // Concurrency was already capped; the backlog was not, and a queued job is never swept.
+                // Capping concurrency is not enough: a queued job is never swept, so the backlog needs its own cap.
                 bool bounded = Features.Media.KmhVideoHandler.MaxWaitingJobs > 0
                             && Features.Media.KmhVideoHandler.MaxWaitingJobs <= 256;
                 bool idle = Features.Media.KmhVideoHandler.WaitingCountForTest <= Features.Media.KmhVideoHandler.MaxWaitingJobs;

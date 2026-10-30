@@ -12,13 +12,13 @@ namespace KMHServerAddon.SubProtocol
         [JsonProperty("v")]
         public int Version { get; set; }
 
-        // Names the logical action, not this delivery of it, so a re-sent request is refused instead of buying or withdrawing twice.
+        // Names the logical action, not one delivery, so a re-send is refused instead of buying or withdrawing twice.
         [JsonProperty("op", NullValueHandling = NullValueHandling.Ignore)]
         public string OpId { get; set; }
 
         private JObject _data;
         private object  _raw;
-        private bool    _outbound;   // built for sending: _raw holds the payload; _data is materialized only if accessed
+        private bool    _outbound;
 
         [JsonProperty("data")]
         public JObject Data
@@ -41,13 +41,58 @@ namespace KMHServerAddon.SubProtocol
         internal static KmhEnvelope ParseForTest(object payload)
             => new KmhEnvelope { Kind = "test", Version = KmhProtocol.CurrentVersion, Data = JObject.FromObject(payload) };
 
-        // Non-null sentinel so a null payload serializes as "data":{}, never "data":null - the wire contract both sides parse.
+        // A null payload must serialize as "data":{}, never "data":null: the wire contract both sides parse.
         private static readonly object EmptyData = new object();
 
         public string Serialize()
             => _outbound
                 ? JsonConvert.SerializeObject(new Wire { Kind = Kind, Version = Version, OpId = OpId, Data = _raw ?? EmptyData })
                 : JsonConvert.SerializeObject(this);
+
+        // UTF8(Serialize()) in one allocation, with `headroom` zero bytes in front for the frame header.
+        [System.ThreadStatic] private static System.Text.StringBuilder _scratchText;
+        [System.ThreadStatic] private static System.Text.Encoder _scratchEncoder;
+        private static readonly JsonSerializer WireSerializer = JsonSerializer.CreateDefault();
+        private static readonly System.Text.UTF8Encoding Utf8 = new System.Text.UTF8Encoding(false);
+        // Cap on the buffer one pool thread keeps between frames; larger snapshots allocate their own.
+        private const int KeepChars = 128 * 1024;
+
+        internal byte[] SerializeUtf8(int headroom)
+        {
+            System.Text.StringBuilder sb = _scratchText ?? new System.Text.StringBuilder(8 * 1024);
+            _scratchText = null;   // held by this call until it finishes cleanly
+            sb.Clear();
+            using (var sw = new System.IO.StringWriter(sb, System.Globalization.CultureInfo.InvariantCulture))
+            using (var jw = new JsonTextWriter(sw))
+                WireSerializer.Serialize(jw, _outbound
+                    ? new Wire { Kind = Kind, Version = Version, OpId = OpId, Data = _raw ?? EmptyData }
+                    : (object)this);
+
+            // Per-chunk counting reads a pair split across chunks as two 3-byte replacements, not one 4-byte character.
+            int count = 0;
+            char last = '\0';
+            foreach (System.ReadOnlyMemory<char> chunk in sb.GetChunks())
+            {
+                System.ReadOnlySpan<char> span = chunk.Span;
+                if (span.Length == 0) continue;
+                count += Utf8.GetByteCount(span);
+                if (char.IsHighSurrogate(last) && char.IsLowSurrogate(span[0])) count -= 2;
+                last = span[span.Length - 1];
+            }
+
+            // One encoder across the chunks, so that split pair is written as the one character it is.
+            System.Text.Encoder enc = _scratchEncoder ?? (_scratchEncoder = Utf8.GetEncoder());
+            enc.Reset();
+            byte[] bytes = new byte[headroom + count];
+            int n = headroom;
+            foreach (System.ReadOnlyMemory<char> chunk in sb.GetChunks())
+                n += enc.GetBytes(chunk.Span, new System.Span<byte>(bytes, n, bytes.Length - n), flush: false);
+            n += enc.GetBytes(System.ReadOnlySpan<char>.Empty, new System.Span<byte>(bytes, n, bytes.Length - n), flush: true);
+            if (n != bytes.Length) throw new System.InvalidOperationException($"UTF-8 length {n - headroom} differs from its count {count}");
+
+            if (sb.Capacity <= KeepChars) _scratchText = sb;
+            return bytes;
+        }
 
         private sealed class Wire
         {
@@ -121,6 +166,24 @@ namespace KMHServerAddon.SubProtocol
             {
                 foreach (JProperty p in obj.Properties())
                     if (p.Value != null && p.Value.Type != JTokenType.Null) outMap[p.Name] = p.Value.Value<int>();
+            }
+            catch { }
+            return outMap;
+        }
+
+        // Bounded: an edit map arrives from a client, and an unbounded one would be a packet that allocates freely.
+        public System.Collections.Generic.Dictionary<string, string> GetStringMap(string key, int maxEntries = 256)
+        {
+            var outMap = new System.Collections.Generic.Dictionary<string, string>(StringComparer.Ordinal);
+            if (Data == null || !(Data[key] is JObject obj)) return outMap;
+            try
+            {
+                foreach (JProperty p in obj.Properties())
+                {
+                    if (outMap.Count >= maxEntries) break;
+                    if (p.Value == null || p.Value.Type == JTokenType.Null) continue;
+                    outMap[p.Name] = p.Value.Value<string>() ?? "";
+                }
             }
             catch { }
             return outMap;

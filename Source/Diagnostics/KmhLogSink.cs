@@ -55,10 +55,12 @@ namespace KMHServerAddon.Diagnostics
             _drain.Start();
         }
 
-        // Every diagnostic line arrives here from whatever thread produced it and returns immediately.
         public static void Write(string line)
         {
-            if (!_started || _stopping || string.IsNullOrEmpty(line)) return;
+            if (string.IsNullOrEmpty(line)) return;
+            // Ahead of every guard: a broken, unstarted or shedding file sink must not also blind the operator view.
+            KmhConsoleTail.Append(line);
+            if (!_started || _stopping) return;
             if (Volatile.Read(ref _queued) >= MaxQueued)
             {
                 // Dropping a routine line beats stalling the thread that was settling an auction.
@@ -153,7 +155,7 @@ namespace KMHServerAddon.Diagnostics
         private static string Header()
         {
             var sb = new StringBuilder();
-            sb.AppendLine("=== KMH server diagnostic log ===");
+            sb.AppendLine("=== Colony Nexus server diagnostic log ===");
             sb.AppendLine($"Build        : {KmhVersion.Build} ({KmhVersion.BuildTag})");
             sb.AppendLine($"Protocol     : v{KmhVersion.Protocol}");
             sb.AppendLine($"ConfigSchema : {KmhVersion.ConfigSchema}   DataSchema: {KmhVersion.DataSchema}");
@@ -199,6 +201,20 @@ namespace KMHServerAddon.Diagnostics
             if (t != null && t.IsAlive) { try { t.Join(timeout); } catch { } }
             DrainUntilEmpty(timeout);   // whatever the drain thread did not reach
             _started = false;
+        }
+
+        // Synchronous and works after Stop: a dying process's last line must not go to a queue nobody will drain.
+        public static void WriteFinal(string line)
+        {
+            if (string.IsNullOrEmpty(line)) return;
+            try
+            {
+                string path;
+                lock (_fileLock) path = _path;
+                if (!string.IsNullOrEmpty(path))
+                    File.AppendAllText(path, $"[{DateTime.UtcNow:O}] [error] {KmhLogText.OneLine(line, 4000)}{Environment.NewLine}");
+            }
+            catch (Exception) { }
         }
 
         internal static void FlushForTest() => DrainUntilEmpty(TimeSpan.FromSeconds(5));

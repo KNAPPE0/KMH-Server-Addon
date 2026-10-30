@@ -34,8 +34,10 @@ namespace KMHServerAddon.Transactions
 
             if (!SafeDeliver(move, out KmhErrorCode deliverErr))
             {
-                SafeRefund(move);
-                tx.Advance(KmhTxState.Refunded);
+                // Refunded is terminal; a refund that threw gave nothing back, so it stops at Compensating where boot
+                // recovery retries it (Refund is safe to call more than once).
+                if (SafeRefund(move, tx)) tx.Advance(KmhTxState.Refunded);
+                else                      tx.Advance(KmhTxState.Compensating);
                 return Fail(tx, deliverErr == KmhErrorCode.None ? KmhErrorCode.DeliveryFailed : deliverErr);
             }
             tx.Advance(KmhTxState.Delivered);
@@ -52,9 +54,15 @@ namespace KMHServerAddon.Transactions
             KmhTransaction tx = KmhTransaction.Create(player, move.System, move.Type, move.Describe());
             tx.Guild = guild ?? "";
             tx.RequestKey = requestKey ?? "";
-            KmhTransactionRepository.Add(tx);
+
+            // Refused before reserving: a move with no ledger row is invisible to recovery and its retry key unwritten.
+            if (!KmhTransactionRepository.Add(tx))
+                return new KmhSettlementOutcome(false, tx.Id, KmhErrorCode.RecoveryRequired);
 
             KmhSettlementOutcome outcome = RunCore(tx, move, policy);
+
+            // The value already moved, so a failed write is not answered as failure (that invites a refund); the
+            // repository degrades persistence instead, which stops the NEXT move.
             KmhTransactionRepository.Update(tx);
             return outcome;
         }
@@ -73,7 +81,17 @@ namespace KMHServerAddon.Transactions
             catch { error = KmhErrorCode.DeliveryFailed; return false; }
         }
 
-        private static void SafeRefund(IKmhValueMove move) { try { move.Refund(); } catch { } }
+        private static bool SafeRefund(IKmhValueMove move, KmhTransaction tx)
+        {
+            try { move.Refund(); return true; }
+            catch (Exception ex)
+            {
+                Diagnostics.ServerLog.Error(
+                    $"Transaction {tx?.Id}: delivery failed and the refund threw ({ex.GetType().Name}: {ex.Message}). "
+                    + "The value is still reserved; it stays open for recovery and 'kmh recover list' shows it.", ex);
+                return false;
+            }
+        }
 
         private static KmhSettlementOutcome Fail(KmhTransaction tx, KmhErrorCode code)
             => new KmhSettlementOutcome(false, tx?.Id ?? "", code);

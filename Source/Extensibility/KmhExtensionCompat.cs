@@ -9,8 +9,8 @@ namespace KMHServerAddon.Extensibility
         public static bool IsCompatible(int target) => target >= Minimum && target <= Current;
 
         public static string Explain(int target)
-            => target > Current ? $"built for a newer KMH SDK (contract {target} > {Current}) - update the server"
-             : target < Minimum ? $"built for an unsupported older KMH SDK (contract {target} < {Minimum}) - rebuild against the current SDK"
+            => target > Current ? $"built for a newer Colony Nexus SDK (contract {target} > {Current}) - update the server"
+             : target < Minimum ? $"built for an unsupported older Colony Nexus SDK (contract {target} < {Minimum}) - rebuild against the current SDK"
              : "compatible";
     }
 }

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
@@ -15,11 +15,15 @@ namespace KMHServerAddon.Features.Enforcement
         private static string _hash = "";
         private static long   _updatedTicks;
         private static int    _fileCount;
+        private static long   _revision;
 
         public static bool   HasProfile   => _zip != null && _zip.Length > 0;
         public static string Hash         => _hash;
         public static int    FileCount    => _fileCount;
         public static long   UpdatedTicks => _updatedTicks;
+
+        // Seeded from the stored write time, so it never goes backwards across a restart.
+        public static long   Revision     => _revision;
 
         private static string ZipPath
         {
@@ -41,6 +45,7 @@ namespace KMHServerAddon.Features.Enforcement
                     _hash         = Sha256Hex(_zip);
                     _updatedTicks = File.GetLastWriteTimeUtc(ZipPath).Ticks;
                     _fileCount    = CountEntries(_zip);
+                    _revision     = _updatedTicks / TimeSpan.TicksPerSecond;
                 }
                 else Clear();
             }
@@ -54,23 +59,27 @@ namespace KMHServerAddon.Features.Enforcement
         public static bool SetProfile(byte[] zip, string hash, long updatedTicks)
         {
             byte[] oldZip = _zip; string oldHash = _hash;
-            long oldTicks = _updatedTicks; int oldCount = _fileCount;
+            long oldTicks = _updatedTicks; int oldCount = _fileCount; long oldRev = _revision;
 
             _zip          = zip ?? Array.Empty<byte>();
             _hash         = string.IsNullOrEmpty(hash) ? Sha256Hex(_zip) : hash;
             _updatedTicks = updatedTicks > 0 ? updatedTicks : DateTime.UtcNow.Ticks;
             _fileCount    = CountEntries(_zip);
+            _revision     = Math.Max(_revision + 1, _updatedTicks / TimeSpan.TicksPerSecond);
             try
             {
                 string injected = FailWriteForTest?.Invoke();
                 if (injected != null) throw new IOException(injected);
                 Directory.CreateDirectory(Path.GetDirectoryName(ZipPath));
-                File.WriteAllBytes(ZipPath, _zip);
+                // Written aside then renamed: a direct write dying partway would truncate the only stored profile.
+                string tmp = ZipPath + "." + Guid.NewGuid().ToString("N").Substring(0, 8) + ".tmp";
+                try { File.WriteAllBytes(tmp, _zip); File.Move(tmp, ZipPath, overwrite: true); }
+                catch { try { File.Delete(tmp); } catch { } throw; }
                 return true;
             }
             catch (Exception ex)
             {
-                _zip = oldZip; _hash = oldHash; _updatedTicks = oldTicks; _fileCount = oldCount;
+                _zip = oldZip; _hash = oldHash; _updatedTicks = oldTicks; _fileCount = oldCount; _revision = oldRev;
                 ServerLog.Warn($"Enforcement: profile save failed, the previous profile stays active: {ex.Message}");
                 return false;
             }
@@ -78,7 +87,7 @@ namespace KMHServerAddon.Features.Enforcement
 
         public static byte[] SerializeBytes() => _zip ?? Array.Empty<byte>();
 
-        private static void Clear() { _zip = Array.Empty<byte>(); _hash = ""; _updatedTicks = 0; _fileCount = 0; }
+        private static void Clear() { _zip = Array.Empty<byte>(); _hash = ""; _updatedTicks = 0; _fileCount = 0; _revision = 0; }
 
         private static int CountEntries(byte[] zip)
         {

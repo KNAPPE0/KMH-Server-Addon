@@ -57,7 +57,7 @@ namespace KMHServerAddon.Maintenance
             string comps = SiteOutputClassifier.Classify(M("ComponentIndustrial", cats: new[] { "Manufactured" }, crafted: true));
             r.Add(("Sites: components classify as Crafted", comps == SiteOutputFamilies.Crafted, comps));
 
-            // Shapes taken from a live catalog, because a plausible-looking fixture missed the real bug.
+            // Shapes taken from a live catalog, because a plausible-looking fixture can miss the real bug.
 
             // Wool carries a component's category while being a sheared animal product.
             string wool = SiteOutputClassifier.Classify(M("WoolSheep", cats: new[] { "Wools", "Textiles", "Manufactured" },
@@ -102,7 +102,6 @@ namespace KMHServerAddon.Maintenance
                    Offers(SiteArchetypes.Farmland, M("RawRice", cats: new[] { "PlantFoodRaw" },
                                                      food: "VegetableOrFruit", harvested: true)), ""));
 
-            // A modded item with real metadata classifies without KMH ever knowing its name.
             string moddedOre = SiteOutputClassifier.Classify(M("XYZ_Mythril", stuff: new[] { "Metallic" }, mineable: true));
             r.Add(("Sites: an unknown modded ore still classifies as Mineral", moddedOre == SiteOutputFamilies.Mineral, moddedOre));
 
@@ -161,7 +160,6 @@ namespace KMHServerAddon.Maintenance
             r.Add(("Sites: an unknown archetype id degrades to Custom",
                    SiteArchetypeRegistry.Get("orbital_elevator").IsCustom, ""));
 
-            // Roadworks eligibility is a narrower rule than its family.
             SiteOutputMetadata blocks = M("BlocksGranite", cats: new[] { "StoneBlocks" }, stuff: new[] { "Stony" }, mineable: true);
             SiteOutputMetadata steelM = M("Steel", stuff: new[] { "Metallic" }, mineable: true);
             SiteOutputMetadata uran   = M("Uranium", stuff: new[] { "Metallic" }, mineable: true);
@@ -202,8 +200,7 @@ namespace KMHServerAddon.Maintenance
             foreach (SiteArchetypeDef d in SiteArchetypeRegistry.All)
             {
                 bool isCustom = d.IsCustom;
-                if (!isCustom && System.Math.Abs(d.CostMultiplier - 1.0) > 0.001) costClean = false;   // presets 1.00
-                // A perk must never be the thing that sets the price.
+                if (!isCustom && System.Math.Abs(d.CostMultiplier - 1.0) > 0.001) costClean = false;
                 if (System.Math.Abs(d.CostMultiplier - d.ProductionMultiplier) < 0.001 && d.ProductionMultiplier != 1.0)
                     costClean = false;
             }
@@ -220,7 +217,7 @@ namespace KMHServerAddon.Maintenance
 
             // Marker art never crosses the wire, so contract section 43 checks it against the client tree instead.
 
-            // A mechanoid has a race, which once put its butchered plasteel in the Ranch picker.
+            // A mechanoid has a race, so its butchered plasteel carries the animal flag and could reach a Ranch.
             string plasteel = SiteOutputClassifier.Classify(
                 M("Plasteel", cats: new[] { "ResourcesRaw" }, stuff: new[] { "Metallic" }, animal: true));
             r.Add(("Sites: plasteel is a mineral even when a client calls it an animal product",
@@ -250,7 +247,6 @@ namespace KMHServerAddon.Maintenance
                    alpaca == SiteOutputFamilies.Animal && humanLeather == SiteOutputFamilies.Animal
                    && egg == SiteOutputFamilies.Animal, $"{alpaca}/{humanLeather}/{egg}"));
 
-            // Nothing metallic or stony may reach a Ranch, and nothing animal may reach a Quarry.
             bool ranchRefusesMetal = !SiteArchetypeRegistry.AcceptsOutput(SiteArchetypes.Ranch,
                 M("Plasteel", stuff: new[] { "Metallic" }, animal: true));
             bool quarryRefusesWool = !SiteArchetypeRegistry.AcceptsOutput(SiteArchetypes.Quarry,
@@ -282,7 +278,6 @@ namespace KMHServerAddon.Maintenance
             r.Add(("catalog: the final chunk commits the whole push",
                    res == SiteCatalogStore.PushResult.Accepted && SiteCatalogStore.Count == 2, d2));
 
-            // Classification happens server-side, from facts. Neither of these families was sent by the client.
             r.Add(("catalog: the server classifies from raw facts, not from anything the client asserted",
                    SiteCatalogStore.FamilyOf("Steel") == SiteOutputFamilies.Mineral
                    && SiteCatalogStore.FamilyOf("Meat_Cow") == SiteOutputFamilies.Animal, ""));
@@ -290,7 +285,6 @@ namespace KMHServerAddon.Maintenance
                    SiteCatalogStore.SkillOf("Steel") == "Mining"
                    && SiteCatalogStore.SkillOf("Meat_Cow") == "Animals", ""));
 
-            // The guard. A different client with a different modpack must not overwrite the established catalog.
             var evil = new List<Features.Sites.Dto.SiteOutputMetadata> { Meta("Meat_Cow", mineable: true) };
             res = SiteCatalogStore.Accept("mallory", "fp-EVIL", 1, 1, evil, out string d3);
             r.Add(("catalog: a mismatched fingerprint is REFUSED", res == SiteCatalogStore.PushResult.Rejected, d3));
@@ -298,18 +292,16 @@ namespace KMHServerAddon.Maintenance
                    SiteCatalogStore.FamilyOf("Meat_Cow") == SiteOutputFamilies.Animal
                    && SiteCatalogStore.RejectedPushes == 1, ""));
 
-            // The same modpack, said again, is a legitimate refresh.
             var again = new List<Features.Sites.Dto.SiteOutputMetadata> { Meta("Steel", mineable: true, stuff: "Metallic"), Meta("Meat_Cow", animal: true) };
             res = SiteCatalogStore.Accept("bob", "fp-A", 1, 1, again, out string d4);
-            r.Add(("catalog: the same fingerprint from another client refreshes rather than fights",
-                   res == SiteCatalogStore.PushResult.Refreshed, d4));
+            r.Add(("catalog: the same catalog from another client is accepted as unchanged rather than fought",
+                   res == SiteCatalogStore.PushResult.Ignored && d4 == "unchanged" && SiteCatalogStore.SkillOf("Steel") == "Mining", d4));
 
             // Unknown is never quietly turned into Crafting.
             r.Add(("catalog: an unknown def stays Unknown and has NO skill",
                    SiteCatalogStore.FamilyOf("__kmh_no_such_def__") == SiteOutputFamilies.Unknown
                    && SiteCatalogStore.SkillOf("__kmh_no_such_def__") == "", ""));
 
-            // Eligibility, computed server-side and shipped per item. A preset must refuse a family it does not own.
             Features.Sites.Dto.SiteOutputMetadata steel = SiteCatalogStore.Lookup("Steel");
             Features.Sites.Dto.SiteOutputMetadata meat  = SiteCatalogStore.Lookup("Meat_Cow");
             r.Add(("catalog: a Quarry accepts a mineral and refuses an animal product",
@@ -322,7 +314,7 @@ namespace KMHServerAddon.Maintenance
                    SiteArchetypeRegistry.AcceptsOutput(SiteArchetypes.Custom, steel)
                    && SiteArchetypeRegistry.AcceptsOutput(SiteArchetypes.Custom, meat), ""));
 
-            // A predicate, not a family test: gold and steel share every fact RimWorld records, so only the exclusion list separates them.
+            // Gold and steel share every fact RimWorld records, so only the exclusion list separates them.
             var gold = Meta("Gold", mineable: true, stuff: "Metallic");
             SiteCatalogStore.Classify(new List<Features.Sites.Dto.SiteOutputMetadata> { gold });
             r.Add(("catalog: Roadworks takes plain metal but not gold, though both are Mineral",
@@ -330,7 +322,6 @@ namespace KMHServerAddon.Maintenance
                    && SiteArchetypeRegistry.AcceptsOutput(SiteArchetypes.Roadworks, steel)
                    && !SiteArchetypeRegistry.AcceptsOutput(SiteArchetypes.Roadworks, gold), gold.Family));
 
-            // Nothing at all may be built on an unclassified output.
             var unknown = Meta("__kmh_mystery__");
             SiteCatalogStore.Classify(new List<Features.Sites.Dto.SiteOutputMetadata> { unknown });
             bool anyAccepts = false;
@@ -355,10 +346,9 @@ namespace KMHServerAddon.Maintenance
             // A config field nothing consults is a setting that lies to the owner.
             string catalogSrc = ReadSource(System.IO.Path.Combine("Features", "Sites", "SiteCatalogStore.cs"));
             if (catalogSrc != null)
-                r.Add(("catalog: the live classify path applies UnknownOutputFamily",
-                       catalogSrc.Contains("ResolveFamily(classified, cfg?.UnknownOutputFamily)"), ""));
+                r.Add(("catalog: the live classify path applies Output.UnknownFamily",
+                       catalogSrc.Contains("ResolveFamily(classified, cfg?.Output.UnknownFamily)"), ""));
 
-            // The wire form the picker filters on.
             string archList = SiteArchetypeRegistry.ArchetypesFor(steel);
             r.Add(("catalog: the eligibility list names the archetypes that accept the item",
                    archList.Contains(SiteArchetypes.Quarry) && archList.Contains(SiteArchetypes.Custom)
@@ -375,7 +365,7 @@ namespace KMHServerAddon.Maintenance
             string store = ReadSource(System.IO.Path.Combine("Features", "Sites", "SiteStore.cs"));
             if (store == null)
             {
-                r.Add(("migration: store source not available (shipped build) - checks skipped", true, ""));
+                r.Add(Diagnostics.KmhSelfTestResult.Skipped("migration: the store migrates site classifications", "store source not available (shipped build)"));
             }
             else
             {
@@ -402,7 +392,6 @@ namespace KMHServerAddon.Maintenance
                            body.Contains("if (string.IsNullOrEmpty(classified)) continue;"), ""));
                 }
 
-                // The build path must never retroactively pause an existing site for an archetype mismatch.
                 r.Add(("migration: archetype eligibility is checked when BUILDING, never when loading",
                        Regex.IsMatch(store, @"AcceptsOutput\(archId")
                        && !Regex.IsMatch(store, @"LoadFromDisk[\s\S]{0,4000}?AcceptsOutput"), ""));
@@ -412,7 +401,7 @@ namespace KMHServerAddon.Maintenance
             return r;
         }
 
-        // KMH-Patch/Textures/KMHPatch, when the client repo sits beside the server one. Null on a shipped server.
+        // Null on a shipped server, which has no source tree beside it.
         private static string ReadSource(string relative)
         {
             try

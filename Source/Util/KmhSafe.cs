@@ -19,8 +19,41 @@ namespace KMHServerAddon.Util
 
         public static int AddSaturating(int current, long add) => AddSaturating(current, add, out _);
 
+        // What a client may name and have persisted: def names and account names are short in every real case.
+        public const int MaxDefLength = 128, MaxUsernameLength = 64, MaxLabelLength = 128;
+
+        // Strict and bounded: a stored item name is drawn for other players (markup renders) and kept in the vault for good.
+        public static bool IsDefName(string s)
+        {
+            if (string.IsNullOrEmpty(s) || s.Length > MaxDefLength) return false;
+            foreach (char c in s)
+                if (!(char.IsLetterOrDigit(c) || c == '_' || c == '-' || c == '.')) return false;
+            return true;
+        }
+
+        // def|stuff|quality|inner: only the def is required, and every part present is a def name or a number.
+        public static bool IsItemKey(string key)
+        {
+            if (string.IsNullOrEmpty(key) || key.Length > 4 * MaxDefLength + 3) return false;
+            string[] parts = key.Split('|');
+            if (parts.Length > 4 || !IsDefName(parts[0])) return false;
+            for (int i = 1; i < parts.Length; i++)
+                if (parts[i].Length > 0 && !IsDefName(parts[i])) return false;
+            return true;
+        }
+
+        // A client-pushed catalog entry: a real def name and label are short.
+        public static bool CatalogEntryFits(string key, string value)
+            => !string.IsNullOrEmpty(key) && key.Length <= MaxDefLength
+            && !string.IsNullOrEmpty(value) && value.Length <= MaxLabelLength;
+
+        // Never ends on half an emoji, which Colony Nexus Global cannot store.
         public static string Cap(string s, int maxLen)
-            => string.IsNullOrEmpty(s) ? "" : (s.Length <= maxLen ? s : s.Substring(0, maxLen));
+        {
+            if (string.IsNullOrEmpty(s) || maxLen <= 0) return "";
+            if (s.Length <= maxLen) return s;
+            return s.Substring(0, char.IsHighSurrogate(s[maxLen - 1]) ? maxLen - 1 : maxLen);
+        }
 
         public static bool Eq(string a, string b) => string.Equals(a ?? "", b ?? "", StringComparison.OrdinalIgnoreCase);
 

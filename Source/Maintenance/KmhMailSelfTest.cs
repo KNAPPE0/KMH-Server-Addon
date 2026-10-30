@@ -22,7 +22,7 @@ namespace KMHServerAddon.Maintenance
             bool clampOk = clamped.Length == MailStore.MaxBodyLength;
             r.Add(("Mail: overlong body clamped", clampOk, $"{clamped.Length}/{MailStore.MaxBodyLength}"));
 
-            MailStore.TryPrepare("bob", "amy", "ab\ttail", "line1\nline2\0", out string subj, out string body, out _);
+            MailStore.TryPrepare("bob", "amy", "a\u0007b\ttail", "line1\nline2\0", out string subj, out string body, out _);
             bool sanitized = subj == "ab\ttail" && body == "line1\nline2";
             r.Add(("Mail: control chars stripped, \\n\\t kept", sanitized, $"subj='{subj}' body='{body}'"));
 
@@ -47,14 +47,12 @@ namespace KMHServerAddon.Maintenance
             r.Add(("Mail: refund-once (silver, second rejected)",
                 f1 && !f2 && refund.AttachState == MailStore.AttachRefunded, $"f1={f1} f2={f2}"));
 
-            // Items-only attachment: still an open attachment, resolves once (claim-once applies to items too).
             var itemMsg = new MailMessage { AttachedItems = new Dictionary<string, int> { { "Steel", 40 } }, AttachState = MailStore.AttachEscrowed };
             bool hasItem = MailStore.HasAttachment(itemMsg);
             bool i1 = MailStore.TryResolveAttachment(itemMsg, MailStore.AttachClaimed);
             bool i2 = MailStore.TryResolveAttachment(itemMsg, MailStore.AttachClaimed);
             r.Add(("Mail: items-only attachment claim-once", hasItem && i1 && !i2, $"has={hasItem} i1={i1} i2={i2}"));
 
-            // Gear-only (full-state payload) attachment: same open-attachment + claim-once guarantee.
             var gearMsg = new MailMessage
             {
                 AttachedPayloads = new List<Items.KmhThingPayload> { new Items.KmhThingPayload { DefName = "MeleeWeapon_LongSword", StackCount = 1 } },
@@ -82,13 +80,12 @@ namespace KMHServerAddon.Maintenance
             bool partialDetected = MailStore.SumStacks(split) < 7;   // asked 7, granted 5 -> rollback path
             r.Add(("Mail: gear unit-count detects partial withdrawal", sumOk && partialDetected, $"units={MailStore.SumStacks(split)}"));
 
-            // A message with no attachment is never charged, whatever the fee settings say.
             var noFee = new MailConfig();
             bool feeOff = noFee.FeeFor(1000, true) == 0;
             var feeCfg = new MailConfig { AttachmentFeePercent = 10, AttachmentFeeFlat = 5 };
             bool feePct   = feeCfg.FeeFor(1000, true) == 105;   // 100 percent-fee + 5 flat
             bool feeFlat  = feeCfg.FeeFor(0, true) == 5;        // gear/items only -> flat still applies
-            bool feeNone  = feeCfg.FeeFor(1000, false) == 0;    // no attachment -> no fee
+            bool feeNone  = feeCfg.FeeFor(1000, false) == 0;
             r.Add(("Mail: attachment fee off by default, math correct when on",
                 feeOff && feePct && feeFlat && feeNone, $"off={feeOff} pct={feeCfg.FeeFor(1000, true)} flat={feeCfg.FeeFor(0, true)}"));
 

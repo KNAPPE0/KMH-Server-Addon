@@ -6,7 +6,7 @@ namespace KMHServerAddon.Features.Frontier
     // The only place a winner is decided; a client asks whether it is eligible rather than working it out.
     internal static class FrontierCapture
     {
-        // The name tiebreak is load-bearing: without it two contributors that both read "never" fall to enumeration order.
+        // Without the name tiebreak, two contributors that both read "never" fall to enumeration order.
         public static string ResolveEligible(Dictionary<string, int> contributors, Dictionary<string, long> firstUtc)
         {
             if (contributors == null) return "";

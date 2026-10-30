@@ -41,10 +41,18 @@ namespace KMHServerAddon.Features.Discord
         public static void RelayOutbound(ChatMessage msg)
         {
             if (!OutboundEnabled || !ShouldRelayOutbound(msg)) return;
+            Enqueue(msg.Id, LineFor(msg.FromUsername, msg.Body));
+        }
+
+        internal static string LineFor(string from, string body)
+        {
             // Sender and body are flattened into one line, so an unflattened body could forge a second one.
-            string safe = DiscordText.SafeRelayBody(msg.Body);
+            // Redacted here, before the batch is measured: redacting after could push a batch past Discord's limit and lose it.
+            string safe = DiscordText.SafeRelayBody(DiscordBridge.Redact(body));
             if (safe.Length > 1500) safe = safe.Substring(0, 1497) + "…";
-            Enqueue(msg.Id, $"**{DiscordText.SafeName(msg.FromUsername)}**: {safe}");
+            // Discord shows no in-game badge, so a simulated playtest account says what it is in the line itself.
+            string sim = Simulation.SimulatedAccounts.IsSimulated(from) ? " [SIM]" : "";
+            return $"**{DiscordText.SafeName(from)}**{sim}: {safe}";
         }
 
         private static void Enqueue(long kmhId, string line)
@@ -77,7 +85,7 @@ namespace KMHServerAddon.Features.Discord
             catch (Exception ex)
             {
                 // The normal exit clears this inside TakeBatch; clearing it in both places would let two drains overlap.
-                ServerLog.Warn($"KMH chat -> Discord drain stopped: {ex.Message}");
+                ServerLog.Warn($"Colony Nexus chat -> Discord drain stopped: {ex.Message}");
                 lock (_qLock) _draining = false;
             }
         }
@@ -123,8 +131,8 @@ namespace KMHServerAddon.Features.Discord
             Task.Run(async () =>
             {
                 bool ok = await DiscordBridge.EditOwnMessageAsync(channel, messageId, newText).ConfigureAwait(false);
-                if (ok) ServerLog.Debug($"KMH->Discord: struck removed message #{kmhId} out of Discord message {messageId}.");
-                else    ServerLog.Warn($"KMH->Discord: could not strike removed message #{kmhId} out of Discord message {messageId}.");
+                if (ok) ServerLog.Debug($"Colony Nexus->Discord: struck removed message #{kmhId} out of Discord message {messageId}.");
+                else    ServerLog.Warn($"Colony Nexus->Discord: could not strike removed message #{kmhId} out of Discord message {messageId}.");
             });
         }
 
@@ -135,7 +143,7 @@ namespace KMHServerAddon.Features.Discord
             if (!InboundEnabled)
             {
                 DiscordConfig c = DiscordBridge.Config;
-                ServerLog.Warn("Discord->KMH: inbound relay is OFF "
+                ServerLog.Warn("Discord->Colony Nexus: inbound relay is OFF "
                              + $"(enabled={c?.IsEnabled}, channel={c?.KmhChatChannelId}, fromDiscord={c?.KmhChatFromDiscordOn}) - message dropped.");
                 return;
             }
@@ -145,7 +153,7 @@ namespace KMHServerAddon.Features.Discord
             string vetted = Features.Chat.ChatImagePolicy.Vet(attachmentUrl, typedByPlayer: false, knownImage: true);
             if (string.IsNullOrWhiteSpace(text) && string.IsNullOrEmpty(vetted))
             {
-                ServerLog.Debug("Discord->KMH: empty message body and no previewable attachment - nothing to relay.");
+                ServerLog.Debug("Discord->Colony Nexus: empty message body and no previewable attachment - nothing to relay.");
                 return;
             }
             // Named accurately, or a video labelled "(image)" reads as a broken picture.
@@ -153,7 +161,16 @@ namespace KMHServerAddon.Features.Discord
                 text = Features.Chat.ChatImagePolicy.LooksLikeVideo(vetted) ? "(video)" : "(image)";
 
             string linked = LinkedAccountsStore.FindUsernameByDiscordId(discordUserId);
-            bool collides = string.IsNullOrEmpty(linked) && PlayerStats.PlayerStatsStore.HasPlayer(discordDisplay);
+            if (Features.Moderation.BanGate.IsBannedAccount(linked))
+            {
+                ServerLog.Info("Discord->Colony Nexus: message from a banned account's linked Discord dropped.");
+                return;
+            }
+            // An unlinked name that is a player's, the platform's or this server's staff's is shown as Discord's.
+            bool collides = string.IsNullOrEmpty(linked)
+                && (PlayerStats.PlayerStatsStore.HasPlayer(discordDisplay) || Features.Moderation.BanGate.IsReservedName(discordDisplay)
+                    || Features.Moderation.BanGate.StaffLookAlike(discordDisplay, Features.Identity.StaffConfig.Current) != null
+                    || Features.Identity.StaffRegistry.Contains(StaffNames(), discordDisplay));
             ResolveIdentity(linked, discordDisplay, collides, out string sender, out bool verified);
 
             // The identity, not just today's signed link, since the signature dies before the history does.
@@ -173,7 +190,7 @@ namespace KMHServerAddon.Features.Discord
             ChatMessage msg = ChatStore.Post(sender, ChatChannels.Server, text, null, "discord", out string reason, verified, vetted, mediaRef);
             if (msg == null)
             {
-                ServerLog.Warn($"Discord->KMH: '{sender}' message REFUSED by the chat store - {reason ?? "no reason given"}.");
+                ServerLog.Warn($"Discord->Colony Nexus: '{sender}' message REFUSED by the chat store - {reason ?? "no reason given"}.");
                 return;
             }
 
@@ -182,7 +199,7 @@ namespace KMHServerAddon.Features.Discord
 
             ServerLog.Info($"chat[server] (via Discord) {sender}: {msg.Body}");
             int sent = ChatHandler.BroadcastExternal(msg);
-            ServerLog.Debug($"Discord->KMH: relayed message #{msg.Id} to {sent} connected client(s).");
+            ServerLog.Debug($"Discord->Colony Nexus: relayed message #{msg.Id} to {sent} connected client(s).");
         }
 
         // Discord resolves a preview by editing the message afterwards, so the picture attaches instead of duplicating.
@@ -197,7 +214,7 @@ namespace KMHServerAddon.Features.Discord
             if (!KmhChatRelayIndex.TryPeekInbound(discordMessageId, out long kmhId)) return;
             if (!ChatStore.SetImage(ChatChannels.Server, kmhId, vetted, isVideo)) return;   // already had one, or gone
 
-            ServerLog.Debug($"Discord->KMH: attached a late link preview to message #{kmhId}.");
+            ServerLog.Debug($"Discord->Colony Nexus: attached a late link preview to message #{kmhId}.");
             ChatHandler.RebroadcastServerChannel();
         }
         // Enqueue and take without touching Discord, so ordering and overflow stay testable.
@@ -206,6 +223,16 @@ namespace KMHServerAddon.Features.Discord
         internal static void EnqueueForTest(long kmhId, string line) { lock (_qLock) { while (_queue.Count >= MaxQueued) { _queue.Dequeue(); _dropped++; } _queue.Enqueue(new Pending { KmhId = kmhId, Line = line }); } }
         internal static string TakeBatchForTest() => TakeBatch(out _, out _);
         internal static string TakeBatchForTest(out List<long> ids, out List<string> lines) => TakeBatch(out ids, out lines);
+
+        private static List<string> StaffNames()
+        {
+            var cfg = Features.Identity.StaffConfig.Current;
+            var all = new List<string>();
+            if (cfg == null) return all;
+            foreach (List<string> l in new[] { cfg.Owners, cfg.Developers, cfg.Admins, cfg.Moderators, cfg.Ops })
+                if (l != null) all.AddRange(l);
+            return all;
+        }
 
         // Name and verified status are decided together, or a caller could label an unproven line as a real player.
         public static void ResolveIdentity(string linkedUsername, string discordDisplay, bool displayIsTakenName,

@@ -10,7 +10,7 @@ namespace KMHServerAddon.Features.Treasury
         private static void PendingBacklog(List<(string, bool, string)> r)
         {
             string user = "kmh-selftest-backlog";
-            int cap = Economy.EconomyConfig.Current.MaxUnconfirmedDepositsPerPlayer;
+            int cap = Economy.EconomyConfig.Current.Treasury.MaxUnconfirmedPerPlayer;
             r.Add(("Pending: the backlog bound is configured and clamped sane", cap >= 1 && cap <= 1000, $"cap={cap}"));
 
             int before = TreasuryStore.UnconfirmedDepositCount(user);
@@ -29,7 +29,6 @@ namespace KMHServerAddon.Features.Treasury
             TreasuryStore.BeginPendingDeposit(user, probe);
             r.Add(("Pending: a new record records the save generation it was opened at", probe.SaveGenAtOpen >= 0, $"gen={probe.SaveGenAtOpen}"));
 
-            // Below the cap nothing is refused; at and above it the refusal carries a reason the player can act on.
             bool underCap = !TreasuryHandler.WouldRefuseForBacklogForTest(user, out _);
             r.Add(("Pending: a player under the cap is never refused", underCap, $"open={TreasuryStore.UnconfirmedDepositCount(user)} cap={cap}"));
 
@@ -46,7 +45,7 @@ namespace KMHServerAddon.Features.Treasury
             // The gate must sit in preflight, before the client removes anything.
             string src = Maintenance.KmhSourceProbe.Read(System.IO.Path.Combine("Features", "Treasury", "TreasuryHandler.cs"));
             if (src == null)
-                r.Add(("Pending: the backlog gate runs before any goods are removed", true, "not asked - no source tree beside this build"));
+                r.Add(Diagnostics.KmhSelfTestResult.Skipped("Pending: the backlog gate runs before any goods are removed", "no source tree beside this build"));
             else
             {
                 int gate   = src.IndexOf("TooManyUnconfirmed(username, out string backlog)", StringComparison.Ordinal);
@@ -62,14 +61,72 @@ namespace KMHServerAddon.Features.Treasury
             r.Add(("Pending: the self-test leaves no records behind", TreasuryStore.UnconfirmedDepositCount(user) == 0, ""));
         }
 
+        // Without ledger scope a reload keeps a fresh deposit it lost and undoes deposits from another colony.
+        private static void LedgerScopedRollback(List<(string, bool, string)> r)
+        {
+            string L = "a1b2c3d4e5f60718293a4b5c6d7e8f90", M = "0f1e2d3c4b5a69788796a5b4c3d2e1f0";
+            var have = new HashSet<string>(StringComparer.Ordinal) { "C" };
+            var unsaved = new HashSet<string>(StringComparer.Ordinal) { "U" };
+            r.Add(("Rollback undo (ledger): that colony's commit after the loaded save is undone, with no time grace",
+                   TreasuryStore.ShouldUndoInLedger("X", L, 2, L, 1, have, unsaved), ""));
+            r.Add(("Rollback undo (ledger): another colony's commit is LEFT ALONE",
+                   !TreasuryStore.ShouldUndoInLedger("X", M, 9, L, 1, have, unsaved), ""));
+            r.Add(("Rollback undo (ledger): a commit at or before the loaded generation is LEFT ALONE",
+                   !TreasuryStore.ShouldUndoInLedger("X", L, 1, L, 1, have, unsaved), ""));
+            r.Add(("Rollback undo (ledger): a commit the save still lists, or unsaved goods, is LEFT ALONE",
+                   !TreasuryStore.ShouldUndoInLedger("C", L, 2, L, 1, have, unsaved) && !TreasuryStore.ShouldUndoInLedger("U", L, 2, L, 1, have, unsaved), ""));
+            r.Add(("Rollback undo (ledger): no ledger or no txn id never acts",
+                   !TreasuryStore.ShouldUndoInLedger("X", "", 2, "", 1, have, unsaved) && !TreasuryStore.ShouldUndoInLedger("", L, 2, L, 1, have, unsaved), ""));
+            r.Add(("Ledger id: only the client's 32-hex form is taken",
+                   TreasuryStore.LedgerIdOrEmpty(L) == L && TreasuryStore.LedgerIdOrEmpty(null) == "" && TreasuryStore.LedgerIdOrEmpty(L.ToUpperInvariant()) == ""
+                   && TreasuryStore.LedgerIdOrEmpty(L + "0") == "" && TreasuryStore.LedgerIdOrEmpty("g" + L.Substring(1)) == "", ""));
+
+            string who = "kmh-selftest-ledger-" + Guid.NewGuid().ToString("N").Substring(0, 8);
+            try
+            {
+                bool Deposit(string txn, int silver, string ledger, long gen)
+                    => TreasuryStore.BeginPendingDeposit(who, new Dto.PendingDeposit { TxnId = txn, Kind = Dto.PendingDeposit.KindSilver, Silver = silver })
+                       && TreasuryStore.ConfirmDeposits(who, new[] { txn }, ledger, gen) == 1;
+                string elsewhere = Guid.NewGuid().ToString("N"), older = Guid.NewGuid().ToString("N"), fresh = Guid.NewGuid().ToString("N");
+                bool made = Deposit(elsewhere, 40, M, 1) && Deposit(older, 7, L, 1) && Deposit(fresh, 99, L, 2);
+                TreasuryStore.NoteSaveGeneration(who, 1, M);
+                TreasuryStore.NoteSaveGeneration(who, 2, L);
+                long seen = TreasuryStore.NoteSaveGeneration(who, 1, L);
+                (int undone, int flagged) = TreasuryStore.ReverseRolledBackCommits(who, new[] { older }, null, 120, L, 1);
+                long silver = TreasuryStore.GetPersonalSilver(who);
+                r.Add(("Rollback undo (ledger): a reload undoes only that colony's later deposit, however fresh, and nothing elsewhere",
+                       made && TreasuryStore.SaveGenerationWentBackwards(seen, 1) && undone == 1 && flagged == 0 && silver == 47,
+                       $"made={made} seen={seen} undone={undone} silver={silver} (want 47)"));
+                r.Add(("Rollback undo (ledger): a colony never seen before is no rollback",
+                       TreasuryStore.NoteSaveGeneration(who, 1, "ffffffffffffffffffffffffffffffff") == 0, ""));
+                r.Add(("Rollback undo (ledger): a colony-scoped report leaves the player-wide watermark alone",
+                       TreasuryStore.LastSaveGenerationOf(who) == 0, $"player-wide={TreasuryStore.LastSaveGenerationOf(who)}"));
+                for (int i = 0; i < TreasuryStore.MaxLedgersPerVault + 8; i++) TreasuryStore.NoteSaveGeneration(who, 100 + i, Guid.NewGuid().ToString("N"));
+                r.Add(("Rollback undo (ledger): colonies tracked per player are bounded",
+                       TreasuryStore.LedgerCountForTest(who) == TreasuryStore.MaxLedgersPerVault, $"{TreasuryStore.LedgerCountForTest(who)}"));
+            }
+            finally { TreasuryStore.PurgeOwnerForTest(who); }
+
+            // A colony argument the handler drops silently falls back to the player-wide rule.
+            string src = Maintenance.KmhSourceProbe.Read(System.IO.Path.Combine("Features", "Treasury", "TreasuryHandler.cs"));
+            if (src == null)
+                r.Add(Diagnostics.KmhSelfTestResult.Skipped("Rollback undo (ledger): the handler passes the colony to every step", "no source tree beside this build"));
+            else
+                r.Add(("Rollback undo (ledger): the handler passes the colony to every step",
+                       src.Contains("ConfirmDeposits(username, ids, LedgerOf(env)") && src.Contains("ReconcileDeposits(username, ids, unsaved, ReconcileGraceSeconds, ledger, gen)")
+                       && src.Contains("ReverseRolledBackCommits(username, ids, unsaved, ReconcileGraceSeconds, ledger, gen)")
+                       && src.Contains("TreasuryStore.NoteSaveGeneration(username, gen, ledger)"), ""));
+        }
+
         public static List<(string, bool, string)> Run()
         {
             var r = new List<(string, bool, string)>();
             PendingBacklog(r);
+            LedgerScopedRollback(r);
             long now    = DateTime.UtcNow.Ticks;
-            long cutoff = now - TimeSpan.FromSeconds(120).Ticks;   // the reconcile grace boundary
-            long old    = now - TimeSpan.FromSeconds(600).Ticks;   // well past grace
-            long young  = now;                                     // inside grace
+            long cutoff = now - TimeSpan.FromSeconds(120).Ticks;
+            long old    = now - TimeSpan.FromSeconds(600).Ticks;
+            long young  = now;
             var committed = new HashSet<string>(StringComparer.Ordinal) { "C" };
             var unsaved   = new HashSet<string>(StringComparer.Ordinal) { "U" };
 

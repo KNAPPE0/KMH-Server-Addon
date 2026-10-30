@@ -5,7 +5,7 @@ namespace KMHServerAddon.Transactions
     // A non-terminal transaction is never dropped: boot reconciliation is the only thing that can resolve it.
     internal static class KmhTxPrune
     {
-        // A terminal row with an unconfirmed delivery is not finished - dropping it orphans the delivery from the operation that owes it.
+        // A terminal row with an unconfirmed delivery is not finished: dropping it orphans the delivery from what owes it.
         public static bool IsFinished(KmhTransaction t)
             => t != null && KmhTxStateMachine.IsTerminal(t.State) && !HasOutstandingDelivery(t);
 

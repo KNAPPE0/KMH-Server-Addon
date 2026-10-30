@@ -19,10 +19,14 @@ namespace KMHServerAddon.Maintenance
                 case SubProtocol.KmhProtocol.Kind.ChatMediaRefresh:
                     return true;
 
-                // The client latches these on the send, not on our accept, so refusing one loses the session's data with no retry.
+                // The client latches these on send, not on our accept, so a refusal loses the session's data for good.
                 case SubProtocol.KmhProtocol.Kind.ItemLabels:
                 case SubProtocol.KmhProtocol.Kind.ItemValues:
                 case SubProtocol.KmhProtocol.Kind.SiteMetaPush:
+                    return true;
+
+                // Writes only its own file, never the economy, and maintenance is when players most need one.
+                case SubProtocol.KmhProtocol.Kind.ReportSubmit:
                     return true;
                 default:
                     return false;

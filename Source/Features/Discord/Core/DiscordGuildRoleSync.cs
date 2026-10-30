@@ -17,14 +17,35 @@ namespace KMHServerAddon.Features.Discord
     {
         private static bool _started;
         private static readonly object _lock = new object();
-        private static Dictionary<string, string> _applied  // username -> role name last applied
+        private static Dictionary<string, string> _applied
             = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private static HashSet<ulong> _created = new HashSet<ulong>();
+        private static readonly HashSet<string> _warned = new HashSet<string>(StringComparer.Ordinal);
 
-        // Decides which existing roles KMH may delete, so it must not match a role an owner made by hand.
         private static readonly Regex KmhRolePattern =
             new Regex(@"^.+ \((Admin|Moderator|Officer|Member)\)$", RegexOptions.Compiled);
 
-        private static int _reconcilePending;   // debounce guard for the guild-wide reconcile
+        internal enum RoleChoice { UseOurs, Create, Refuse }
+
+        // A guild named after an owner's own role must not be handed that role: only roles this server made are used.
+        internal static RoleChoice Choose(IEnumerable<(ulong Id, string Name)> roles, string target, ICollection<ulong> created, out ulong id)
+        {
+            id = 0;
+            bool taken = false;
+            foreach ((ulong Id, string Name) r in roles)
+            {
+                if (!string.Equals(r.Name, target, StringComparison.Ordinal)) continue;
+                if (created.Contains(r.Id)) { id = r.Id; return RoleChoice.UseOurs; }
+                taken = true;
+            }
+            return taken ? RoleChoice.Refuse : RoleChoice.Create;
+        }
+
+        // Only roles this server made are taken away, whatever their name looks like.
+        internal static bool MayRemove(ulong roleId, string name, string target, ICollection<ulong> created)
+            => created.Contains(roleId) && KmhRolePattern.IsMatch(name) && name != target;
+
+        private static int _reconcilePending;
 
         public static void Start()
         {
@@ -35,7 +56,7 @@ namespace KMHServerAddon.Features.Discord
             bus.PlayerLinked   += e => Fire(() => ReconcileUser(e.Username, e.DiscordId));
             bus.PlayerUnlinked += e => Fire(() => ReconcileUser(e.Username, e.DiscordId));
             bus.GuildChanged   += _ => ScheduleReconcileAll();
-            ServerLog.Info("Discord: guild-role sync subscribed (Roles.SyncGuildRoles gates actual changes)");
+            ServerLog.Diag("Discord: guild-role sync subscribed (Roles.SyncGuildRoles gates actual changes)");
         }
 
         // Catches up whatever changed while the bot was offline.
@@ -102,22 +123,37 @@ namespace KMHServerAddon.Features.Discord
             RestGuildUser user = await client.Rest.GetGuildUserAsync(guildId, discordId).ConfigureAwait(false);
             if (user == null) { SetApplied(username, ""); return; }
 
+            HashSet<ulong> created;
+            lock (_lock) created = new HashSet<ulong>(_created);
             foreach (ulong rid in user.RoleIds.ToArray())
             {
                 SocketRole r = sg.GetRole(rid);
-                if (r == null || !KmhRolePattern.IsMatch(r.Name) || r.Name == target) continue;
+                if (r == null || !MayRemove(r.Id, r.Name, target, created)) continue;
                 try { await user.RemoveRoleAsync(r).ConfigureAwait(false); }
                 catch (Exception ex) { ServerLog.Verbose($"role remove '{r.Name}' from {username}: {ex.Message}"); }
             }
 
             if (!string.IsNullOrEmpty(target))
             {
-                IRole role = sg.Roles.FirstOrDefault(r => string.Equals(r.Name, target, StringComparison.Ordinal));
-                if (role == null)
+                IRole role = null;
+                switch (Choose(sg.Roles.Select(r => (r.Id, r.Name)), target, created, out ulong ours))
                 {
-                    try { role = await sg.CreateRoleAsync(target, GuildPermissions.None, null, false, false).ConfigureAwait(false); }
-                    catch (Exception ex) { ServerLog.Warn($"Discord role sync: can't create '{target}' - does the bot have Manage Roles? ({ex.Message})"); return; }
+                    case RoleChoice.UseOurs:
+                        role = sg.GetRole(ours);
+                        break;
+                    case RoleChoice.Refuse:
+                        bool first;
+                        lock (_lock) first = _warned.Add(target);
+                        if (first) ServerLog.Warn($"Discord role sync: a role named '{target}' already exists and was not made by Colony Nexus, so it is not given to guild members. Rename that role or the guild.");
+                        return;
+                    default:
+                        try { role = await sg.CreateRoleAsync(target, GuildPermissions.None, null, false, false).ConfigureAwait(false); }
+                        catch (Exception ex) { ServerLog.Warn($"Discord role sync: can't create '{target}' - does the bot have Manage Roles? ({ex.Message})"); return; }
+                        lock (_lock) _created.Add(role.Id);
+                        SaveCache();
+                        break;
                 }
+                if (role == null) return;
                 if (!user.RoleIds.Contains(role.Id))
                 {
                     try { await user.AddRoleAsync(role).ConfigureAwait(false); }
@@ -143,18 +179,27 @@ namespace KMHServerAddon.Features.Discord
         private sealed class Cache
         {
             public Dictionary<string, string> Applied { get; set; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            public List<ulong> Created { get; set; } = new List<ulong>();
         }
 
         private static void LoadCache()
         {
-            if (JsonFileStore.TryLoad(KmhDataPaths.DiscordGuildRolesFile, out Cache c) && c?.Applied != null)
-                lock (_lock) _applied = new Dictionary<string, string>(c.Applied, StringComparer.OrdinalIgnoreCase);
+            if (!JsonFileStore.TryLoad(KmhDataPaths.DiscordGuildRolesFile, out Cache c) || c == null) return;
+            lock (_lock)
+            {
+                if (c.Applied != null) _applied = new Dictionary<string, string>(c.Applied, StringComparer.OrdinalIgnoreCase);
+                if (c.Created != null) _created = new HashSet<ulong>(c.Created);
+            }
         }
 
         private static void SaveCache()
         {
             Cache c = new Cache();
-            lock (_lock) foreach (KeyValuePair<string, string> kv in _applied) c.Applied[kv.Key] = kv.Value;
+            lock (_lock)
+            {
+                foreach (KeyValuePair<string, string> kv in _applied) c.Applied[kv.Key] = kv.Value;
+                c.Created.AddRange(_created);
+            }
             JsonFileStore.Save(KmhDataPaths.DiscordGuildRolesFile, c);
         }
     }

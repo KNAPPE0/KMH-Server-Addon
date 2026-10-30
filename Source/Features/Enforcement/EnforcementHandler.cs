@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using KMHServerAddon.Diagnostics;
 using KMHServerAddon.SubProtocol;
@@ -17,144 +17,39 @@ namespace KMHServerAddon.Features.Enforcement
             KmhRouter.RegisterHandler(KmhProtocol.Kind.EnforcementSetEnabled,     OnSetEnabled);
             KmhRouter.RegisterHandler(KmhProtocol.Kind.EnforcementSetSafe,        OnSetSafe);
             KmhRouter.RegisterHandler(KmhProtocol.Kind.EnforcementSetFlag,        OnSetFlag);
-            KmhRouter.RegisterHandler(KmhProtocol.Kind.EnforcementUploadBegin,    OnUploadBegin);
-            KmhRouter.RegisterHandler(KmhProtocol.Kind.EnforcementUploadChunk,    OnUploadChunk);
-            KmhRouter.RegisterHandler(KmhProtocol.Kind.EnforcementUploadEnd,      OnUploadEnd);
-        }
-
-        // Caps a crafted upload well above any real config zip, so it cannot exhaust server memory.
-        private const int MaxUploadChunks = 4096;
-
-        // A separate ceiling, because the chunk cap alone does not bound the declared size.
-        private const int MaxUploadBytes = MaxUploadChunks * ChunkRawBytes;
-
-        // An upload begun and never finished would otherwise hold its chunks until the server restarts.
-        private static readonly TimeSpan UploadStaleAfter = TimeSpan.FromMinutes(10);
-
-        private sealed class UploadState
-        {
-            public string Hash;
-            public int ChunkCount;
-            public int TotalBytes;
-            public long StartedUtcTicks;
-            public readonly Dictionary<int, byte[]> Chunks = new Dictionary<int, byte[]>();
-        }
-
-        private static readonly Dictionary<string, UploadState> _uploads = new Dictionary<string, UploadState>(StringComparer.OrdinalIgnoreCase);
-        private static readonly object _uploadLock = new object();
-
-        private static void OnUploadBegin(ServerClient client, KmhEnvelope env)
-        {
-            if (!IsAdmin(client)) { KmhRouter.Notify(client, "negative", "Publishing configs is admin-only."); return; }
-            int chunkCount = env?.GetInt("chunk_count", 0) ?? 0;
-            int totalBytes = env?.GetInt("total_bytes", 0) ?? 0;
-            // total_bytes is client-declared and sizes the buffer, so the declaration alone could demand gigabytes.
-            if (chunkCount <= 0 || chunkCount > MaxUploadChunks || totalBytes <= 0 || totalBytes > MaxUploadBytes)
-            {
-                KmhRouter.Notify(client, "negative", "Config upload rejected (bad size).");
-                return;
-            }
-            string user = client.GetData<UserFile>()?.Username ?? "?";
-            long now = DateTime.UtcNow.Ticks;
-            lock (_uploadLock)
-            {
-                PurgeStaleUploadsLocked(now);
-                _uploads[user] = new UploadState
-                {
-                    Hash            = env?.GetString("hash") ?? "",
-                    ChunkCount      = chunkCount,
-                    TotalBytes      = totalBytes,
-                    StartedUtcTicks = now,
-                };
-            }
-        }
-
-        // Caller holds _uploadLock.
-        private static void PurgeStaleUploadsLocked(long nowTicks)
-        {
-            List<string> stale = null;
-            foreach (KeyValuePair<string, UploadState> kv in _uploads)
-                if (kv.Value != null && nowTicks - kv.Value.StartedUtcTicks > UploadStaleAfter.Ticks)
-                    (stale ??= new List<string>()).Add(kv.Key);
-            if (stale == null) return;
-            foreach (string k in stale) _uploads.Remove(k);
-            ServerLog.Verbose($"Enforcement: dropped {stale.Count} abandoned config upload(s).");
-        }
-
-        private static void OnUploadChunk(ServerClient client, KmhEnvelope env)
-        {
-            if (!IsAdmin(client)) return;
-            string user = client.GetData<UserFile>()?.Username ?? "?";
-            int    idx  = env?.GetInt("index", -1) ?? -1;
-            string data = env?.GetString("data");
-            if (idx < 0 || data == null) return;
-            lock (_uploadLock)
-            {
-                if (!_uploads.TryGetValue(user, out UploadState st)) return;
-                // Bounded by the declared count, or Chunks grows past the cap meant to bound it.
-                if (idx >= st.ChunkCount) return;
-                try { st.Chunks[idx] = Convert.FromBase64String(data); } catch { }
-            }
-        }
-
-        private static void OnUploadEnd(ServerClient client, KmhEnvelope env)
-        {
-            if (!IsAdmin(client)) return;
-            string user = client.GetData<UserFile>()?.Username ?? "?";
-
-            UploadState st;
-            lock (_uploadLock) { _uploads.TryGetValue(user, out st); _uploads.Remove(user); PurgeStaleUploadsLocked(DateTime.UtcNow.Ticks); }
-            if (st == null) return;
-            if (st.Chunks.Count != st.ChunkCount)
-            {
-                KmhRouter.Notify(client, "negative", "Config upload incomplete - try Publish again.");
-                return;
-            }
-
-            try
-            {
-                byte[] all = new byte[st.TotalBytes];
-                int off = 0;
-                for (int i = 0; i < st.ChunkCount; i++)
-                {
-                    if (!st.Chunks.TryGetValue(i, out byte[] p)) { KmhRouter.Notify(client, "negative", "Upload missing a chunk."); return; }
-                    Buffer.BlockCopy(p, 0, all, off, p.Length);
-                    off += p.Length;
-                }
-
-                string computed = EnforcementProfile.Sha256Hex(all);
-                if (!string.IsNullOrEmpty(st.Hash) && !string.Equals(computed, st.Hash, StringComparison.OrdinalIgnoreCase))
-                {
-                    ServerLog.Warn($"Enforcement: upload hash mismatch from {user} (got {computed}, declared {st.Hash}).");
-                    KmhRouter.Notify(client, "negative", "Publish failed - the upload was corrupted. Try again.");
-                    return;
-                }
-
-                if (!EnforcementProfile.SetProfile(all, computed, DateTime.UtcNow.Ticks))
-                {
-                    KmhRouter.Notify(client, "negative", "Publish failed - the server couldn't save that profile. " +
-                                                         "The previous one is still active. Try again shortly.");
-                    return;
-                }
-                BroadcastSnapshot(); // new hash -> enforcing clients pull the profile
-
-                KmhRouter.Notify(client, "positive",
-                    $"Published the server config profile ({EnforcementProfile.FileCount} file(s), {all.Length / 1024} KB).");
-                ServerLog.Info($"Enforcement: {user} published the profile - {EnforcementProfile.FileCount} file(s), hash {EnforcementProfile.Hash}");
-            }
-            catch (Exception ex)
-            {
-                ServerLog.Warn($"Enforcement: upload assembly failed: {ex.Message}");
-                KmhRouter.Notify(client, "negative", "Publish failed - see the server log.");
-            }
+            EnforcementPublish.Register();
         }
 
         // Client-initiated, so a reconnecting client with a matching hash never re-downloads the profile.
         private static void OnProfileRequest(ServerClient client, KmhEnvelope env)
         {
+            if (EnforcementAdmission.IsHeld(client) && !EnforcementAdmission.Matches(client, env)) return;
             if (!EnforcementConfig.Current.Enabled || !EnforcementProfile.HasProfile) return;
+            // A client asks only when its copy differs, so the same profile again within minutes is no retry it needs;
+            // answering every request let any player have the server stream the whole profile on demand.
+            if (!MayPushTo(client, EnforcementProfile.Hash, DateTime.UtcNow))
+            {
+                ServerLog.Verbose($"Enforcement: repeat profile request from {client?.GetData<UserFile>()?.Username ?? "?"} ignored.");
+                return;
+            }
             ServerLog.Verbose($"Enforcement: profile requested by {client?.GetData<UserFile>()?.Username ?? "?"}");
             PushProfileTo(client);
+        }
+
+        internal static readonly TimeSpan RepushAfter = TimeSpan.FromMinutes(2);
+        private sealed class LastPush { public string Hash; public DateTime At; }
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<ServerClient, LastPush> _lastPush = new();
+
+        internal static bool MayPushTo(ServerClient client, string hash, DateTime now)
+        {
+            if (client == null) return false;
+            LastPush last = _lastPush.GetOrCreateValue(client);
+            lock (last)
+            {
+                if (last.Hash == hash && now - last.At < RepushAfter) return false;
+                last.Hash = hash; last.At = now;
+                return true;
+            }
         }
 
         private static void OnSetEnabled(ServerClient client, KmhEnvelope env)
@@ -196,7 +91,7 @@ namespace KMHServerAddon.Features.Enforcement
             }
         }
 
-        private static bool IsAdmin(ServerClient client) => client?.GetData<UserFile>()?.IsAdmin == true;
+        internal static bool IsAdmin(ServerClient client) => client?.GetData<UserFile>()?.IsAdmin == true;
 
         private static object BuildSnapshotPayload(ServerClient client)
         {
@@ -212,6 +107,10 @@ namespace KMHServerAddon.Features.Enforcement
                 has_profile      = EnforcementProfile.HasProfile,
                 profile_files    = EnforcementProfile.FileCount,
                 profile_hash     = EnforcementProfile.Hash,
+                profile_revision = EnforcementProfile.Revision,
+                // ModSync rides this snapshot so a client decides and applies both in one transaction.
+                mod_order        = Mods.ModProfile.Current.Order.ToArray(),
+                mod_order_hash   = Mods.ModProfile.Current.OrderHash,
             };
         }
 
@@ -220,6 +119,8 @@ namespace KMHServerAddon.Features.Enforcement
             if (client == null) return;
             KmhRouter.SendTo(client, KmhProtocol.Kind.EnforcementSnapshot, BuildSnapshotPayload(client));
         }
+
+        internal static void BroadcastSnapshotPublic() => BroadcastSnapshot();
 
         public static void BroadcastSnapshot()
         {
@@ -255,7 +156,7 @@ namespace KMHServerAddon.Features.Enforcement
                 {
                     int off = i * ChunkRawBytes;
                     int len = Math.Min(ChunkRawBytes, bytes.Length - off);
-                    // One refused chunk means the peer is gone; pushing the rest is thousands of failed writes and a profile nobody can assemble.
+                    // One refused chunk means the peer is gone; the rest would be thousands of failed writes for nothing.
                     if (!KmhRouter.SendTo(client, KmhProtocol.Kind.EnforcementProfileChunk, new
                     {
                         hash,

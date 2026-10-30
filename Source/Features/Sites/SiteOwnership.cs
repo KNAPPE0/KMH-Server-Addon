@@ -38,31 +38,44 @@ namespace KMHServerAddon.Features.Sites
                 && string.Equals(s.OwnerUsername, username, StringComparison.OrdinalIgnoreCase);
         }
 
-        // May this caller act as the site's owner? Guild sites answer from CURRENT membership, never a stored name.
+        // Guild sites answer from CURRENT membership, never a stored name.
         public static bool CanManage(SiteEntry s, string username)
         {
             if (s == null || string.IsNullOrEmpty(username)) return false;
             switch (KindOf(s))
             {
                 case SiteEntry.OwnerPlayer:    return IsOwnedBy(s, username);
+                // Membership of whichever guild holds the name is not enough: it must be the incarnation that took it.
                 case SiteEntry.OwnerGuildKind: return !string.IsNullOrEmpty(s.ControllingGuild)
                                                    && string.Equals(Guilds.GuildStore.CurrentGuildOf(username) ?? "",
-                                                                    s.ControllingGuild, StringComparison.OrdinalIgnoreCase);
+                                                                    s.ControllingGuild, StringComparison.OrdinalIgnoreCase)
+                                                   && SiteStore.GuildBindingIsLive(s);
                 default:                       return false;   // nobody manages a system or neutral outpost
             }
         }
 
-        // The guild whose quotas and perks this site consumes, derived live. Empty for system/neutral.
+        // Destructive or one-time changes: a guild site needs an officer or above, not just any member.
+        public static bool CanAdminister(SiteEntry s, string username)
+        {
+            if (!CanManage(s, username)) return false;
+            if (KindOf(s) != SiteEntry.OwnerGuildKind) return true;
+            return Guilds.GuildPermissions.Can(Guilds.GuildStore.RankOf(username), Guilds.GuildCapability.ManageSites);
+        }
+
+        // Derived live, never stored, so quotas and perks follow the guild that holds the site now.
         public static string OwningGuildLive(SiteEntry s)
         {
             if (s == null) return "";
             switch (KindOf(s))
             {
                 case SiteEntry.OwnerPlayer:    return Guilds.GuildStore.CurrentGuildOf(s.OwnerUsername) ?? "";
-                case SiteEntry.OwnerGuildKind: return s.ControllingGuild ?? "";
+                // An orphaned site consumes no guild's quota or perks, least of all a successor's that reused the name.
+                case SiteEntry.OwnerGuildKind: return SiteStore.GuildBindingIsLive(s) ? s.ControllingGuild ?? "" : "";
                 default:                       return "";
             }
         }
+
+        public static bool IsOrphanedGuildSite(SiteEntry s) => IsGuildOwned(s) && !SiteStore.GuildBindingIsLive(s);
 
         // Empty for a guild or system site, so per-player accounting never attributes one to a person.
         public static string PayoutAccount(SiteEntry s)

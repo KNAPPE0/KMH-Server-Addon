@@ -5,16 +5,16 @@ namespace KMHServerAddon.Transactions
     // One lifecycle for every economic action, so recovery and rollback never face a bespoke half-state per feature.
     internal enum KmhTxState
     {
-        Requested,   // client asked; nothing reserved yet
-        Validating,  // server checking balance/inventory/permission
-        Reserved,    // goods/silver escrowed out of the source, awaiting approval
-        Approved,    // validated and cleared to deliver
-        Delivered,   // handed to the destination (materialized in-colony / credited)
-        Confirmed,   // destination acknowledged receipt; the happy-path terminal
-        Rejected,    // failed validation before anything was reserved
-        Refunded,    // reserved goods returned to the source
-        Recovered,   // reconciled after a failure/rollback (e.g. re-credited or clawed back)
-        Failed,      // an error left it incomplete; needs refund or recovery
+        Requested,
+        Validating,
+        Reserved,
+        Approved,
+        Delivered,
+        Confirmed,
+        Rejected,
+        Refunded,
+        Recovered,
+        Failed,      // not terminal: still needs refund or recovery
         // Written down before the escrow is credited back, so a crash mid-refund resumes instead of guessing.
         Compensating,
     }

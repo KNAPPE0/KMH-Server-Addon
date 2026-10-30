@@ -5,7 +5,7 @@ namespace KMHServerAddon.Features.Chat
     // RimWorld has no glyph for Discord's markup, so left alone it reaches a player as literal characters.
     internal static class ChatDiscordText
     {
-        // KMH posts as "**name**: body", so a bot message in that shape is another bridge's echo of our own line.
+        // KMH posts as "**name**: body", so a bot message in that shape is another bridge's echo of a KMH line.
         private static readonly Regex RelayEcho = new Regex(@"^\*\*[^*\r\n]{1,64}\*\*:\s", RegexOptions.Compiled);
 
         internal static bool LooksLikeRelayEcho(string text)

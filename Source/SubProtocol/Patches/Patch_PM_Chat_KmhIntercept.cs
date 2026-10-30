@@ -11,9 +11,15 @@ namespace KMHServerAddon.SubProtocol.Patches
         private static readonly byte[] Marker = System.Text.Encoding.UTF8.GetBytes("[KMH-CLI]");
 
         [HarmonyPrefix]
-        private static bool Prefix(ServerClient client, byte[] bytes)
+        internal static bool Prefix(ServerClient client, byte[] bytes)
         {
-            if (bytes == null || IndexOf(bytes, Marker) < 0) return true; // not a KMH message - let RWT handle it
+            // RWT would relay it under that account's name, which clients take for the server's own.
+            if (Features.Moderation.BanGate.IsReservedName(client?.GetData<UserFile>()?.Username))
+            {
+                ServerLog.Warn("Dropped chat from an account named like Colony Nexus' own system name.");
+                return false;
+            }
+            if (bytes == null || IndexOf(bytes, Marker) < 0) return true;
 
             PKT_Chat pkt;
             try
@@ -22,13 +28,19 @@ namespace KMHServerAddon.SubProtocol.Patches
             }
             catch
             {
-                // Let RWT handle deserialization failures.
                 return true;
             }
 
             if (pkt == null || pkt.Username != KmhProtocol.ClientUsername)
             {
-                return true; // regular chat - defer to RWT
+                return true;
+            }
+
+            // Before login a connection has no identity, and every limiter and handler keys on one.
+            if (string.IsNullOrEmpty(client?.GetData<UserFile>()?.Username))
+            {
+                ServerLog.Verbose("Dropped Colony Nexus traffic from a connection that has not logged in.");
+                return false;
             }
 
             try
@@ -43,7 +55,7 @@ namespace KMHServerAddon.SubProtocol.Patches
             return false;
         }
 
-        // Naive byte-subsequence search; needle is tiny and the haystack is one chat packet, so this is plenty fast.
+        // Naive search is enough: the needle is tiny and the haystack is one chat packet.
         private static int IndexOf(byte[] hay, byte[] needle)
         {
             int end = hay.Length - needle.Length;

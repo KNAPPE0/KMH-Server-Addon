@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 
 namespace KMHServerAddon.Maintenance
 {
@@ -49,6 +49,25 @@ namespace KMHServerAddon.Maintenance
             }
         }
 
+        private static int _ownerHolds;
+
+        // The operator's own pause, counted apart: 'off' must never lift a hold a reset or a restore still needs.
+        public static void EnterOwner()
+        {
+            lock (_lock) { _ownerHolds++; Enter(KmhMaintenanceReason.OwnerMaintenance); }
+        }
+
+        public static bool ReleaseOwner()
+        {
+            lock (_lock)
+            {
+                if (_ownerHolds == 0) return false;
+                _ownerHolds--;
+                Release();
+                return true;
+            }
+        }
+
         // Always releases, even on exception, or a failed restore freezes the economy permanently.
         public static void Run(KmhMaintenanceReason reason, Action action)
         {
@@ -63,7 +82,7 @@ namespace KMHServerAddon.Maintenance
 
         public static bool ShouldBlock(string kind) => IsActive && WouldBlock(kind);
 
-        // For callers with no protocol kind (the SDK); admin commands are deliberately NOT gated - the operator needs to move value.
+        // For the SDK, which has no protocol kind; admin commands stay ungated on purpose so the operator can move value.
         public static bool BlocksValueMoves => IsActive;
 
         public static string Describe() => IsActive ? $"maintenance active ({Reason})" : "not in maintenance";

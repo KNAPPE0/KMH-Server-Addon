@@ -12,6 +12,8 @@ namespace KMHServerAddon.Diagnostics
         private const int  MaxLineChars     = 400;
         private const int  LinesPerMinute   = 300;
         private const long MaxFileBytes     = 10L * 1024 * 1024;
+        private const long MaxFolderBytes   = 256L * 1024 * 1024;
+        private const int  MaxSessionIdChars = 40;
         private const int  PruneOlderDays   = 14;
 
         private sealed class UserState
@@ -57,8 +59,34 @@ namespace KMHServerAddon.Diagnostics
             // A packet from a connection that is no longer the live one for this name must not write anywhere.
             if (!SubProtocol.KmhRouter.IsLive(client)) return;
 
-            try { Append(client, user, lines, push.SessionId ?? "", push.Sequence); }
+            try { Receive(client, user, lines, push.SessionId ?? "", push.Sequence); }
             catch (Exception ex) { ServerLog.Diag($"Client debug log ({user}): {ex.Message}"); }
+        }
+
+        // Only when this server asked for it: an upload nobody requested is disk a modified client fills at will.
+        internal static bool Receive(ServerClient client, string user, List<string> lines, string sessionId, long seq)
+        {
+            if (!Features.Transport.TransportConfig.Current.Advanced.DebugLogging) return false;
+            Append(client, user, lines, sessionId, seq);
+            return true;
+        }
+
+        // A per-session cap alone lets every reconnect add another file, so the folder is capped too, oldest first.
+        internal static void TrimFolder(string dir, long maxBytes)
+        {
+            try
+            {
+                FileInfo[] files = new DirectoryInfo(dir).GetFiles("*.txt");
+                long total = 0;
+                foreach (FileInfo f in files) total += f.Length;
+                Array.Sort(files, (x, y) => x.LastWriteTimeUtc.CompareTo(y.LastWriteTimeUtc));
+                foreach (FileInfo f in files)
+                {
+                    if (total <= maxBytes) break;
+                    try { long len = f.Length; f.Delete(); total -= len; } catch { }
+                }
+            }
+            catch { }
         }
 
         private static void Append(ServerClient client, string user, List<string> lines, string sessionId, long seq)
@@ -73,14 +101,15 @@ namespace KMHServerAddon.Diagnostics
                 {
                     string dir = Path.Combine(KmhDataPaths.Folder, "Debug");
                     Directory.CreateDirectory(dir);
-                    // The client's own session id, so its local log and this one name the same run without matching timestamps.
+                    TrimFolder(dir, MaxFolderBytes);
+                    // The client's own session id, so its local log and this one name the same run.
                     string stamp = string.IsNullOrEmpty(sessionId)
                         ? DateTime.UtcNow.ToString("yyyyMMdd-HHmmss")
-                        : Sanitize(sessionId);
+                        : Sanitize(sessionId.Length > MaxSessionIdChars ? sessionId.Substring(0, MaxSessionIdChars) : sessionId);
                     s = new UserState { Path = Path.Combine(dir, $"{Sanitize(user)}_{stamp}.txt") };
                     _sessions.Add(client, s);
                     File.AppendAllText(s.Path,
-                        $"# KMH client debug log for {user} - session opened {DateTime.UtcNow:o} (server {KmhServerIdentity.Name}, build {SubProtocol.KmhProtocol.BuildVersion}, client session {(string.IsNullOrEmpty(sessionId) ? "unknown" : sessionId)}){Environment.NewLine}");
+                        $"# Colony Nexus client debug log for {user} - session opened {DateTime.UtcNow:o} (server {KmhServerIdentity.Name}, build {SubProtocol.KmhProtocol.BuildVersion}, client session {(string.IsNullOrEmpty(sessionId) ? "unknown" : sessionId)}){Environment.NewLine}");
                     ServerLog.Info($"Client debug log: receiving from {user} -> {Path.GetFileName(s.Path)}");
                 }
 
@@ -109,7 +138,7 @@ namespace KMHServerAddon.Diagnostics
                             s.CapWarned = true;
                             // Written into the file itself, or a reader cannot tell a truncated session from a short one.
                             bool sizeCap = s.Bytes >= MaxFileBytes;
-                            sb.AppendLine("--- KMH DEBUG UPLOAD TRUNCATED ---");
+                            sb.AppendLine("--- COLONY NEXUS DEBUG UPLOAD TRUNCATED ---");
                             sb.AppendLine($"Reason       : {(sizeCap ? "per-session size limit reached" : "per-minute line rate exceeded")}");
                             sb.AppendLine($"AcceptedBytes: {s.Bytes}");
                             sb.AppendLine($"TimestampUtc : {DateTime.UtcNow:o}");

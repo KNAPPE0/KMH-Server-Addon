@@ -40,6 +40,6 @@ namespace KMHServerAddon.Features.Sites.Dto
         // Set by the SERVER after classification, never accepted from the wire.
         [JsonIgnore] public string Family { get; set; } = SiteOutputFamilies.Unknown;
         [JsonIgnore] public string Skill  { get; set; } = "";
-        [JsonIgnore] public string Source { get; set; } = "";   // classifier | override | extension
+        [JsonIgnore] public string Source { get; set; } = "";
     }
 }

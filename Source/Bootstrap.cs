@@ -20,6 +20,8 @@ namespace KMHServerAddon
             if (Environment.GetEnvironmentVariable(ReExecMarker) != "1")
                 return ReExecWithR2RDisabled(args);
 
+            Maintenance.KmhParentWatch.Start(Environment.GetEnvironmentVariable(Maintenance.KmhParentWatch.ParentVar), LauncherGone);
+
             string dir = AppContext.BaseDirectory;
             string cache = Path.Combine(dir, ".rwt-runtime");
 
@@ -103,18 +105,33 @@ namespace KMHServerAddon
         {
             TextWriter w = Console.Error;
             w.WriteLine();
-            w.WriteLine($"{Constants.LogPrefix} This RimWorld Together release is older than KMH supports.");
+            w.WriteLine($"{Constants.LogPrefix} This RimWorld Together release is older than Colony Nexus supports.");
             w.WriteLine();
-            w.WriteLine($"  Its TCPNetwork.dll has no {OldGenerationProbeType}, which KMH patches on every");
+            w.WriteLine($"  Its TCPNetwork.dll has no {OldGenerationProbeType}, which Colony Nexus patches on every");
             w.WriteLine("  connection. RWT moved that type after 26.4.18.1, so 26.5.24.1 is the oldest release");
-            w.WriteLine("  KMH v1.3.0 runs on.");
+            w.WriteLine($"  Colony Nexus v{KmhVersion.Build} runs on.");
             w.WriteLine();
-            w.WriteLine("  Nothing has been patched and no KMH data has been touched. Update RimWorld Together");
+            w.WriteLine("  Nothing has been patched and no Colony Nexus data has been touched. Update RimWorld Together");
             w.WriteLine("  to 26.5.24.1 or newer and start the addon again.");
+            WaitForEnter(w);
+        }
+
+        // A double-clicked window must not close before the refusal above it can be read.
+        private static void WaitForEnter(TextWriter w)
+        {
             w.WriteLine();
-            // Same as the other two refusals: a double-clicked window must not close before this can be read.
             w.WriteLine("Press Enter to exit...");
             try { Console.ReadLine(); } catch { }
+        }
+
+        private static void WriteBanner(TextWriter w, string title)
+        {
+            string line = new string('=', 70);
+            w.WriteLine();
+            w.WriteLine(line);
+            w.WriteLine(title);
+            w.WriteLine(line);
+            w.WriteLine();
         }
 
         private static int RunPayload(string[] args, string resource, string what)
@@ -144,6 +161,18 @@ namespace KMHServerAddon
             }
         }
 
+        private static Process _server;
+
+        // A stop sent to the launcher alone is passed on, so the server saves instead of being killed with it.
+        private static void OnLauncherExit(object sender, EventArgs e) => Maintenance.KmhParentWatch.ForwardStop(_server);
+
+        // The copy that is the real server: its launcher is what was stopped, so stop the same way a close would.
+        private static void LauncherGone()
+        {
+            Console.WriteLine($"{Constants.LogPrefix} The launcher that started this server has exited - stopping the server.");
+            Environment.Exit(0);
+        }
+
         private static int ReExecWithR2RDisabled(string[] args)
         {
             try
@@ -154,7 +183,10 @@ namespace KMHServerAddon
                 psi.Environment[ReExecMarker]      = "1";
                 psi.Environment["DOTNET_ReadyToRun"] = "0";   // force IL JIT so MonoMod can patch RWT
                 psi.Environment["DOTNET_TieredPGO"]  = "0";
+                Maintenance.KmhParentWatch.MarkChild(psi);
                 using Process proc = Process.Start(psi);
+                _server = proc;
+                AppDomain.CurrentDomain.ProcessExit += OnLauncherExit;
                 proc.WaitForExit();
                 return proc.ExitCode;
             }
@@ -182,13 +214,8 @@ namespace KMHServerAddon
 
         private static void PrintRuntimeProblem(RwtDiscovery.Result found)
         {
-            string line = new string('=', 70);
             var w = Console.Error;
-            w.WriteLine();
-            w.WriteLine(line);
-            w.WriteLine("  KMH Server Addon - RimWorld Together found, but its .NET runtime is missing");
-            w.WriteLine(line);
-            w.WriteLine();
+            WriteBanner(w, $"  {Constants.DisplayName} - RimWorld Together found, but its .NET runtime is missing");
             w.WriteLine("The RimWorld Together server IS present - this is not a missing-server problem.");
             w.WriteLine();
             w.WriteLine($"  folder: {found.Directory}");
@@ -198,23 +225,16 @@ namespace KMHServerAddon
             w.WriteLine();
             w.WriteLine("Slim RimWorld Together downloads do not bundle .NET - the runtime has to be");
             w.WriteLine("installed on the host: https://dotnet.microsoft.com/download");
-            w.WriteLine();
-            w.WriteLine("Press Enter to exit...");
-            try { Console.ReadLine(); } catch { }
+            WaitForEnter(w);
         }
 
         // Separates "no server here" from "server here but unusable" - the two have different fixes.
         private static void PrintNeedServer(RwtDiscovery.Result found)
         {
-            string line = new string('=', 70);
             var w = Console.Error;
-            w.WriteLine();
-            w.WriteLine(line);
-            w.WriteLine(found.SelectedExe == null
-                ? "  KMH Server Addon - no RimWorld Together server found"
-                : "  KMH Server Addon - found the server, but could not start it");
-            w.WriteLine(line);
-            w.WriteLine();
+            WriteBanner(w, found.SelectedExe == null
+                ? $"  {Constants.DisplayName} - no RimWorld Together server found"
+                : $"  {Constants.DisplayName} - found the server, but could not start it");
             w.WriteLine("Folder searched:");
             w.WriteLine($"  {found.Directory}");
             w.WriteLine();
@@ -243,12 +263,12 @@ namespace KMHServerAddon
                 }
                 else
                 {
-                    w.WriteLine("Its assemblies loaded, but the set doesn't match any RWT generation KMH knows:");
+                    w.WriteLine("Its assemblies loaded, but the set doesn't match any RWT generation Colony Nexus knows:");
                     w.WriteLine($"  expected {RwtDiscovery.ServerDllOld} or {RwtDiscovery.ServerDllRt}, plus either");
                     w.WriteLine("  RTShared.dll + RTNetwork.dll (26.6.x) or Shared.dll + TCPNetwork.dll (26.5.x).");
                     w.WriteLine($"  Present in {Path.GetFileName(found.CacheDir)}: {DescribeCache(found.CacheDir)}");
                     w.WriteLine();
-                    w.WriteLine("  This usually means a newer RWT release than this KMH build supports.");
+                    w.WriteLine("  This usually means a newer RWT release than this Colony Nexus build supports.");
                 }
                 w.WriteLine();
                 w.WriteLine("If the extraction itself looks damaged (a half-full disk will do it): stop the");
@@ -257,19 +277,17 @@ namespace KMHServerAddon
             }
             else
             {
-                w.WriteLine("KMH runs on top of RimWorld Together - it does not include it");
+                w.WriteLine("Colony Nexus runs on top of RimWorld Together - it does not include it");
                 w.WriteLine("(RWT's license forbids redistributing it). Put the official RimWorld");
                 w.WriteLine("Together server executable in the folder above, next to KMHServerAddon.exe,");
                 w.WriteLine("then run KMHServerAddon.exe (NOT the RWT server). Needs the .NET 8 runtime.");
                 w.WriteLine();
-                w.WriteLine("Hosting panel locked to ./GameServer? Rename KMH to GameServer and the real");
-                w.WriteLine("RWT server to GameServer.rwt - KMH identifies the server by its contents, so");
+                w.WriteLine("Hosting panel locked to ./GameServer? Rename the addon to GameServer and the real");
+                w.WriteLine("RWT server to GameServer.rwt - Colony Nexus identifies the server by its contents, so");
                 w.WriteLine("it will not pick itself.");
             }
 
-            w.WriteLine();
-            w.WriteLine("Press Enter to exit...");
-            try { Console.ReadLine(); } catch { }
+            WaitForEnter(w);
         }
 
         private static string DescribeCache(string cache)

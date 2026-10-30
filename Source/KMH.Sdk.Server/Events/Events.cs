@@ -1,6 +1,6 @@
 namespace KMH.Sdk.Server.Events
 {
-    /// <summary>Event payloads KMH never mutates after raising, so a handler may keep a reference.</summary>
+    // Event payloads are never mutated after raising, so a handler may keep a reference.
 
     public sealed class PlayerJoinedEvent
     {
@@ -137,7 +137,7 @@ namespace KMH.Sdk.Server.Events
         public long   AuctionId       { get; init; }
         public string BidderUsername  { get; init; } = "";
         public long   Amount          { get; init; }
-        public string OutbidUsername  { get; init; } = "";   // previous high bidder we refunded, empty if first bid
+        public string OutbidUsername  { get; init; } = "";   // the refunded previous high bidder, empty on a first bid
     }
 
     public sealed class AuctionSettledEvent
@@ -236,10 +236,8 @@ namespace KMH.Sdk.Server.Events
         public int    AttachedGear    { get; init; }      // full-state payloads
     }
 
-    /// <summary>
-    /// A chat line was accepted. Channel is "server", "guild:&lt;name&gt;" or "dm:&lt;lo&gt;|&lt;hi&gt;", and Origin
-    /// is "ingame" or "discord". Private bodies are included, as they already are in the owner's own chat log.
-    /// </summary>
+    /// <summary>A chat line was accepted; private bodies are included, as they already are in the owner's chat log.</summary>
+    /// <remarks>Channel is "server", "guild:&lt;name&gt;" or "dm:&lt;lo&gt;|&lt;hi&gt;"; Origin is "ingame" or "discord".</remarks>
     public sealed class ChatMessagePostedEvent
     {
         public long   MessageId    { get; init; }

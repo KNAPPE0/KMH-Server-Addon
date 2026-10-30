@@ -17,13 +17,16 @@ Config/. The addon creates the rest on first run:
     Enforcement.json   config-enforcement state + safe-mods list
     World.json         global event / quest scheduler tuning
     Maintenance.json   automatic-backup + boot integrity-scan settings
-    Transport.json     KMH API transport (port, auth, client debug uplink)
+    Transport.json     KMH API transport (port, auth, client debug uplink); limits in Advanced
     Features.json      turn whole systems on/off
     Chat.json          KMH chat retention, rate limits, image/video policy
     Mail.json          player mail limits + optional attachment fee
+    Federation.json    Guild Federation on this server - local bonus ceilings, objective rewards
     Media.json         chat media resolver + cache limits
-    Staff.json         owner/admin/moderator lists, badges, colours
-    Policies.json      resolved policy snapshot (written by KMH, not hand-edited)
+    Mods.json          which listed mods are required or optional, and the RimWorld version (RimWorldVersion)
+    Global.json        Colony Nexus Global - directory settings and the Listing block (kept on upgrade)
+    Staff.json         owner/admin/moderator lists; each role's badge label and colour under Badges
+    Policies.json      overrides set with 'kmh policy' (written by KMH only while one exists)
     Discord/DiscordConfig.json   OPTIONAL Discord bridge config (see below)
 
   'kmh config' prints every area and what you have changed from default;
@@ -44,6 +47,7 @@ Config/. The addon creates the rest on first run:
   Mail/          player mail + escrowed attachments
   Chat/          KMH chat history
   ChatModeration/ per-player block lists
+  Moderation/    bans, network bans, and EconomyGuard.json (freezes, deposit-limit allowances, the day's deposits)
   Notifications/ queued letters for offline players
   Delivery/      outbound goods waiting on a client to confirm
   Recovery/      value held for an operator when it could not be credited
@@ -61,6 +65,9 @@ Config/. The addon creates the rest on first run:
   MediaCache/    converted chat media - regenerable, wiped every boot
   Snapshots/     operator snapshots ('kmh snapshot-*')
   Debug/         diagnostic logs, including client debug uplink
+  Reports/       bug reports and suggestions players sent ('kmh reports'), newest 300 for 90 days
+  Identity/      this server's signing key, Global setup progress and what Global assigned (global-state.json).
+                 Keep it in backups; never share it.
   extensions/    per-extension storage (one subfolder each)
 
 

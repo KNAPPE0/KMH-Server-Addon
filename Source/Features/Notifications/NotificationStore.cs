@@ -11,8 +11,17 @@ namespace KMHServerAddon.Features.Notifications
         private static readonly Dictionary<string, List<NotificationDto>> _byUser
             = new Dictionary<string, List<NotificationDto>>(StringComparer.OrdinalIgnoreCase);
 
-        // Keep the newest N per user so a long-absent player with a busy market can't grow the file unbounded.
+        // Bounded deliberately: the notice is lost, never the goods, which live in Treasury, Mail and Recovery.
         private const int MaxPerUser = 50;
+
+        private static void TrimLocked(string user, List<NotificationDto> list)
+        {
+            int over = list.Count - MaxPerUser;
+            if (over <= 0) return;
+            list.RemoveRange(0, over);
+            Diagnostics.ServerLog.Warn($"Notifications: {user} is at the {MaxPerUser}-notice cap - dropped the "
+                                     + $"{over} oldest. They are still reachable in-game; only the notice is gone.");
+        }
 
         private sealed class PersistedState
         {
@@ -23,14 +32,23 @@ namespace KMHServerAddon.Features.Notifications
         public static void LoadFromDisk()
         {
             if (!JsonFileStore.TryLoad(KmhDataPaths.NotificationsFile, out PersistedState s) || s?.Users == null) return;
+            int stamped = 0;
             lock (_lock)
             {
                 _byUser.Clear();
                 foreach (KeyValuePair<string, List<NotificationDto>> kv in s.Users)
-                    if (!string.IsNullOrEmpty(kv.Key) && kv.Value != null && kv.Value.Count > 0)
-                        _byUser[kv.Key] = new List<NotificationDto>(kv.Value);
+                {
+                    if (string.IsNullOrEmpty(kv.Key) || kv.Value == null || kv.Value.Count == 0) continue;
+                    // Notices from older builds carry no id, and an unacknowledgeable one never leaves the queue.
+                    foreach (NotificationDto n in kv.Value)
+                        if (n != null && string.IsNullOrEmpty(n.Id)) { n.Id = Guid.NewGuid().ToString("N"); stamped++; }
+                    _byUser[kv.Key] = new List<NotificationDto>(kv.Value);
+                }
             }
-            Diagnostics.ServerLog.Info($"Notifications: loaded queued notices for {s.Users.Count} user(s)");
+            // Written back immediately, or the same notice gets a different id on the next boot and can never be acked.
+            if (stamped > 0 && SaveToDisk())
+                Diagnostics.ServerLog.Info($"Notifications: gave {stamped} notice(s) from an older build a stable id");
+            Diagnostics.ServerLog.Diag($"Notifications: loaded queued notices for {s.Users.Count} user(s)");
         }
 
         public static void ClearForNewSeason()
@@ -53,7 +71,7 @@ namespace KMHServerAddon.Features.Notifications
             PersistedState s = new PersistedState();
             lock (_lock)
                 foreach (KeyValuePair<string, List<NotificationDto>> kv in _byUser)
-                    s.Users[kv.Key] = new List<NotificationDto>(kv.Value);
+                    s.Users[kv.Key] = KmhDeepCopy.OfList(kv.Value);
             return JsonFileStore.Save(KmhDataPaths.NotificationsFile, s);
         }
 
@@ -69,12 +87,14 @@ namespace KMHServerAddon.Features.Notifications
                 }
                 list.Add(new NotificationDto
                 {
+                    // Assigned once, here: an ack and the client's dedupe both name this, so it must survive a reload.
+                    Id       = Guid.NewGuid().ToString("N"),
                     Tone     = string.IsNullOrEmpty(tone) ? "neutral" : tone,
                     Title    = title ?? "",
                     Body     = body ?? "",
                     UtcTicks = DateTime.UtcNow.Ticks,
                 });
-                if (list.Count > MaxPerUser) list.RemoveRange(0, list.Count - MaxPerUser);
+                TrimLocked(user, list);
             }
             SaveToDisk();
         }
@@ -104,6 +124,22 @@ namespace KMHServerAddon.Features.Notifications
             return outList;
         }
 
+        // Removes only what the client said it holds: a possible duplicate is the price of never losing one.
+        public static int AckDelivered(string user, List<string> ids)
+        {
+            if (string.IsNullOrEmpty(user) || ids == null || ids.Count == 0) return 0;
+            var wanted = new HashSet<string>(ids, System.StringComparer.Ordinal);
+            int removed;
+            lock (_lock)
+            {
+                if (!_byUser.TryGetValue(user, out List<NotificationDto> list) || list == null) return 0;
+                removed = list.RemoveAll(n => n != null && !string.IsNullOrEmpty(n.Id) && wanted.Contains(n.Id));
+                if (list.Count == 0) _byUser.Remove(user);
+            }
+            if (removed > 0) SaveToDisk();
+            return removed;
+        }
+
         // Drained notices are older than anything queued since, so they go back at the front.
         public static void Restore(string user, List<NotificationDto> notices)
         {
@@ -116,7 +152,7 @@ namespace KMHServerAddon.Features.Notifications
                     _byUser[user] = list;
                 }
                 list.InsertRange(0, notices);
-                if (list.Count > MaxPerUser) list.RemoveRange(0, list.Count - MaxPerUser);
+                TrimLocked(user, list);
             }
             // The drain already took these off disk, so a failed re-queue is a real loss, not a delivery.
             if (!SaveToDisk())

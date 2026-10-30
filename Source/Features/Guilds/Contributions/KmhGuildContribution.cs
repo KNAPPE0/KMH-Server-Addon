@@ -10,14 +10,14 @@ namespace KMHServerAddon.Features.Guilds.Contributions
         [JsonProperty("id")]         public string Id            { get; set; } = "";
         [JsonProperty("guild")]      public string GuildId       { get; set; } = "";
         [JsonProperty("player")]     public string PlayerId      { get; set; } = "";
-        [JsonProperty("tx")]         public string TransactionId { get; set; } = "";   // links to the unified ledger when present
+        [JsonProperty("tx")]         public string TransactionId { get; set; } = "";
         [JsonProperty("type")]       public KmhContributionType Type { get; set; }
         [JsonProperty("silver")]     public long   SilverValue   { get; set; } = 0;
-        [JsonProperty("item_value")] public long   ItemValue     { get; set; } = 0;    // market value of a contributed item
-        [JsonProperty("item")]       public string ItemPayload   { get; set; } = "";   // optional describe/fingerprint of the item
+        [JsonProperty("item_value")] public long   ItemValue     { get; set; } = 0;
+        [JsonProperty("item")]       public string ItemPayload   { get; set; } = "";
         [JsonProperty("utc")]        public string TimestampUtc  { get; set; } = "";
         [JsonProperty("save_gen")]   public long   SaveGeneration { get; set; } = 0;
-        [JsonProperty("reverses")]   public string ReversalOfId  { get; set; } = "";   // Return/Adjustment: the record it undoes
-        [JsonProperty("reason")]     public string Reason        { get; set; } = "";   // owner adjustment reason
+        [JsonProperty("reverses")]   public string ReversalOfId  { get; set; } = "";
+        [JsonProperty("reason")]     public string Reason        { get; set; } = "";
     }
 }

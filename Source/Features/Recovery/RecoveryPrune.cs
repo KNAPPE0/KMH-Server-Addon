@@ -14,7 +14,7 @@ namespace KMHServerAddon.Features.Recovery
         public static bool IsHeld(RecoveryRecord r)
             => r != null && string.Equals(r.Status, StatusHeld, StringComparison.OrdinalIgnoreCase);
 
-        // Written before the value moves and cleared after, so this state at boot means interrupted: neither re-deliverable nor forgettable.
+        // Written before the value moves and cleared after, so at boot it means interrupted: not re-deliverable, not forgettable.
         public static bool IsDelivering(RecoveryRecord r)
             => r != null && string.Equals(r.Status, StatusDelivering, StringComparison.OrdinalIgnoreCase);
 

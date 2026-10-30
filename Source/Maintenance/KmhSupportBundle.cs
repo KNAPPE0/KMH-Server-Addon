@@ -58,11 +58,10 @@ namespace KMHServerAddon.Maintenance
             }
         }
 
-        // The questions a support reply always has to ask first: was it running, could it write, was it mid-reset.
         internal static string Health()
         {
             var sb = new StringBuilder();
-            sb.AppendLine("=== KMH health ===");
+            sb.AppendLine("=== Colony Nexus health ===");
             sb.AppendLine($"Readiness   : {KmhReadiness.Describe()}");
             sb.AppendLine($"Persistence : {Persistence.JsonFileStore.DescribeHealth()}");
             sb.AppendLine($"Maintenance : {KmhMaintenanceGate.Describe()}");
@@ -95,8 +94,8 @@ namespace KMHServerAddon.Maintenance
         }
 
         private static string Readme() =>
-            "KMH support bundle\r\n\r\n"
-          + "Diagnostic snapshot for reporting a KMH problem. Configs and logs here have been passed through KMH's\r\n"
+            "Colony Nexus support bundle\r\n\r\n"
+          + "Diagnostic snapshot for reporting a Colony Nexus problem. Configs and logs here have been passed through the Colony Nexus\r\n"
           + "redaction: bot tokens, API tokens, webhooks, passwords and similar values are replaced with "
           + KmhRedact.Mask + ".\r\n\r\n"
           + "Not included: executables, backups, media cache, Workshop content, save data, full chat history.\r\n";
@@ -104,7 +103,7 @@ namespace KMHServerAddon.Maintenance
         private static string Identity()
         {
             var sb = new StringBuilder();
-            sb.AppendLine($"KMH build           : {KmhVersion.Build}");
+            sb.AppendLine($"Colony Nexus build  : {KmhVersion.Build}");
             sb.AppendLine($"Protocol version    : {SubProtocol.KmhProtocol.CurrentVersion}");
             sb.AppendLine($"Config schema       : {KmhVersion.ConfigSchema}");
             sb.AppendLine($"Data schema         : {KmhVersion.DataSchema}");
@@ -127,10 +126,10 @@ namespace KMHServerAddon.Maintenance
                 foreach (string d in Features.FeaturesConfig.Current.DisabledList()) sb.AppendLine($"  DISABLED {d}");
                 sb.AppendLine("Subsystems:");
                 sb.AppendLine($"  Frontier            : {Features.Frontier.FrontierConfig.Current.Enabled}");
-                sb.AppendLine($"  Media resolver      : {Features.Media.MediaConfig.Current.ServerMediaResolverEnabled}");
+                sb.AppendLine($"  Media resolver      : {Features.Media.MediaConfig.Current.Images.ResolverEnabled}");
                 sb.AppendLine($"  Chat image previews : {Features.Chat.ChatConfig.Current.AllowImagePreviews}");
                 sb.AppendLine($"  Staff badges        : {Features.Identity.StaffConfig.Current.ShowStaffBadges}");
-                sb.AppendLine($"  Site archetypes     : {Features.Sites.SitesConfig.Current.ArchetypesEnabled}");
+                sb.AppendLine($"  Site archetypes     : {Features.Sites.SitesConfig.Current.Archetypes.Enabled}");
             }
             catch (Exception ex) { sb.AppendLine("  (unavailable: " + ex.Message + ")"); }
             return sb.ToString();
@@ -149,8 +148,8 @@ namespace KMHServerAddon.Maintenance
                 sb.AppendLine($"Personal access    : {p.PersonalAccess}");
                 sb.AppendLine($"Guild access       : {p.GuildAccess}");
                 sb.AppendLine($"Blocked in raid    : {p.BlockDuringRaid}");
-                sb.AppendLine($"Max silver / tx    : {Features.Economy.EconomyConfig.Current.MaxSilverDepositPerTx}");
-                sb.AppendLine($"Max items / tx     : {Features.Economy.EconomyConfig.Current.MaxItemDepositQtyPerTx}");
+                sb.AppendLine($"Max silver / tx    : {Features.Economy.EconomyConfig.Current.Treasury.MaxSilverDepositPerTx}");
+                sb.AppendLine($"Max items / tx     : {Features.Economy.EconomyConfig.Current.Treasury.MaxItemDepositQtyPerTx}");
             }
             catch (Exception ex) { sb.AppendLine("(unavailable: " + ex.Message + ")"); }
             return sb.ToString();
@@ -177,17 +176,11 @@ namespace KMHServerAddon.Maintenance
             {
                 string dir = Path.Combine(Master.MainPath ?? Directory.GetCurrentDirectory(), "Logs", "System");
                 if (!Directory.Exists(dir)) return;
-
-                var files = new List<FileInfo>(new DirectoryInfo(dir).GetFiles("*.txt"));
-                files.Sort((a, b) => b.LastWriteTimeUtc.CompareTo(a.LastWriteTimeUtc));
-
-                for (int i = 0; i < files.Count && i < MaxLogFiles; i++)
-                    Write(zip, "logs/" + files[i].Name, KmhRedact.Text(Tail(files[i].FullName, MaxLogBytes)));
+                AddNewestTails(zip, dir, "*.txt", "logs/");
             }
             catch (Exception ex) { ServerLog.Warn($"Support bundle: logs skipped - {ex.Message}"); }
         }
 
-        // KMH's own diagnostics, which hold the routine detail the console never shows.
         private static void AddKmhDiagnostics(ZipArchive zip)
         {
             try
@@ -195,14 +188,18 @@ namespace KMHServerAddon.Maintenance
                 Diagnostics.KmhLogSink.FlushForTest();   // whatever is queued belongs in the bundle too
                 string dir = KmhDataPaths.DebugDir;
                 if (!Directory.Exists(dir)) return;
-
-                var files = new List<FileInfo>(new DirectoryInfo(dir).GetFiles("KMH-*.log"));
-                files.Sort((a, b) => b.LastWriteTimeUtc.CompareTo(a.LastWriteTimeUtc));
-
-                for (int i = 0; i < files.Count && i < MaxLogFiles; i++)
-                    Write(zip, "kmh-diagnostics/" + files[i].Name, KmhRedact.Text(Tail(files[i].FullName, MaxLogBytes)));
+                AddNewestTails(zip, dir, "KMH-*.log", "kmh-diagnostics/");
             }
-            catch (Exception ex) { ServerLog.Warn($"Support bundle: KMH diagnostics skipped - {ex.Message}"); }
+            catch (Exception ex) { ServerLog.Warn($"Support bundle: Colony Nexus diagnostics skipped - {ex.Message}"); }
+        }
+
+        private static void AddNewestTails(ZipArchive zip, string dir, string pattern, string folder)
+        {
+            var files = new List<FileInfo>(new DirectoryInfo(dir).GetFiles(pattern));
+            files.Sort((a, b) => b.LastWriteTimeUtc.CompareTo(a.LastWriteTimeUtc));
+
+            for (int i = 0; i < files.Count && i < MaxLogFiles; i++)
+                Write(zip, folder + files[i].Name, KmhRedact.Text(Tail(files[i].FullName, MaxLogBytes)));
         }
 
         private static string Tail(string path, int maxBytes)

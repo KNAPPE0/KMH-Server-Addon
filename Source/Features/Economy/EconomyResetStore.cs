@@ -14,7 +14,7 @@ namespace KMHServerAddon.Features.Economy
         private static Dictionary<string, long> _lastResetUtc
             = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
 
-        // A modified client can claim a fresh save at will, so the id is only evidence - this is the rate the server acts on it.
+        // A modified client can claim a fresh save at will, so the id is only evidence and acting on it is rate-limited.
         public const int MinHoursBetweenResets = 6;
 
         private sealed class State
@@ -46,7 +46,7 @@ namespace KMHServerAddon.Features.Economy
             return JsonFileStore.Save(KmhDataPaths.SaveIdsFile, s);
         }
 
-        // The stored id is NOT advanced here - only when the reset completes, or a crash mid-reset strands the work unfinished.
+        // The stored id is NOT advanced here, or a crash mid-reset strands the work unfinished.
         public static bool ShouldReset(string username, string saveId, out string reason)
         {
             reason = null;
@@ -74,22 +74,23 @@ namespace KMHServerAddon.Features.Economy
         }
 
         // Called by the reset operation once its destructive work is done, so the id and the state agree.
-        internal static void ConfirmReset(string username, string saveId)
+        internal static bool ConfirmReset(string username, string saveId)
         {
-            if (string.IsNullOrEmpty(username)) return;
+            if (string.IsNullOrEmpty(username)) return true;
             lock (_lock)
             {
                 if (!string.IsNullOrEmpty(saveId)) _lastSaveId[username] = saveId;
                 _lastResetUtc[username] = DateTime.UtcNow.Ticks;
             }
-            SaveToDisk();
+            return SaveToDisk();
         }
 
-        // With no history to compare against, the next save id is a first sighting rather than a change that wipes them again.
-        internal static void Forget(string username)
+        // With no history, the next save id is a first sighting rather than a change that wipes them again.
+        internal static bool Forget(string username)
         {
-            if (string.IsNullOrEmpty(username)) return;
+            if (string.IsNullOrEmpty(username)) return true;
             lock (_lock) { _lastSaveId.Remove(username); _lastResetUtc.Remove(username); }
+            return SaveToDisk();
         }
     }
 }

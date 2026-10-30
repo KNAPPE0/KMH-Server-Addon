@@ -6,7 +6,7 @@ namespace KMHServerAddon.Features.Auctions.Dto
     // JsonProperty names and defaults must stay identical to the patch mod's mirror of this DTO.
     public class AuctionSnapshot
     {
-        // Monotonic under the store lock: two transports can deliver snapshots out of order, and the client drops the older one.
+        // Monotonic under the store lock: transports can deliver out of order, so the client drops the older snapshot.
         [JsonProperty("revision")] public long Revision { get; set; } = 0;
         [JsonProperty("auctions")] public List<AuctionDto> Auctions { get; set; } = new List<AuctionDto>();
     }
@@ -32,6 +32,8 @@ namespace KMHServerAddon.Features.Auctions.Dto
 
         // Persisted but stripped from the wire, since an item's full state is nobody else's business.
         [JsonProperty("escrow_payloads")]     public List<Items.KmhThingPayload> EscrowPayloads { get; set; }
+        // The post row that funded it, so boot recovery can see the goods are held here. Stripped from the wire.
+        [JsonProperty("post_tx", NullValueHandling = NullValueHandling.Ignore)] public string PostTxId { get; set; }
         [JsonProperty("state_fingerprint")]   public string StateFingerprint  { get; set; } = "";
         [JsonProperty("state_note")]          public string StateNote         { get; set; } = "";
 

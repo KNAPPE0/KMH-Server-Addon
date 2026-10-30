@@ -1,8 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
-using Discord;
-using Discord.WebSocket;
+using Kmh.Discord.Wire;
 using KMHServerAddon.Diagnostics;
 using KMHServerAddon.Features.ItemLabels;
 using KMHServerAddon.Features.LinkedAccounts;
@@ -16,7 +15,7 @@ namespace KMHServerAddon.Features.Discord
         // Matches the in-game cap, without which qty times unitPrice can overflow int and corrupt a treasury move.
         private const int MaxBuyQty = 10_000;
 
-        public static async Task<bool> TryHandleAsync(SocketMessage raw, string cmd, string[] parts)
+        public static async Task<bool> TryHandleAsync(KmhDiscordMessage raw, string cmd, string[] parts)
         {
             switch (cmd)
             {
@@ -35,7 +34,7 @@ namespace KMHServerAddon.Features.Discord
             }
         }
 
-        private static async Task HandleBuy(SocketMessage raw, string[] parts)
+        private static async Task HandleBuy(KmhDiscordMessage raw, string[] parts)
         {
             string caller = RequireLinkedAsync(raw, out string error);
             if (caller == null)
@@ -88,15 +87,20 @@ namespace KMHServerAddon.Features.Discord
                 return;
             }
 
-            if (!Maintenance.KmhAdmission.AllowsPlayerFeature(Maintenance.KmhIngress.Discord, "marketplace", out string blocked))
-            {
-                await raw.Channel.SendMessageAsync(blocked).ConfigureAwait(false);
-                return;
-            }
-
             try
             {
-                if (!MarketplaceStore.Buy(caller, listingId, qty, out string sellerUsername, out boughtQty, out int paidSilver))
+                // Counted for the purchase, so a reset or backup that closes the gate waits for it or refuses it.
+                bool bought;
+                string sellerUsername = null, blocked;
+                int paidSilver = 0;
+                using (Maintenance.KmhValueOps.Scope op = Maintenance.KmhValueOps.BeginFeature(Maintenance.KmhIngress.Discord, "marketplace", out blocked))
+                    bought = op != null && MarketplaceStore.Buy(caller, listingId, qty, out sellerUsername, out boughtQty, out paidSilver);
+                if (blocked != null)
+                {
+                    await raw.Channel.SendMessageAsync(blocked).ConfigureAwait(false);
+                    return;
+                }
+                if (!bought)
                 {
                     await raw.Channel.SendMessageAsync(
                         "Buy failed - insufficient silver in your treasury, listing already sold, " +
@@ -109,14 +113,14 @@ namespace KMHServerAddon.Features.Discord
                 MarketplaceHandler.PushTreasuryTo(caller);
                 MarketplaceHandler.PushTreasuryTo(sellerUsername);
 
-                Embed eb = new EmbedBuilder()
+                KmhEmbedSpec eb = new KmhEmbedSpecBuilder()
                     .WithTitle("Purchase complete")
                     .WithDescription(
                         $"Bought **{boughtQty}× {DiscordText.Escape(label)}** for `{paidSilver}s`.\n" +
                         "Items delivered to your treasury.")
                     .AddField("Listing", $"#{listingId}", inline: true)
                     .AddField("Seller",  DiscordText.SafeName(sellerUsername),  inline: true)
-                    .WithColor(new Color(0x8C, 0xDC, 0x8C))
+                    .WithColor(0x8CDC8C)
                     .WithCurrentTimestamp()
                     .Build();
                 await raw.Channel.SendMessageAsync(embed: eb).ConfigureAwait(false);
@@ -131,7 +135,7 @@ namespace KMHServerAddon.Features.Discord
             }
         }
 
-        private static async Task HandleCancel(SocketMessage raw, string[] parts)
+        private static async Task HandleCancel(KmhDiscordMessage raw, string[] parts)
         {
             string caller = RequireLinkedAsync(raw, out string error);
             if (caller == null)
@@ -146,15 +150,19 @@ namespace KMHServerAddon.Features.Discord
                 return;
             }
 
-            if (!Maintenance.KmhAdmission.AllowsPlayerFeature(Maintenance.KmhIngress.Discord, "marketplace", out string blocked))
-            {
-                await raw.Channel.SendMessageAsync(blocked).ConfigureAwait(false);
-                return;
-            }
-
             try
             {
-                if (!MarketplaceStore.Cancel(caller, listingId))
+                // Counted for the cancel, so a reset or backup that closes the gate waits for it or refuses it.
+                bool cancelled;
+                string blocked;
+                using (Maintenance.KmhValueOps.Scope op = Maintenance.KmhValueOps.BeginFeature(Maintenance.KmhIngress.Discord, "marketplace", out blocked))
+                    cancelled = op != null && MarketplaceStore.Cancel(caller, listingId);
+                if (blocked != null)
+                {
+                    await raw.Channel.SendMessageAsync(blocked).ConfigureAwait(false);
+                    return;
+                }
+                if (!cancelled)
                 {
                     await raw.Channel.SendMessageAsync(
                         $"Cancel failed - listing #{listingId} not found, or you're not the seller.")
@@ -176,7 +184,7 @@ namespace KMHServerAddon.Features.Discord
             }
         }
 
-        private static async Task HandleSell(SocketMessage raw, string[] parts)
+        private static async Task HandleSell(KmhDiscordMessage raw, string[] parts)
         {
             string caller = RequireLinkedAsync(raw, out string error);
             if (caller == null)
@@ -209,13 +217,7 @@ namespace KMHServerAddon.Features.Discord
                 return;
             }
 
-            System.Text.StringBuilder nameSb = new System.Text.StringBuilder();
-            for (int i = 1; i < tokens.Length - 2; i++)
-            {
-                if (i > 1) nameSb.Append(' ');
-                nameSb.Append(tokens[i]);
-            }
-            string itemRaw = nameSb.ToString().Replace('_', ' ').Trim();
+            string itemRaw = DiscordCommandUtil.JoinWords(tokens, 1, tokens.Length - 2).Replace('_', ' ').Trim();
 
             int requestedQuality = 0;
             int lastSpace = itemRaw.LastIndexOf(' ');
@@ -231,14 +233,7 @@ namespace KMHServerAddon.Features.Discord
             {
                 if (candidates != null && candidates.Count > 1)
                 {
-                    System.Text.StringBuilder sb = new System.Text.StringBuilder();
-                    sb.Append("`").Append(itemRaw).Append("` matches multiple items - be more specific:\n");
-                    foreach (string c in candidates)
-                    {
-                        sb.Append("• **").Append(DiscordText.Escape(ItemLabelCache.LabelFor(c)))
-                          .Append("** _(").Append(c).Append(")_\n");
-                    }
-                    await raw.Channel.SendMessageAsync(sb.ToString()).ConfigureAwait(false);
+                    await raw.Channel.SendMessageAsync(DiscordCommandUtil.AmbiguousItems(itemRaw, candidates)).ConfigureAwait(false);
                     return;
                 }
                 string fallback = itemRaw.Replace(' ', '_');
@@ -292,16 +287,19 @@ namespace KMHServerAddon.Features.Discord
                 return;
             }
 
-            if (!Maintenance.KmhAdmission.AllowsPlayerFeature(Maintenance.KmhIngress.Discord, "marketplace", out string blocked))
-            {
-                await raw.Channel.SendMessageAsync(blocked).ConfigureAwait(false);
-                return;
-            }
-
             try
             {
-                long id = MarketplaceStore.Post(caller, defName, qty, price, "public", expiresInHours: 0,
-                                                stuffDefName: sellStuff, qualityIndex: sellQuality);
+                // Counted for the post, so a reset or backup that closes the gate waits for it or refuses it.
+                long id;
+                string blocked;
+                using (Maintenance.KmhValueOps.Scope op = Maintenance.KmhValueOps.BeginFeature(Maintenance.KmhIngress.Discord, "marketplace", out blocked))
+                    id = op == null ? 0 : MarketplaceStore.Post(caller, defName, qty, price, "public", expiresInHours: 0,
+                                                                stuffDefName: sellStuff, qualityIndex: sellQuality);
+                if (blocked != null)
+                {
+                    await raw.Channel.SendMessageAsync(blocked).ConfigureAwait(false);
+                    return;
+                }
                 if (id == 0)
                 {
                     await raw.Channel.SendMessageAsync(
@@ -313,13 +311,13 @@ namespace KMHServerAddon.Features.Discord
                 MarketplaceHandler.BroadcastSnapshot();
                 MarketplaceHandler.PushTreasuryTo(caller);
                 string sellLabel = ItemLabelCache.LabelFor(defName, sellStuff, sellQuality);
-                Embed eb = new EmbedBuilder()
+                KmhEmbedSpec eb = new KmhEmbedSpecBuilder()
                     .WithTitle("Listed for sale")
                     .WithDescription(
                         $"**{qty}× {DiscordText.Escape(sellLabel)}** @ `{price}s`/ea  ·  total `{qty * (long)price}s`")
                     .AddField("Listing", $"#{id}", inline: true)
                     .AddField("Seller",  DiscordText.Escape(caller),  inline: true)
-                    .WithColor(new Color(0xFF, 0xC4, 0x61))
+                    .WithColor(0xFFC461)
                     .WithCurrentTimestamp()
                     .Build();
                 await raw.Channel.SendMessageAsync(embed: eb).ConfigureAwait(false);
@@ -333,7 +331,7 @@ namespace KMHServerAddon.Features.Discord
             }
         }
 
-        private static string RequireLinkedAsync(SocketMessage raw, out string errorMessage)
+        internal static string RequireLinkedAsync(KmhDiscordMessage raw, out string errorMessage)
         {
             errorMessage = null;
             if (raw?.Author == null)
@@ -351,11 +349,21 @@ namespace KMHServerAddon.Features.Discord
                     "(Linked long ago? Re-run `/kmh link` so your Discord id is on file.)";
                 return null;
             }
+            if (Features.Moderation.BanGate.IsBannedAccount(user))
+            {
+                errorMessage = "Your Colony Nexus account is banned on this server.";
+                return null;
+            }
+            if (Features.Moderation.KmhEconomyGuard.IsFrozen(user))
+            {
+                errorMessage = Features.Moderation.KmhEconomyGuard.FrozenRefusal;
+                return null;
+            }
             return user;
         }
 
         // Must match what DiscordBridge.OnMessage stripped, or re-parsing shifts every token.
-        private static int _config_prefix_len(SocketMessage raw)
+        private static int _config_prefix_len(KmhDiscordMessage raw)
         {
             string prefix = DiscordBridge.Config?.CommandPrefix ?? "!";
             return Math.Min(prefix.Length, raw?.Content?.Length ?? 0);

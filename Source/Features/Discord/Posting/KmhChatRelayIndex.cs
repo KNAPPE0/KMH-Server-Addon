@@ -96,6 +96,5 @@ namespace KMHServerAddon.Features.Discord
         }
 
         internal static int BatchCountForTest { get { lock (_lock) return _batches.Count; } }
-        internal static int InboundCountForTest { get { lock (_lock) return _inbound.Count; } }
     }
 }

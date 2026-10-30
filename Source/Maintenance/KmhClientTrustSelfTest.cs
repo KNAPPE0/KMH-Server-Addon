@@ -10,7 +10,7 @@ using KMHServerAddon.Features.World.Dto;
 
 namespace KMHServerAddon.Maintenance
 {
-    // Everything a client says about itself is a claim; these pin where a claim used to become authoritative economy.
+    // Everything a client says about itself is a claim; none of it may become authoritative economy.
     internal static class KmhClientTrustSelfTest
     {
         private static string User() => "selftest_trust_" + Guid.NewGuid().ToString("N").Substring(0, 8);
@@ -27,8 +27,7 @@ namespace KMHServerAddon.Maintenance
             Check("World: a crafted delivery with an empty treasury credits nothing", () =>
             {
                 string who = User();
-                ServerQuestDto q = WorldStore.CreateQuest(ServerQuestDto.KindCooperative, ServerQuestDto.ObjDeliver,
-                    "Steel", "selftest deliver", "probe", 100, 0, 60);
+                ServerQuestDto q = SeedDeliverQuest(100);
                 if (q == null) return (false, "could not seed a deliver quest");
 
                 // Exactly the packet a modified client would send, with nothing banked to back it.
@@ -38,7 +37,7 @@ namespace KMHServerAddon.Maintenance
                 int minted = ItemCount(who, "Steel");
                 long silver = TreasuryStore.GetPersonalSilver(who);
                 TreasuryStore.PurgeOwnerForTest(who);
-                // The old refund paths DEPOSITED the asserted goods, so this also proves nothing is minted.
+                // A refund path that deposits the asserted goods would mint them, so this also proves nothing is minted.
                 return (credited == 0 && minted == 0 && silver == 0,
                     credited == 0 && minted == 0 && silver == 0
                         ? "no progress, no items, no silver"
@@ -49,8 +48,7 @@ namespace KMHServerAddon.Maintenance
             {
                 string who = User();
                 if (!TreasuryStore.DepositItem(who, "Steel", 40, "selftest seed")) return (false, "could not seed the vault");
-                ServerQuestDto q = WorldStore.CreateQuest(ServerQuestDto.KindCooperative, ServerQuestDto.ObjDeliver,
-                    "Steel", "selftest deliver", "probe", 100, 0, 60);
+                ServerQuestDto q = SeedDeliverQuest(100);
                 if (q == null) return (false, "could not seed a deliver quest");
 
                 WorldEngine.ApplyDelivery(who, q.Id, "Steel", 40);
@@ -67,8 +65,7 @@ namespace KMHServerAddon.Maintenance
             {
                 string who = User();
                 if (!TreasuryStore.DepositItem(who, "Steel", 50, "selftest seed")) return (false, "could not seed the vault");
-                ServerQuestDto q = WorldStore.CreateQuest(ServerQuestDto.KindCooperative, ServerQuestDto.ObjDeliver,
-                    "Steel", "selftest deliver", "probe", 20, 0, 60);
+                ServerQuestDto q = SeedDeliverQuest(20);
                 if (q == null) return (false, "could not seed a deliver quest");
 
                 WorldEngine.ApplyDelivery(who, q.Id, "Steel", 50);
@@ -86,7 +83,10 @@ namespace KMHServerAddon.Maintenance
                 WorldConfig saved = WorldConfig.Current;
                 try
                 {
-                    WorldConfig.ApplyForTest(new WorldConfig { PayRewardsForSelfReportedObjectives = false });
+                    WorldConfig.ApplyForTest(new WorldConfig
+                    {
+                        WorldQuests = new WorldQuestSettings { PayForSelfReported = false },
+                    });
                     ServerQuestDto q = WorldStore.CreateQuest(ServerQuestDto.KindCooperative, ServerQuestDto.ObjHunt,
                         "Muffalo", "selftest hunt", "probe", 10, 5000, 60);
                     if (q == null) return (false, "could not seed a hunt quest");
@@ -209,6 +209,10 @@ namespace KMHServerAddon.Maintenance
 
             return r;
         }
+
+        private static ServerQuestDto SeedDeliverQuest(int goal)
+            => WorldStore.CreateQuest(ServerQuestDto.KindCooperative, ServerQuestDto.ObjDeliver,
+                "Steel", "selftest deliver", "probe", goal, 0, 60);
 
         private static int ItemCount(string who, string def)
         {

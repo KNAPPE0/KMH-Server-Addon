@@ -8,17 +8,35 @@ namespace KMHServerAddon.Maintenance
     {
         public static void Print(int fieldsBackfilled)
         {
-            ServerLog.Info($"=== KMH v{KmhVersion.Build} startup summary ===");
+            ServerLog.Info($"=== Colony Nexus {KmhVersion.Build} ({KmhVersion.BuildTag}) startup summary ===");
+            ServerLog.Info($"  server: {KmhServerIdentity.Name}");
+            Features.Mods.ModPolicyConfig mods = Features.Mods.ModPolicyConfig.Current;
+            string stated = Features.Mods.ModPolicyConfig.GameVersionOf(mods.RimWorldVersion);
+            ServerLog.Info(stated == mods.GameVersion
+                ? $"  players: RimWorld {mods.GameVersion} (Config/Mods.json RimWorldVersion); other versions are refused at join"
+                : $"  players: RimWorld {mods.GameVersion} - Config/Mods.json says {stated}, but RimWorld Together "
+                + $"{Features.Mods.ModPolicyConfig.RunningRwtVersion()} admits only RimWorld {mods.GameVersion}; other versions are refused at join");
             ServerLog.Info(KmhDataMeta.IsFreshInstall
-                ? "  install: fresh - configs generated with this build's Balanced-safe defaults"
-                : $"  install: upgraded from existing data (defaults revision {KmhDataMeta.AppliedDefaultsRevision})");
+                ? "  install: new server - current Balanced defaults written to KMH-Data/Config (each file explained in Config/README.txt)"
+                : $"  install: existing data, config schema v{KmhDataMeta.AppliedConfigSchema}");
 
             if (fieldsBackfilled > 0)
                 ServerLog.Info($"  configs: {fieldsBackfilled} missing field(s) backfilled with safe defaults (owner values kept)");
-            if (KmhDefaultsUpgrade.RanThisBoot)
-                ServerLog.Info($"  defaults upgrade: {KmhDefaultsUpgrade.Changed.Count} value(s) moved to KMH's defaults, {KmhDefaultsUpgrade.Preserved.Count} kept as owner-set");
+            if (KmhConfigRegeneration.Regenerated.Count > 0)
+                ServerLog.Info($"  configs: {KmhConfigRegeneration.Regenerated.Count} regenerated from v1.3.1 defaults, "
+                             + $"{KmhConfigRegeneration.Preserved.Count} kept (identity and credentials)");
 
             ServerLog.Info($"  economy profile: {Features.Economy.EconomyConfig.Current.EconomyMode ?? "Standard"}");
+
+            Features.Global.GlobalConfig g = Features.Global.GlobalConfig.Current;
+            ServerLog.Info("  Colony Nexus Global: " + (!g.Enabled
+                ? "off (Config/Global.json Enabled lists this server on the website and in the browser)"
+                : "on" + (string.IsNullOrEmpty(g.RegisteredServerId) ? ", registering on first contact" : ", registered")));
+            Features.Discord.DiscordConfig d = Features.Discord.DiscordConfig.LoadOrDefault();
+            ServerLog.Info("  Discord: " + (d.IsEnabled ? "on" : d.Enabled ? "waiting for a bot token (Config/Discord/DiscordConfig.json)" : "off"));
+            Features.Chat.ChatConfig c = Features.Chat.ChatConfig.Current;
+            ServerLog.Info($"  chat images: previews {(c.AllowImagePreviews ? "on" : "off")}, typed links {(c.AllowTypedImageUrls ? "on" : "off")}, "
+                         + $"{c.ImageHostAllowList?.Length ?? 0} trusted host(s)");
 
             (int _, int __, int legacy) = Features.Treasury.TreasuryStore.PayloadHealth();
             if (legacy > 0)

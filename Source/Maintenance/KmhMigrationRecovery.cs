@@ -36,20 +36,13 @@ namespace KMHServerAddon.Maintenance
             int n = 0;
             foreach ((string name, string activePath, object sample) in KmhConfigValidation.ConfigTargets())
             {
-                string rel = Relative(KmhDataPaths.Folder, activePath);
+                string rel = KmhConfigRecovery.GetRelative(KmhDataPaths.Folder, activePath);
                 string backupCopy = Path.Combine(backupRoot, rel);
                 if (!File.Exists(backupCopy)) continue;
                 if (KmhConfigRecovery.RestoreFile(activePath, backupCopy, sample, out string err)) n++;
                 else ServerLog.Warn($"Migration recovery: could not restore {name} ({err}).");
             }
             return n;
-        }
-
-        private static string Relative(string root, string full)
-        {
-            string r = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-            string f = Path.GetFullPath(full);
-            return f.StartsWith(r, StringComparison.OrdinalIgnoreCase) ? f.Substring(r.Length) : Path.GetFileName(full);
         }
     }
 }

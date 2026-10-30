@@ -36,7 +36,7 @@ namespace KMHServerAddon.Features.Discord.Patches
             catch (Exception ex)
             {
                 ServerLog.Error("Link command handler threw", ex);
-                try { PM_Chat.SendConsoleMessage(client, "[KMH] Link command failed unexpectedly."); }
+                try { PM_Chat.SendConsoleMessage(client, "[Colony Nexus] Link command failed unexpectedly."); }
                 catch { }
             }
             return false; // handled
@@ -57,11 +57,11 @@ namespace KMHServerAddon.Features.Discord.Patches
             {
                 if (LinkedAccountsStore.TryGetLink(username, out string display) && !string.IsNullOrEmpty(display))
                 {
-                    Reply(client, $"Your KMH account is linked to Discord: {display}");
+                    Reply(client, $"Your Colony Nexus account is linked to Discord: {display}");
                 }
                 else
                 {
-                    Reply(client, "Your KMH account is not currently linked to Discord.");
+                    Reply(client, "Your Colony Nexus account is not currently linked to Discord.");
                     Reply(client, "Run /kmh link to get a code, then use it on Discord with !kmh-link.");
                 }
                 return;
@@ -89,16 +89,16 @@ namespace KMHServerAddon.Features.Discord.Patches
                 Reply(client, "You don't currently have a Discord link.");
                 return;
             }
-            LinkedAccountsStore.Unlink(username);
+            bool saved = LinkedAccountsStore.Unlink(username);
             LinkedAccountsHandler.BroadcastSnapshot();
             DiscordBridge.AnnounceLink(username, previousDisplay, "unlink");
             ServerLog.Info($"Link: {username} unlinked their Discord (via /kmh unlink)");
-            Reply(client, "Your Discord link has been removed.");
+            Reply(client, "Your Discord link has been removed." + (saved ? "" : LinkedAccountsStore.UnlinkNotSavedNote));
         }
 
         private static void Reply(ServerClient client, string text)
         {
-            try { PM_Chat.SendConsoleMessage(client, $"[KMH] {text}"); }
+            try { PM_Chat.SendConsoleMessage(client, $"[Colony Nexus] {text}"); }
             catch (Exception ex) { ServerLog.Error("Link Reply send failed", ex); }
         }
     }

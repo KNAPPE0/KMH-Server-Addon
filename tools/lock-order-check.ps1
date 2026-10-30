@@ -1,22 +1,12 @@
-# Lock-order guard. A cycle in the "who calls whom while holding a lock" graph deadlocks the whole server, and it
-# only shows up under concurrent load, so the edges are baselined here and any NEW one has to be reviewed.
-#
-# Current order (acyclic):  Site -> Guild -> {Treasury -> ItemLabelCache, ContributionLedger};  Want -> Treasury
-# Treasury, ItemLabelCache, ContributionLedger and JsonFileStore are sinks - they must never call back upstream.
-#
-# Generalises protocol-contract-check.ps1 section 10, which guards the single Treasury->Guild edge with the AB-BA
-# rationale written out. That one is kept for its explanation; this covers every store.
-#
-#   .\tools\lock-order-check.ps1            verify against the baseline
-#   .\tools\lock-order-check.ps1 -SelfTest  prove the scanner detects what it claims to
-#   .\tools\lock-order-check.ps1 -List      print every edge found
+﻿# Lock-order guard. A cycle in the "who calls whom while holding a lock" graph deadlocks the whole server, and it
+# only shows under load. Sinks (Treasury, ItemLabelCache, ContributionLedger, JsonFileStore) never call upstream.
+# Usage: .\tools\lock-order-check.ps1 [-SelfTest] [-List]   (-SelfTest proves the scanner, -List prints every edge)
 param([switch]$SelfTest, [switch]$List)
 
 $ErrorActionPreference = "Stop"
 $src = Join-Path $PSScriptRoot "..\Source"
 
-# Callees that take a lock of their own. Anything else under a lock is a pure helper and cannot extend the graph,
-# so it is not an edge - verified per entry rather than assumed from the name.
+# Callees that take a lock of their own; anything else called under a lock cannot extend the graph.
 $LockTakers = @{
     "GuildStore"                 = "Guild"
     "TreasuryStore"              = "Treasury"
@@ -33,8 +23,7 @@ $LockTakers = @{
     "KmhPayloadEscrow"           = "Treasury"     # delegates straight into TreasuryStore.DepositPayload/DepositItem
 }
 
-# Members on those types that take NO lock, so calling them is not an edge. Each was read to confirm it, because a
-# type-name-only rule reports edges that do not exist and the noise is what gets a guard ignored.
+# Members of those types that take NO lock, each read to confirm: false edges are noise that gets a guard ignored.
 $PureMembers = @(
     "ResolveOwnerKeyFor"   # TreasuryStore -> PersonalKeyFor, a string concat
     "PersonalKeyFor"       # string concat
@@ -49,7 +38,6 @@ $Baseline = @(
     "SiteStore -> ItemLabelCache"
     "GuildStore -> Treasury"
     "GuildStore -> ContributionLedger"
-    "WantStore -> Treasury"
 )
 
 function Get-LockedCalls([string]$path) {
@@ -119,13 +107,42 @@ class SiteStore {
     exit 0
 }
 
-# Every critical section must be a lock statement, or this scanner is blind to part of the graph.
-$otherPrims = Get-ChildItem -Path $src -Recurse -Filter *.cs -File |
-    Where-Object { $_.FullName -notmatch '\\(bin|obj)\\' } |
-    Select-String -Pattern 'Monitor\.(Enter|TryEnter)|SemaphoreSlim|ReaderWriterLock|Mutex\b|SpinLock'
-if ($otherPrims) {
+# This scanner only sees lock(); each other primitive is allowed by name and printed every run so none goes silent.
+$allowedPrims = @{
+    'KmhGlobalRegistration.cs' = 'SetupGate: an async gate over the owner-link flow, which awaits HTTP - lock() cannot be held across await. Guards no store, and both holders release in finally.'
+    'KmhIdentityChange.cs'     = 'Gate: an async gate over a key rotation, recovery or rebind, which awaits HTTP. Its holders release in finally; the heartbeat path only tries it (Wait(0)) and never blocks. Store locks are taken inside it (the federated links, the key file), never the other way round.'
+    'KmhMediaTranscode.cs'     = 'decode slots: a counting semaphore that bounds concurrent image decodes. Guards no store, takes no other lock while held, released in finally.'
+    'DiscordLive.cs'           = 'Gate: an async gate so the live-message tick and the activity-log flush take turns on their state file while awaiting Discord. Store locks are only taken inside it (snapshots, the state save), never the other way round, and every holder releases in finally.'
+}
+
+# Comments are stripped first: an explanation of why a primitive is NOT used would otherwise fail the scan.
+$primPattern = 'Monitor\.(Enter|TryEnter)|SemaphoreSlim|ReaderWriterLock|Mutex\b|SpinLock'
+$otherPrims = @()
+foreach ($f in (Get-ChildItem -Path $src -Recurse -Filter *.cs -File |
+                Where-Object { $_.FullName -notmatch '\\(bin|obj)\\' })) {
+    $code = (Get-Content -Raw -LiteralPath $f.FullName) `
+                -replace '(?s)/\*.*?\*/', '' -replace '(?m)//.*$', ''
+    $n = 0
+    foreach ($line in ($code -split "`r?`n")) {
+        $n++
+        if ($line -match $primPattern) {
+            $otherPrims += [pscustomobject]@{ Filename = $f.Name; LineNumber = $n; Line = $line.Trim() }
+        }
+    }
+}
+
+foreach ($name in $allowedPrims.Keys | Sort-Object) {
+    if (-not ($otherPrims | Where-Object { $_.Filename -eq $name })) {
+        Write-Host "FAIL - $name is allowed a non-lock() primitive but no longer uses one. Drop the allowance." -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "  allowed: $name - $($allowedPrims[$name])"
+}
+
+$unexpected = $otherPrims | Where-Object { -not $allowedPrims.ContainsKey($_.Filename) }
+if ($unexpected) {
     Write-Host "FAIL - a non-lock() primitive is in use; this scanner cannot see it:"
-    $otherPrims | ForEach-Object { Write-Host "  $($_.Filename):$($_.LineNumber)" }
+    $unexpected | ForEach-Object { Write-Host "  $($_.Filename):$($_.LineNumber)" }
     exit 1
 }
 

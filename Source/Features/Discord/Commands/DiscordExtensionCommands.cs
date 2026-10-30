@@ -23,7 +23,7 @@ namespace KMHServerAddon.Features.Discord
 
             if (key.StartsWith(ReservedPrefix, StringComparison.OrdinalIgnoreCase))
             {
-                ServerLog.Warn($"[ext:{extensionName}] refused Discord command '{key}' - the '{ReservedPrefix}' prefix is reserved for KMH core.");
+                ServerLog.Warn($"[ext:{extensionName}] refused Discord command '{key}' - the '{ReservedPrefix}' prefix is reserved for Colony Nexus core.");
                 return false;
             }
 
@@ -41,7 +41,7 @@ namespace KMHServerAddon.Features.Discord
         }
 
         // A throwing handler is caught, or one bad extension would break the gateway message loop.
-        public static bool TryDispatch(SocketMessage message, string cmd, string[] parts)
+        public static bool TryDispatch(KmhDiscordMessage message, string cmd, string[] parts)
         {
             Action<IKmhDiscordCommand> handler;
             lock (_lock)
@@ -65,7 +65,7 @@ namespace KMHServerAddon.Features.Discord
         {
             private readonly List<string> _args;
 
-            public Context(SocketMessage message, string cmd, string[] parts)
+            public Context(KmhDiscordMessage message, string cmd, string[] parts)
             {
                 Command = cmd;
 
@@ -80,6 +80,9 @@ namespace KMHServerAddon.Features.Discord
                 LinkedUsername = AuthorId != 0
                     ? (LinkedAccountsStore.FindUsernameByDiscordId(AuthorId) ?? "")
                     : "";
+                // An extension acts as this name, so a banned or frozen account reaches it as nobody.
+                if (Features.Moderation.BanGate.IsBannedAccount(LinkedUsername)
+                    || Features.Moderation.KmhEconomyGuard.IsFrozen(LinkedUsername)) LinkedUsername = "";
             }
 
             public string                Command        { get; }

@@ -81,11 +81,7 @@ namespace KMHServerAddon.Features.Frontier
         public static readonly string[] Resumable = { ServerQuestDto.ConsequenceOutpostClaimable };
 
         public static bool IsResumable(string consequence)
-        {
-            string c = FrontierOperations.NormalizeConsequence(consequence);
-            foreach (string s in Resumable) if (c == s) return true;
-            return false;
-        }
+            => System.Array.IndexOf(Resumable, FrontierOperations.NormalizeConsequence(consequence)) >= 0;
 
         private static bool ReapplyConsequence(Dto.ResolutionRecord rec, out string why)
         {

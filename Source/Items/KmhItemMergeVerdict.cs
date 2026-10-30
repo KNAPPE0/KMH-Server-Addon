@@ -1,6 +1,6 @@
 ﻿namespace KMHServerAddon.Items
 {
-    // Sharing a defName is not sharing an identity: material, quality, taint, durability and any saved blob separate two items.
+    // A shared defName is not a shared identity: material, quality, taint, durability and a saved blob separate items.
     internal enum KmhMergeKind
     {
         Fungible,

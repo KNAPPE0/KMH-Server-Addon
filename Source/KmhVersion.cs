@@ -1,12 +1,12 @@
-﻿namespace KMHServerAddon
+namespace KMHServerAddon
 {
     // Four independent identities: collapsing them would make a cosmetic patch demand a server update.
     internal static class KmhVersion
     {
-        public const string Build        = "1.3.0";
+        public const string Build        = "1.3.1";
         // Names the exact working build behind a public version, so a stale binary is identifiable from a log line.
-        public const string BuildTag     = "rel-213";
-        public const int    ConfigSchema = 3;
+        public const string BuildTag     = "rel-282";
+        public const int    ConfigSchema = 7;
         public static int   DataSchema   => Persistence.KmhDataMeta.CurrentFormat;
         public const int    Protocol     = SubProtocol.KmhProtocol.CurrentVersion;
 

@@ -72,11 +72,11 @@ namespace KMHServerAddon.Maintenance
             try
             {
                 var reloadCovered = new HashSet<Type>();
-                var exemptNoReason = new List<string>();
+                var noAction = new List<string>();
                 foreach (AdminCommands.KmhConfigReload.Entry e in AdminCommands.KmhConfigReload.All())
                 {
                     if (e.ConfigType != null) reloadCovered.Add(e.ConfigType);
-                    if (e.Reload == null && string.IsNullOrWhiteSpace(e.ExemptReason)) exemptNoReason.Add(e.Area);
+                    if (e.Reload == null) noAction.Add(e.Area);
                 }
 
                 var notReloadable = configs.Where(c => !reloadCovered.Contains(c)).Select(c => c.Name).ToList();
@@ -85,8 +85,9 @@ namespace KMHServerAddon.Maintenance
                         ? $"{reloadCovered.Count} area(s) declared"
                         : "MISSING from `kmh reload`: " + string.Join(", ", notReloadable)));
 
-                results.Add(("Config coverage: a restart-only config says WHY", exemptNoReason.Count == 0,
-                    exemptNoReason.Count == 0 ? "" : "no reason given for: " + string.Join(", ", exemptNoReason)));
+                // A null action makes the editor demand a restart for a live change; restart-only fields go in RestartOnly.
+                results.Add(("Config coverage: every area applies live", noAction.Count == 0,
+                    noAction.Count == 0 ? "" : "no live apply for: " + string.Join(", ", noAction)));
 
                 // The usage line is built from the table, so an area an owner can type must actually do something.
                 var areas = AdminCommands.KmhConfigReload.ReloadableAreas();

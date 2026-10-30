@@ -4,10 +4,7 @@ using KMH.Sdk.Server.Records;
 namespace KMH.Sdk.Server.Apis
 {
     /// <summary>Read and mutate the treasury: player and guild vaults.</summary>
-    /// <remarks>
-    /// A mutation pushes a fresh snapshot to the affected user if they are online, so you never have to. A failed
-    /// mutation returns false without touching state - nothing moves partially.
-    /// </remarks>
+    /// <remarks>A mutation pushes a fresh snapshot to an online user; a failed one returns false and moves nothing.</remarks>
     public interface ITreasuryApi
     {
         /// <summary>Current silver balance for the user's vault. 0 if they have no vault yet.</summary>

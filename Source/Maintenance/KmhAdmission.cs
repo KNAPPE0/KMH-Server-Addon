@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 
 namespace KMHServerAddon.Maintenance
 {
@@ -21,11 +21,11 @@ namespace KMHServerAddon.Maintenance
             // Before the stores are loaded there is nothing authoritative to mutate, only an empty copy of it.
             if (!KmhReadiness.IsReady)
             {
-                refusal = $"KMH is not accepting changes yet - {KmhReadiness.Describe()}.";
+                refusal = $"Colony Nexus is not accepting changes yet - {KmhReadiness.Describe()}.";
                 return false;
             }
             if (!KmhMaintenanceGate.BlocksValueMoves) return true;
-            refusal = $"KMH is paused right now ({KmhMaintenanceGate.Describe()}) - value moves are refused until it finishes.";
+            refusal = $"Colony Nexus is paused right now ({KmhMaintenanceGate.Describe()}) - value moves are refused until it finishes.";
             return false;
         }
 

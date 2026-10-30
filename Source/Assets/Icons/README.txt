@@ -1,5 +1,5 @@
-KMH Discord embed icons
-=======================
+Colony Nexus Discord embed icons
+================================
 
 This is KMH-Data/Icons - the one folder the bot reads its embed icons from. It
 ships pre-filled (this set is generated into KMH-Data/Icons on every build and
@@ -16,6 +16,9 @@ order:  .png  ->  .webp  ->  .gif  ->  .jpg / .jpeg
 So "kmh_logo" is satisfied by kmh_logo.png, kmh_logo.webp, etc. A missing icon
 just posts the embed without a thumbnail, and kmh_logo is the fallback when a
 specific icon has no file.
+
+kmh_logo.png is the Colony Nexus mark (the world, ring and moon from the Colony
+Nexus website). The file keeps the name kmh_logo.png.
 
 IMPORTANT: Discord cannot display RimWorld's .dds / .dds.zstd textures. Those
 are only for the in-game client icons (KMH-Patch/Textures/KMHPatch/UI). Use a

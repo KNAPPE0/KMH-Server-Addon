@@ -23,7 +23,7 @@ namespace KMHServerAddon.Features.Frontier
             if (!accepted) Diagnostics.ServerLog.Verbose($"Frontier: placement proposal from {user} refused - {why}");
         }
 
-        // Sent to every verified client, not the interested ones: nobody asks for this, so nothing marks them interested.
+        // Every verified client, not just interested ones: nobody asks for this, so nothing marks them interested.
         internal static int AskForPlacement(PlacementToken token)
         {
             if (token == null) return 0;
@@ -37,7 +37,8 @@ namespace KMHServerAddon.Features.Frontier
             foreach (ServerClient c in Network.ServerClients.Keys)
             {
                 if (c?.IsVerified != true) continue;
-                if (string.IsNullOrEmpty(c.GetData<UserFile>()?.Username)) continue;
+                // A simulated account has no game to answer from; asking it only waits out the token.
+                if (!Simulation.SimulatedAccounts.IsPerson(c.GetData<UserFile>()?.Username)) continue;
                 KmhRouter.SendTo(c, KmhProtocol.Kind.FrontierPlacementRequest, req);
                 asked++;
             }

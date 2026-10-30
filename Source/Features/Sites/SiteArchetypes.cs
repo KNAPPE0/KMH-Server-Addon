@@ -2,7 +2,7 @@
 
 namespace KMHServerAddon.Features.Sites
 {
-    // Defaults and identity only - an archetype never changes how production is computed.
+    // Defaults and identity; an archetype's only production effect is the perk the catalog shows (SiteArchetypeRegistry).
     internal static class SiteArchetypes
     {
         public const string Custom    = Dto.SiteEntry.ArchetypeCustom;
@@ -14,14 +14,8 @@ namespace KMHServerAddon.Features.Sites
 
         public static readonly string[] All = { Custom, Farmland, Quarry, Woodland, Ranch, Roadworks };
 
-        // A value written by a newer build degrades to Custom rather than to a built-in whose rules this build guesses at.
-        public static string Normalize(string archetype)
-        {
-            if (string.IsNullOrWhiteSpace(archetype)) return Custom;
-            string a = archetype.Trim().ToLowerInvariant();
-            foreach (string known in All) if (a == known) return a;
-            return Custom;
-        }
+        // A value from a newer build degrades to Custom, not to a built-in whose rules this build would guess at.
+        public static string Normalize(string archetype) => KmhVocabulary.Canonical(archetype, All, Custom);
 
         public static bool IsBuiltIn(string archetype) => Normalize(archetype) != Custom;
 

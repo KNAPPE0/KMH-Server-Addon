@@ -11,16 +11,16 @@
             {
                 case KmhTxState.Requested:
                 case KmhTxState.Validating:
-                    return KmhTxRecoveryAction.Reject;   // nothing reserved; safe to abandon
+                    return KmhTxRecoveryAction.Reject;
                 case KmhTxState.Reserved:
                 case KmhTxState.Approved:
                 case KmhTxState.Compensating:
-                    return KmhTxRecoveryAction.Refund;   // value escrowed, never delivered -> give it back
+                    return KmhTxRecoveryAction.Refund;
                 case KmhTxState.Delivered:
                 case KmhTxState.Failed:
-                    return KmhTxRecoveryAction.Reconcile; // delivered-but-unconfirmed or errored -> needs a resolution pass
+                    return KmhTxRecoveryAction.Reconcile;
                 default:
-                    return KmhTxRecoveryAction.None;      // terminal states are settled
+                    return KmhTxRecoveryAction.None;
             }
         }
     }

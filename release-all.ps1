@@ -1,15 +1,6 @@
-# KMH Server Addon - build the official GitHub release assets.
-#
-#   KMH.Sdk.Server.<version>.nupkg
-#   KMH-MediaTools-v<version>.zip                              (yt-dlp/ffmpeg fetch scripts)
-#   KMHServerAddon-v<version>-<rid>.zip                        (needs .NET 8 on the host)
-#   KMHServerAddon-v<version>-<rid>-selfcontained.zip          (carries .NET 8 inside)
-#
-# for each of six rids: win-x64, win-x86, win-arm64, linux-x64, linux-arm, linux-arm64.
-#
-# Usage:
-#   .\release-all.ps1
-#   .\release-all.ps1 -NoClean
+# Builds every Server Addon release asset: SDK nupkg, media-tools zip, and a framework-dependent plus a self-contained
+# zip for each of six RIDs (win-x64/x86/arm64, linux-x64/arm/arm64), then verifies each zip's payload.
+# Usage: .\release-all.ps1 [-NoClean]   (-NoClean keeps this version's existing assets)
 param(
     [switch]$NoClean
 )
@@ -50,6 +41,8 @@ if (-not $NoClean) {
     Write-Host "[release] Cleaning old v$version generated assets."
     Get-ChildItem $releases -File -ErrorAction SilentlyContinue |
         Where-Object {
+            $_.Name -like "KMH-ColonyNexus-ServerAddon-v$version-*.zip" -or
+            # The pre-rebrand name, so a stale zip under it cannot be picked up by the bundle.
             $_.Name -like "KMHServerAddon-v$version-*.zip" -or
             $_.Name -like "KMH-MediaTools-v$version.zip" -or
             $_.Name -like "KMH.Sdk.Server.$version*.nupkg"
@@ -57,8 +50,7 @@ if (-not $NoClean) {
         Remove-Item -Force
 }
 
-# Both layouts for every RID. A host that can't install .NET 8 needs the -selfcontained zip for its own
-# platform, and shipping only x64 left the other four architectures with nothing.
+# Both layouts for every RID: a host that can't install .NET 10 needs the self-contained zip for its own platform.
 $rids = @('win-x64', 'win-x86', 'win-arm64', 'linux-x64', 'linux-arm', 'linux-arm64')
 $targets = @()
 foreach ($r in $rids) { $targets += @{ Rid = $r; SelfContained = $false } }
@@ -95,8 +87,7 @@ if (Test-Path $sdkProject) {
     }
 }
 
-# Its own small download: yt-dlp and ffmpeg belong to other people under other licences, and most owners
-# never switch the video server on anyway.
+# A separate download: yt-dlp and ffmpeg carry other licences, and most owners never enable the video server.
 $mediaSrc = Join-Path $PSScriptRoot "Templates\media-tools"
 if (Test-Path $mediaSrc) {
     Write-Host ""
@@ -113,7 +104,6 @@ if (Test-Path $mediaSrc) {
     }
     finally { $w.Dispose() }
 
-    # Both scripts and the README have to be there, or an owner unzips a bundle that cannot do its one job.
     $need = @('KMH-MediaTools/get-media-tools.ps1', 'KMH-MediaTools/get-media-tools.sh', 'KMH-MediaTools/README.txt')
     $z = [System.IO.Compression.ZipFile]::OpenRead($mediaZip)
     try {
@@ -125,22 +115,35 @@ if (Test-Path $mediaSrc) {
     Write-Host ("[release] Media tools OK - {0} file(s), {1:N1} KB." -f $need.Count, ((Get-Item $mediaZip).Length / 1KB))
 }
 
-# Every ZIP is opened and its payload checked for the protocol strings this version introduced. A single-target
-# deploy.ps1 run writes into this same folder, so timestamps alone cannot tell a full matrix from a stale one.
+# Single-target deploy.ps1 runs write into this folder too, so check each zip's payload, not timestamps.
 Write-Host ""
 Write-Host "==== Package content verification ====" -ForegroundColor Cyan
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-$required = @('kmh.fragment', 'kmh.site.setup', 'kmh.site.quote.request', 'kmh.site.quote', 'kmh.chat.video.resolve')
+# Builds of one version share an AssemblyVersion; only the build tag (read from source) tells a stale payload apart.
+$tagMatch = [regex]::Match([System.IO.File]::ReadAllText((Join-Path $PSScriptRoot 'Source\KmhVersion.cs')),
+                           'BuildTag\s*=\s*"([^"]*)"')
+if (-not $tagMatch.Success) { throw "KmhVersion.BuildTag not found - cannot verify which release a package holds." }
+$required = @($tagMatch.Groups[1].Value,
+              'kmh.hello.incompatible', 'kmh.notify.ack', 'kmh.treasury.open',
+              'kmh.config.request', 'kmh.player.ticket')
 # Derived from $targets so a new RID cannot be built and then skipped by this check.
 $expected = @($targets | ForEach-Object { "$($_.Rid)$(if ($_.SelfContained) { '-selfcontained' })" })
 $stale = @()
 foreach ($rid in $expected) {
-    $zipPath = Join-Path $releases "KMHServerAddon-v$version-$rid.zip"
+    $zipPath = Join-Path $releases "KMH-ColonyNexus-ServerAddon-v$version-$rid.zip"
     if (-not (Test-Path $zipPath)) { $stale += "$rid (missing)"; continue }
 
     $found = @{}
     $zip = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
     try {
+        # Multi-file zips ship the image libraries loose (deploy.ps1 checks single-file); every zip needs the notices.
+        $names = @($zip.Entries | ForEach-Object { $_.FullName })
+        $mustShip = @("THIRD-PARTY-NOTICES.txt", "LICENSE", "KMH-Data/Icons/LICENSE-Apache-2.0.txt")
+        if ($rid -like "*-selfcontained") { $mustShip += @("SixLabors.Fonts.dll", "SixLabors.ImageSharp.Drawing.dll", "SixLabors.ImageSharp.dll",
+                                                            "SixLabors.PolygonClipper.dll", "System.IO.Hashing.dll",
+                                                            "DOTNET-RUNTIME-LICENSE.TXT", "DOTNET-RUNTIME-THIRD-PARTY-NOTICES.TXT") }
+        $absent = @($mustShip | Where-Object { $names -notcontains $_ })
+        if ($absent.Count -gt 0) { Write-Host ("  MISSING {0,-24} {1}" -f $rid, ($absent -join ', ')) -ForegroundColor Red; $stale += $rid }
         foreach ($entry in $zip.Entries) {
             # The Linux apphost bundle has NO extension, so an exe/dll filter skips the only file that carries the code.
             if ($entry.Name -match '\.(png|md|txt|json|xml|so|pdb)$') { continue }
@@ -174,7 +177,7 @@ Write-Host ""
 Write-Host "[release] Done. Upload these assets to the GitHub release:" -ForegroundColor Green
 Get-ChildItem $releases -File |
     Where-Object {
-        $_.Name -like "KMHServerAddon-v$version-*.zip" -or
+        $_.Name -like "KMH-ColonyNexus-ServerAddon-v$version-*.zip" -or
         $_.Name -like "KMH.Sdk.Server.$version*.nupkg"
     } |
     Sort-Object Name |
@@ -183,4 +186,4 @@ Get-ChildItem $releases -File |
     }
 
 Write-Host ""
-Write-Host "[release] Do not be dumb duh $version."
+Write-Host "[release] Done: v$version."

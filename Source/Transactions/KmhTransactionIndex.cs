@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 
 namespace KMHServerAddon.Transactions
@@ -41,10 +41,7 @@ namespace KMHServerAddon.Transactions
             if (string.IsNullOrEmpty(requestKey)) return;
             _spentKeys[requestKey] = nowTicks;
             if (_spentKeys.Count <= MaxSpentKeys) return;
-            var stale = new List<string>();
-            foreach (KeyValuePair<string, long> kv in _spentKeys)
-                if (nowTicks - kv.Value >= KeyLifetime.Ticks) stale.Add(kv.Key);
-            foreach (string k in stale) _spentKeys.Remove(k);
+            EvictStaleKeys(nowTicks);
         }
 
         public bool IsDuplicate(string requestKey) => IsDuplicate(requestKey, DateTime.UtcNow.Ticks);
@@ -78,6 +75,38 @@ namespace KMHServerAddon.Transactions
             _all.Remove(t);
             if (!string.IsNullOrEmpty(t.RequestKey)) _requestKeys.Remove(t.RequestKey);
             return true;
+        }
+
+        // The live list, or a long uptime keeps every row and withdrawn blob. Rows touched within minAge stay for their
+        // caller; dropped rows' request keys move to the spent set so those operations cannot run twice.
+        public int PruneFinished(int maxTerminal, TimeSpan minAge, long nowTicks)
+        {
+            var candidates = new List<KmhTransaction>();
+            foreach (KmhTransaction t in _all)
+                if (KmhTxPrune.IsFinished(t) && OlderThan(t, minAge, nowTicks)) candidates.Add(t);
+            int toDrop = candidates.Count - Math.Max(0, maxTerminal);
+            if (toDrop <= 0) return 0;
+            for (int i = 0; i < toDrop; i++)
+            {
+                KmhTransaction t = candidates[i];
+                _all.Remove(t); _byId.Remove(t.Id);
+                if (!string.IsNullOrEmpty(t.RequestKey)) { _requestKeys.Remove(t.RequestKey); RetireKey(t.RequestKey, nowTicks); }
+            }
+            return toDrop;
+        }
+
+        private static bool OlderThan(KmhTransaction t, TimeSpan age, long nowTicks)
+            => !DateTime.TryParse(t.UpdatedUtc, null, System.Globalization.DateTimeStyles.RoundtripKind, out DateTime at)
+            || nowTicks - at.ToUniversalTime().Ticks >= age.Ticks;
+
+        // Spent keys past their lifetime answer nothing, so they are dropped rather than carried for ever.
+        public int EvictStaleKeys(long nowTicks)
+        {
+            var stale = new List<string>();
+            foreach (KeyValuePair<string, long> kv in _spentKeys)
+                if (nowTicks - kv.Value >= KeyLifetime.Ticks) stale.Add(kv.Key);
+            foreach (string k in stale) _spentKeys.Remove(k);
+            return stale.Count;
         }
 
         public List<KmhTransaction> ForPlayer(string player)

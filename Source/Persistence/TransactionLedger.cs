@@ -34,11 +34,12 @@ namespace KMHServerAddon.Persistence
         private static Task _flusher;
         private static CancellationTokenSource _cts;
 
-        public static void Record(string vault, string actor, string kind, long amount, string item, string note)
+        // at: when the change happened, for a line handed over only once its save succeeded.
+        public static void Record(string vault, string actor, string kind, long amount, string item, string note, DateTime? at = null)
         {
             _queue.Enqueue(new Entry
             {
-                Utc    = DateTime.UtcNow.ToString("o"),
+                Utc    = (at ?? DateTime.UtcNow).ToString("o"),
                 Seq    = Interlocked.Increment(ref _seq),
                 Vault  = vault  ?? "",
                 Actor  = actor  ?? "",
@@ -52,6 +53,19 @@ namespace KMHServerAddon.Persistence
         // House pool (not a treasury) - tax in / drain out.
         public static void RecordHousePool(bool credit, long amount, string note)
             => Record("_house", "", credit ? "house_credit" : "house_debit", amount, "", note);
+
+        // For a line recorded after its change is already on disk: written now, never a flusher's beat behind it.
+        public static void RecordSaved(string vault, string actor, string kind, long amount, string item, string note)
+        {
+            Record(vault, actor, kind, amount, item, note);
+            Flush();
+        }
+
+        public static void RecordHousePoolSaved(bool credit, long amount, string note)
+        {
+            RecordHousePool(credit, amount, note);
+            Flush();
+        }
 
         public static void Start()
         {
@@ -81,7 +95,7 @@ namespace KMHServerAddon.Persistence
             Flush();
         }
 
-        // Held between the queue and disk: dequeuing straight into the write let a throw lose the dispute evidence from memory and file at once.
+        // Held between queue and disk, so a failed write keeps the dispute evidence rather than losing it from both.
         private static readonly List<Entry> _pending = new List<Entry>();
         private static Func<string> _failAppendForTest;
 
@@ -99,12 +113,13 @@ namespace KMHServerAddon.Persistence
         }
 
         // Called by the flusher and the shutdown path at the same time, so it has to be safe concurrently.
-        public static void Flush()
+        // False while anything is still held, so a force-save does not report the audit trail as written.
+        public static bool Flush()
         {
             lock (_fileLock)
             {
                 while (_queue.TryDequeue(out Entry e)) _pending.Add(e);
-                if (_pending.Count == 0) return;
+                if (_pending.Count == 0) return true;
 
                 StringBuilder sb = new StringBuilder();
                 foreach (Entry e in _pending) sb.AppendLine(JsonConvert.SerializeObject(e, _compact));
@@ -119,9 +134,10 @@ namespace KMHServerAddon.Persistence
                 {
                     ServerLog.Warn($"TransactionLedger: could not write {_pending.Count} entr(y/ies), " +
                                    $"held for the next flush: {ex.Message}");
-                    return;
+                    return false;
                 }
                 _pending.Clear();
+                return true;
             }
         }
 

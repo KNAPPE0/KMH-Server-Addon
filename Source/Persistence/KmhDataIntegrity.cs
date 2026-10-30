@@ -37,20 +37,25 @@ namespace KMHServerAddon.Persistence
                 (StrayTmpFiles.Count > 0 ? $", {StrayTmpFiles.Count} stray .tmp file(s)" : "");
         }
 
-        public static ScanResult Scan()
+        // At boot this runs before the migration raises the schema, so it reads the schema the data was written under.
+        public static ScanResult Scan() => Scan(KmhDataPaths.KnownDataFiles, KmhDataMeta.AppliedConfigSchema);
+
+        internal static ScanResult Scan(IEnumerable<KmhDataPaths.DataFile> files, int dataSchema)
         {
             ScanResult r = new ScanResult();
-            foreach (KmhDataPaths.DataFile f in KmhDataPaths.KnownDataFiles)
+            foreach (KmhDataPaths.DataFile f in files)
             {
+                // A file this build introduced cannot be missing from data an older build wrote; it is written shortly.
+                bool notYet = f.SinceSchema > 0 && dataSchema < f.SinceSchema;
                 FileStatus fs = new FileStatus { Label = f.Label, Path = f.Path, Regenerable = f.Regenerable,
-                                                 AbsentIsNormal = f.AbsentIsNormal };
+                                                 AbsentIsNormal = f.AbsentIsNormal || notYet };
                 try
                 {
                     if (!File.Exists(f.Path))
                     {
                         fs.State = State.Missing; r.Missing++;
-                        if (f.AbsentIsNormal) { fs.Detail = "not present - normal for this file"; r.MissingOptional++; }
-                        else                  { fs.Detail = "not created yet"; r.MissingRequired++; }
+                        if (fs.AbsentIsNormal) { fs.Detail = notYet ? "new in this release - written at first start" : "not present - normal for this file"; r.MissingOptional++; }
+                        else                   { fs.Detail = "not created yet"; r.MissingRequired++; }
                     }
                     else
                     {
@@ -95,14 +100,14 @@ namespace KMHServerAddon.Persistence
 
         public static void LogScan(ScanResult r)
         {
-            // A brand-new server has nothing to have lost, and "23 required missing" reads as a fault to the owner who just installed it.
+            // A brand-new server has nothing to lose, and "23 required missing" reads as a fault to its new owner.
             bool fresh = KmhDataMeta.IsFreshInstall && !r.CriticalDamage;
 
             if (r.CriticalDamage)
                 ServerLog.Error($"Data integrity: {r.Summary} - IRREPLACEABLE DATA IS DAMAGED (see below). " +
                                 "Restore from KMH-Data-Backups before players reconnect.");
             else if (fresh)
-                ServerLog.Info($"Data integrity: new server - {r.Ok} file(s) in place, the rest are written as each system is first used.");
+                ServerLog.Diag($"Data integrity: new server - {r.Ok} file(s) in place, the rest are written as each system is first used.");
             else
                 ServerLog.Info($"Data integrity: {r.Summary}.");
 
@@ -113,7 +118,10 @@ namespace KMHServerAddon.Persistence
             foreach (FileStatus fs in r.Files.Where(x => x.State == State.Corrupt || x.State == State.Empty))
             {
                 string msg = $"Data integrity: {fs.Label} ({Path.GetFileName(fs.Path)}) is {fs.State} - {fs.Detail}.";
-                if (fs.Regenerable) ServerLog.Warn(msg + " It will regenerate from defaults/clients.");
+                // A config is never overwritten: recovery restores a backup copy that loads, or runs on defaults.
+                if (fs.Regenerable) ServerLog.Warn(msg + ((fs.Label ?? "").StartsWith("Config/", StringComparison.Ordinal)
+                                                            ? " What happens to it is on the config recovery line below."
+                                                            : " It will regenerate from defaults/clients."));
                 else                ServerLog.Error(msg + " This is runtime state with no automatic rebuild.");
             }
 

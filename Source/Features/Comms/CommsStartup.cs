@@ -16,12 +16,13 @@ namespace KMHServerAddon.Features.Comms
 
         private static void Bump() => Revision++;
 
-        // Runs after generate/migrate/backfill, so dropping the caches here is what makes a first boot use what KMH just wrote.
+        // Runs after generate/migrate/backfill, so dropping the caches makes a first boot use what KMH just wrote.
         public static void ApplyAtBoot()
         {
             ApplyChat(push: false);
             ApplyStaff(push: false);
             ApplyMedia(push: false);
+            ApplyFeatures(push: false);
 
             Ready = true;
             ReadyUtc = DateTime.UtcNow;
@@ -46,6 +47,15 @@ namespace KMHServerAddon.Features.Comms
             // Labels ride the hello but WHO holds a role rides the stats snapshot, so both have to go out.
             try { StaffRolesPush?.Invoke(); }
             catch (Exception ex) { ServerLog.Warn($"Comms: staff role broadcast failed - {ex.Message}"); }
+        }
+
+        public static void ApplyFeatures(bool push)
+        {
+            FeaturesConfig.Reload();
+            Bump();
+            _ = FeaturesConfig.Current;
+            // The gates ride the hello, so without a re-send every connected client keeps enforcing the old set.
+            if (push) PushHello();
         }
 
         public static void ApplyMedia(bool push)
@@ -88,6 +98,13 @@ namespace KMHServerAddon.Features.Comms
             catch (Exception ex) { ServerLog.Warn($"Comms: could not push the hello - {ex.Message}"); }
         }
 
+        // IsEnabled, not Enabled: the bridge refuses to start without a token, so Enabled alone would misreport it.
+        internal static string DescribeDiscord(Discord.DiscordConfig cfg)
+        {
+            if (cfg?.IsEnabled == true) return "configured";
+            return cfg?.Enabled == true ? "off - enabled but no bot token" : "disabled";
+        }
+
         // Deliberately carries no value that could be a token or a player's name.
         private static void LogSummary()
         {
@@ -99,15 +116,15 @@ namespace KMHServerAddon.Features.Comms
                       + staff.Moderators.Count + staff.Ops.Count;
 
             // Reported rather than applied, because Discord's config is read once at Start and needs a restart.
-            bool discordOn = false;
+            string discordState = "disabled";
             try
             {
                 Discord.DiscordConfig dcfg = Discord.DiscordConfig.LoadOrDefault();
-                discordOn = dcfg?.Enabled == true;
+                discordState = DescribeDiscord(dcfg);
                 // Cosmetic, so a bad value warns rather than stopping boot.
                 if (!Discord.KmhEmbedBuilder.TryBrandColor(dcfg?.Branding?.EmbedColorHex, out _, out string why)
                     && !string.IsNullOrEmpty(why))
-                    ServerLog.Warn($"Discord branding: EmbedColorHex {why} - using KMH's default colour.");
+                    ServerLog.Warn($"Discord branding: EmbedColorHex {why} - using the Colony Nexus default colour.");
             }
             catch { }
 
@@ -117,9 +134,9 @@ namespace KMHServerAddon.Features.Comms
                         + $"{chat.ImageHostAllowList?.Length ?? 0} allowed host(s), {chat.MaxImageBytes / (1024 * 1024)}MB image cap");
             sb.AppendLine($"  Staff loaded      - badges {(staff.ShowStaffBadges ? "on" : "off")}, {named} name(s) listed, "
                         + $"RWT admins {(staff.TreatRwtAdminsAsStaff ? "badged" : "not badged")}");
-            sb.AppendLine($"  Media loaded      - resolver {(media.ServerMediaResolverEnabled ? "on" : "off")}, "
-                        + $"{media.MaxSourceBytes / (1024 * 1024)}MB source / {media.MaxOutputBytes / (1024 * 1024)}MB output");
-            sb.AppendLine($"  Discord bridge    - {(discordOn ? "configured" : "disabled")} (restart-only config)");
+            sb.AppendLine($"  Media loaded      - resolver {(media.Images.ResolverEnabled ? "on" : "off")}, "
+                        + $"{media.Images.MaxSourceBytes / (1024 * 1024)}MB source / {media.Images.MaxOutputBytes / (1024 * 1024)}MB output");
+            sb.AppendLine($"  Discord bridge    - {discordState} (restart-only config)");
 
             // The resolved policy, since the raw fee fields are only read under EconomyMode=Custom.
             try
@@ -134,7 +151,7 @@ namespace KMHServerAddon.Features.Comms
             }
             catch { }
             sb.Append    ("  presentation state ready - handshakes from here carry it");
-            ServerLog.Info(sb.ToString());
+            ServerLog.Diag(sb.ToString());
         }
     }
 }

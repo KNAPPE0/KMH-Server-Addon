@@ -42,10 +42,10 @@ namespace KMHServerAddon
             public string Directory;
             public string CacheDir;
             public string SelectedExe;            // null when nothing usable was found
-            public string ServerDll;              // which server assembly the selection carries
+            public string ServerDll;
             public string Generation;             // "old" | "new" | "rt" | null
             public string Fingerprint;
-            public bool   LooseLayout;            // assemblies already sit beside us; no extraction needed
+            public bool   LooseLayout;            // assemblies already sit beside the launcher; no extraction needed
             public string LoadFailure;            // exe found, but its managed assembly could not be made usable
             public string RuntimeProblem;         // the server needs a .NET this process isn't running
             public readonly List<Candidate> Checked = new List<Candidate>();
@@ -103,8 +103,8 @@ namespace KMHServerAddon
                 int needMajor = int.Parse(m.Groups[1].Value);
                 int haveMajor = Environment.Version.Major;
                 if (needMajor <= haveMajor) return null;
-                return $"this RimWorld Together build needs the .NET {needMajor} runtime, but KMH is running on "
-                     + $".NET {Environment.Version} - install .NET {needMajor} (or use a KMH -selfcontained build "
+                return $"this RimWorld Together build needs the .NET {needMajor} runtime, but Colony Nexus is running on "
+                     + $".NET {Environment.Version} - install .NET {needMajor} (or use a Colony Nexus -selfcontained build "
                      + $"matching it). Read from {Path.GetFileName(cfg)}.";
             }
             catch { return null; }
@@ -114,7 +114,6 @@ namespace KMHServerAddon
         {
             Result r = new Result { Directory = dir, CacheDir = cacheDir };
 
-            // Loose/slim install: assemblies are already on disk, nothing to extract.
             string loose = FirstExisting(dir, KnownServerDlls);
             if (loose != null)
             {
@@ -139,7 +138,7 @@ namespace KMHServerAddon
                 string full = SafeFull(p);
                 if (!string.IsNullOrEmpty(self) && string.Equals(full, self, StringComparison.OrdinalIgnoreCase))
                 {
-                    c.Rejection = "this is the running KMH launcher itself";
+                    c.Rejection = "this is the running Colony Nexus launcher itself";
                     continue;
                 }
 
@@ -153,9 +152,9 @@ namespace KMHServerAddon
                 string carried = FirstIn(inside, KnownServerDlls);
                 if (carried == null)
                 {
-                    // Catches a KMH copy under any name, not just the path we run from - and never by file size.
+                    // Catches a KMH copy under any name, not just the running path - and never by file size.
                     c.Rejection = Contains(inside, SelfDll)
-                        ? "a KMH Server Addon build (carries " + SelfDll + "), not RimWorld Together"
+                        ? "a Colony Nexus Server Addon build (carries " + SelfDll + "), not RimWorld Together"
                         : "no RimWorld Together server assembly inside (" + inside.Count + " assemblies)";
                     continue;
                 }

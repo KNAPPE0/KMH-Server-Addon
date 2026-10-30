@@ -18,7 +18,7 @@ namespace WelcomeBonus
         private IKmhServerHost _host;
         private IExtensionStorage _storage;
 
-        // Persisted, or a reconnect in the same session claims the bonus again.
+        // Persisted, or every player claims the bonus again after a restart.
         private sealed class State
         {
             public List<string> Welcomed { get; set; } = new List<string>();
@@ -63,7 +63,7 @@ namespace WelcomeBonus
                 }
             }
 
-            // Check the result: a discarded false silently burns the silver.
+            // Checked, or a refused deposit still marks the player welcomed and the bonus is never paid.
             if (!_host.Treasury.DepositSilver(e.Username, BonusAmount, note: $"{Name} extension"))
             {
                 _host.Log.Warn($"Treasury rejected the bonus deposit for {e.Username}.");

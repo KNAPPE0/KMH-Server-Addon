@@ -9,19 +9,30 @@
 
   <PropertyGroup>
     <RwtFlavor Condition="'$(RwtFlavor)' == ''">Old</RwtFlavor>
-    <TargetFramework>net8.0</TargetFramework>
+    <!-- RWT 26.10.20.1 builds its server for .NET 10 and it runs in this process; older RWT servers (.NET 8) load unchanged. -->
+    <TargetFramework>net10.0</TargetFramework>
     <RootNamespace>KMHServerAddon</RootNamespace>
     <Nullable>disable</Nullable>
     <LangVersion>latest</LangVersion>
     <ImplicitUsings>enable</ImplicitUsings>
-    <Version>1.3.0</Version>
-    <AssemblyVersion>1.3.0.0</AssemblyVersion>
-    <FileVersion>1.3.0.0</FileVersion>
+    <Version>1.3.1</Version>
+    <InformationalVersion>1.3.1+rel-282</InformationalVersion>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <AssemblyVersion>1.3.1.0</AssemblyVersion>
+    <FileVersion>1.3.1.0</FileVersion>
     <IntermediateOutputPath>obj\$(RwtFlavor)\$(Configuration)\</IntermediateOutputPath>
+    <!-- Shipped binaries name no folder on the machine that built them. -->
+    <PathMap>$(MSBuildProjectDirectory)=/_/</PathMap>
 
     <!-- Same RID set the RWT server uses so the addon publishes across
          the same platforms players already get the server for. -->
     <RuntimeIdentifiers>win-x64;win-x86;linux-x64;linux-arm;linux-arm64</RuntimeIdentifiers>
+  </PropertyGroup>
+
+  <!-- A self-contained bundle ships the runtime RWT's server runs on too; SDK 9.0.306 defaulted net8.0 to 8.0.21,
+       ten security releases behind. Framework-dependent builds keep rolling forward on the host's runtime. -->
+  <PropertyGroup Condition="'$(SelfContained)' == 'true'">
+    <RuntimeFrameworkVersion>10.0.13</RuntimeFrameworkVersion>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(RwtFlavor)' == 'Old'">
@@ -39,7 +50,7 @@
     <DefineConstants>$(DefineConstants);RWT_NEW</DefineConstants>
     <OutputPath>bin\payload</OutputPath>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
-    <RwtServerBuildPath Condition="'$(RwtServerBuildPath)' == ''">E:\RWT Related\rwt-26.6.9.1\Server</RwtServerBuildPath>
+    <RwtServerBuildPath Condition="'$(RwtServerBuildPath)' == ''">$(MSBuildThisFileDirectory)..\..\rwt-26.6.9.1\Server</RwtServerBuildPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(RwtFlavor)' == 'RT'">
     <OutputType>Library</OutputType>
@@ -48,7 +59,7 @@
     <DefineConstants>$(DefineConstants);RWT_NEW;RWT_RT</DefineConstants>
     <OutputPath>bin\payload</OutputPath>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
-    <RwtServerBuildPath Condition="'$(RwtServerBuildPath)' == ''">E:\RWT Related\rwt-RTServer\Server</RwtServerBuildPath>
+    <RwtServerBuildPath Condition="'$(RwtServerBuildPath)' == ''">$(MSBuildThisFileDirectory)..\..\rwt-RTServer\Server</RwtServerBuildPath>
   </PropertyGroup>
 
   <!-- The launcher embeds each payload that has been built (build New + RT before Old for release; a plain dev
@@ -84,6 +95,16 @@
     </PropertyGroup>
     <Error Condition="'$(_DeclaredBuildVersion)' != '$(Version)'" Text="KmhVersion.Build is &quot;$(_DeclaredBuildVersion)&quot; but the project version is &quot;$(Version)&quot;. Update $(_VersionFile) so the handshake reports the version actually shipped." />
   </Target>
+  <!-- AssemblyVersion is 1.3.1.0 for every rel of v1.3.1, so the rel tag is the only thing separating them and a
+       release check can only trust it if the binary and the source agree. -->
+  <Target Name="VerifyBuildTag" BeforeTargets="CoreCompile">
+    <PropertyGroup>
+      <_TagText>$([System.IO.File]::ReadAllText('$(MSBuildProjectDirectory)\KmhVersion.cs'))</_TagText>
+      <_DeclaredTag>$([System.Text.RegularExpressions.Regex]::Match($(_TagText), 'BuildTag\s*=\s*"([^"]*)"').Groups[1].Value)</_DeclaredTag>
+      <_InfoTag>$([System.Text.RegularExpressions.Regex]::Match('$(InformationalVersion)', '\+(.*)$').Groups[1].Value)</_InfoTag>
+    </PropertyGroup>
+    <Error Condition="'$(_DeclaredTag)' != '$(_InfoTag)'" Text="KmhVersion.BuildTag is &quot;$(_DeclaredTag)&quot; but InformationalVersion carries &quot;$(_InfoTag)&quot;. They are what tells two 1.3.1.0 builds apart - bump both together." />
+  </Target>
 
   <!-- A launcher built without a payload silently loses support for that generation, so say so at build time. -->
   <Target Name="WarnMissingPayloads" BeforeTargets="Build" Condition="'$(RwtFlavor)' == 'Old'">
@@ -102,7 +123,16 @@
          dependency is loaded but the bot never starts, so cold-start cost
          is minimal. -->
     <PackageReference Include="Discord.Net" Version="3.16.0" />
-    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.11" />
+    <!-- Release builds need a Six Labors Community key (free for source-available projects): see Local.props.example. -->
+    <PackageReference Include="SixLabors.ImageSharp" Version="4.1.3" />
+    <!-- The leaderboard PNG for Discord, drawn here so it needs no Global; the same versions Global draws it with. -->
+    <PackageReference Include="SixLabors.Fonts" Version="3.2.0" />
+    <PackageReference Include="SixLabors.ImageSharp.Drawing" Version="3.1.3" />
+  </ItemGroup>
+
+  <!-- Inter (SIL OFL 1.1) for the leaderboard PNG, embedded with its licence so every host draws the same bytes. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Assets\Fonts\Inter-*.ttf;Assets\Fonts\Inter-LICENSE.txt" LogicalName="KMH.Fonts.%(Filename)%(Extension)" />
   </ItemGroup>
 
   <!-- Public SDK project for extension authors. Built alongside the
@@ -125,6 +155,14 @@
   <ItemGroup>
     <KmhDataIcon Include="Assets\Icons\**\*" />
   </ItemGroup>
+
+  <!-- ALSO embedded, in every flavor, because staging only fills a folder the zip then carries: an owner who
+       upgrades by replacing the exe, or any setup script that runs against an already-booted folder, never
+       receives the PNGs at all. DiscordIconAssets writes back whichever stock icon is missing at boot, so the
+       icons survive an in-place upgrade instead of quietly disappearing from Discord embeds. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Assets\Icons\*.png;Assets\Icons\*.txt" LogicalName="KMH.Icons.%(Filename)%(Extension)" />
+  </ItemGroup>
   <Target Name="StageKmhDataIconsBuild" AfterTargets="Build" Condition="'$(RwtFlavor)' == 'Old'">
     <Copy SourceFiles="@(KmhDataIcon)" DestinationFiles="@(KmhDataIcon->'$(OutDir)KMH-Data\Icons\%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" />
   </Target>
@@ -135,7 +173,8 @@
   <!-- Newtonsoft.Json is referenced Private=False (framework-dependent builds get it from RWT's own folder).
        A self-contained folder build has no RWT beside it at publish time, so stage Newtonsoft here or it starts
        up missing that dependency. Same DLL RWT ships, so no version drift. -->
-  <Target Name="StageNewtonsoftForSelfContained" AfterTargets="Publish" Condition="'$(RwtFlavor)' == 'Old' and '$(SelfContained)' == 'true' and Exists('$(RwtServerBuildPath)\Newtonsoft.Json.dll')">
+  <!-- Only when the publish brought none: Discord.Net already publishes 13.0.3, and RWT 26.5's 11.0.1 over it is CVE-2024-21907. -->
+  <Target Name="StageNewtonsoftForSelfContained" AfterTargets="Publish" Condition="'$(RwtFlavor)' == 'Old' and '$(SelfContained)' == 'true' and Exists('$(RwtServerBuildPath)\Newtonsoft.Json.dll') and !Exists('$(PublishDir)Newtonsoft.Json.dll')">
     <Copy SourceFiles="$(RwtServerBuildPath)\Newtonsoft.Json.dll" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" />
   </Target>
 
@@ -165,7 +204,7 @@
     <!-- Compile-time HintPath root for the RWT server's Debug (multi-file) build output. Point it at your local
          RWT 26.5.24.1 build. Override without editing this file: set $env:RwtServerBuildPath, or add the path in
          Source/Local.props (gitignored, imported below). -->
-    <RwtServerBuildPath Condition="'$(RwtServerBuildPath)' == ''">E:\RWT Related\rwt-26.5.24.1\Source\Server\bin\Debug\net8.0</RwtServerBuildPath>
+    <RwtServerBuildPath Condition="'$(RwtServerBuildPath)' == ''">$(MSBuildThisFileDirectory)..\..\rwt-26.5.24.1\Source\Server\bin\Debug\net8.0</RwtServerBuildPath>
   </PropertyGroup>
 
   <Import Project="Local.props" Condition="Exists('Local.props')" />

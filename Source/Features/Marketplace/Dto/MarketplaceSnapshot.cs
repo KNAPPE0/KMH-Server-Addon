@@ -37,8 +37,13 @@ namespace KMHServerAddon.Features.Marketplace.Dto
 
         // Persisted but stripped from wire snapshots - the blob never leaves the server.
         [JsonProperty("escrow_payloads")]     public List<Items.KmhThingPayload> EscrowPayloads { get; set; }
+        // The post row that funded it, so boot recovery can see the goods are held here. Stripped from the wire.
+        [JsonProperty("post_tx", NullValueHandling = NullValueHandling.Ignore)] public string PostTxId { get; set; }
         [JsonProperty("state_fingerprint")]   public string StateFingerprint { get; set; } = "";
-        [JsonProperty("state_note")]          public string StateNote        { get; set; } = "";   // UI: "(tainted, q5, legacy)"
+        [JsonProperty("state_note")]          public string StateNote        { get; set; } = "";
+
+        // Bumped under the store lock on every reserve or release, so a cancel can tell its recorded listing is unchanged.
+        [JsonIgnore] internal long Changes;
 
         public MarketplaceListing ShallowClone() => (MarketplaceListing)MemberwiseClone();
     }

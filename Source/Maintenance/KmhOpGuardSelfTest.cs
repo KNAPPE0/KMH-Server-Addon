@@ -9,7 +9,7 @@ using KMHServerAddon.Security;
 
 namespace KMHServerAddon.Maintenance
 {
-    // One logical action can reach the server twice; these pin what "twice" costs: one effect, only for the caller who sent the id.
+    // One action can arrive twice; these pin the cost: one effect, and only for the caller who sent the id.
     internal static class KmhOpGuardSelfTest
     {
         private static string User() => "selftest_op_" + Guid.NewGuid().ToString("N").Substring(0, 8);
@@ -129,9 +129,9 @@ namespace KMHServerAddon.Maintenance
                 int bought = 0;
                 bool Buy() { bool ok = MarketplaceStore.Buy(buyer, listing, 5, out _, out int q, out _); bought += q; return ok; }
 
-                bool broke = Guarded("mkt.buy", buyer, "buy-2", Buy);            // no silver banked yet
+                bool broke = Guarded("mkt.buy", buyer, "buy-2", Buy);
                 if (!TreasuryStore.DepositSilver(buyer, 100, "selftest top-up")) return (false, "could not top the buyer up");
-                bool afterTopUp = Guarded("mkt.buy", buyer, "buy-2", Buy);       // same logical action, retried
+                bool afterTopUp = Guarded("mkt.buy", buyer, "buy-2", Buy);
 
                 MarketplaceStore.Cancel(seller, listing);
                 TreasuryStore.PurgeOwnerForTest(seller);

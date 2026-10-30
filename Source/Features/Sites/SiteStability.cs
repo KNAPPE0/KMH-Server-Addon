@@ -10,11 +10,10 @@
 
         public static int Clamp(int stability) => stability < 0 ? 0 : (stability > 100 ? 100 : stability);
 
-        // 100 -> 1.00 (full output), 50 -> ~0.78, 1 -> ~0.55 (the floor), 0 -> 0 (fallen, produces nothing).
         public static double OutputFactor(int stability)
         {
             int s = Clamp(stability);
-            if (s <= 0) return 0;                       // fallen
+            if (s <= 0) return 0;
             return Floor + (1.0 - Floor) * (s / 100.0);
         }
 

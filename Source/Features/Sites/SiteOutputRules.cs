@@ -38,14 +38,14 @@ namespace KMHServerAddon.Features.Sites
             },
             new SiteOutputTier
             {
-                // Crafted / rare / tech. Blocked by default: never a printer for gear, tech, drugs, genes, relics.
+                // Blocked by default: never a printer for gear, tech, drugs, genes, relics.
                 Name = "Crafted/Rare/Tech", Enabled = false, MaxAmount = 1, CostMultiplier = 25.0, CycleMultiplier = 12.0,
                 MaxSpeedMultiplier = 1.25, MaxOutputMultiplier = 1.0, AllowAutoClassifiedItems = false,
             },
         };
     }
 
-    // Result of classifying a site output. Server is the final authority; the client only previews.
+    // The server is the final authority; the client only previews.
     public struct SiteOutputClass
     {
         public bool   IsAllowed;
@@ -66,7 +66,6 @@ namespace KMHServerAddon.Features.Sites
     // Never trusts a client-supplied market value, and an unknown item lands on the configured unknown tier.
     internal static class SiteOutputRules
     {
-        // Resolution order: explicit block, then explicit allow, then the highest matching auto-tier, then unknown.
         private static readonly string[] Tier1Keywords =
         {
             "wood", "hay", "raw", "rice", "corn", "potato", "berry", "berries", "haygrass", "meat", "milk", "egg_",
@@ -82,35 +81,41 @@ namespace KMHServerAddon.Features.Sites
             "plasteel", "uranium", "gold", "jade", "componentindustrial", "medicineindustrial", "smokeleaf", "psychoid",
             "devilstrand", "synthread", "hyperweave",
         };
-        // Tier 4 / always-suspicious markers - these force the crafted/rare/tech tier regardless of anything else.
+        // Force tier 4 unless an explicit allow already pinned the item.
         private static readonly string[] BlockedMarkers =
         {
             "techprint", "techprof", "subpersona", "persona", "aicore", "aipersona", "archotech", "bionic", "implant",
             "gun_", "bow_", "weapon", "meleeweapon", "apparel_", "armor", "power_", "ammo", "shell_", "relic", "artifact",
             "book", "textbook", "schematic", "gene", "xenogerm", "genepack", "endogene", "generemover", "luciferium",
             "minified", "wornbycorpse", "corpse_", "megasloth", "thrumbo", "eltex", "psytrainer", "neurotrainer",
-            // real-catalog coverage: spacer/ultratech + catastrophic/rare modded markers
             "componentspacer", "reinforcedbarrel", "glitterworld", "ultratech", "medicineultratech", "warhead",
             "missile", "nuclear", "plutonium", "fuelrod", "reactor", "powercore", "permit", "nameplate",
             "orbital", "tornado", "targeter", "shield", "flake", "yayo", "gojuice", "wakeup", "joint",
         };
 
-        // Keywords stay fuzzy but never bypass the complex-item pre-filter; value is not consulted, because at this point the caller's figure is still the client's.
+        // Keywords never bypass the complex-item pre-filter; value is unused, as here it is still the client's figure.
         public static SiteOutputClass Classify(string defName, string label)
         {
             SitesConfig cfg = SitesConfig.Current;
             SiteOutputTier[] tiers = Tiers(cfg);   // resolved once: a malformed config hands back a fresh array per call
             string def = (defName ?? "").Trim();
             string lbl = (label ?? "").Trim();
-            string kw  = (def + " " + lbl).ToLowerInvariant();   // fuzzy keyword haystack
+            string kw  = (def + " " + lbl).ToLowerInvariant();   // owner keywords may still name a label
+            string dkw = def.ToLowerInvariant();                  // built-in rules: the label is whichever language arrived first
 
             SiteOutputClass r = new SiteOutputClass
             {
                 RelevantSkill = SiteStore.DetermineRelevantSkill(def),
-                TierNumber = ClampTier(cfg.DefaultUnknownOutputTier),
+                TierNumber = ClampTier(cfg.Output.DefaultUnknownTier),
             };
 
-            // 1) explicit BLOCK always wins (exact defName OR exact label, or a block keyword).
+            // Money, whatever any rule or label says.
+            if (string.Equals(def.Split('|')[0], "Silver", StringComparison.OrdinalIgnoreCase))
+            {
+                r.TierNumber = 4; r.IsExplicitlyBlocked = true;
+                return Finalize(r, cfg, allowedFlagFromTier: false, blockReason: "a Site can't produce silver");
+            }
+
             foreach (SiteOutputTier t in tiers)
                 if (MatchesNameOrLabel(def, lbl, t.BlockedDefNames) || MatchesKeyword(kw, t.BlockedKeywords))
                 {
@@ -118,10 +123,11 @@ namespace KMHServerAddon.Features.Sites
                     return Finalize(r, cfg, allowedFlagFromTier: false, blockReason: "blocked by server rules");
                 }
 
-            // An exact allow may override the complex-item pre-filter; a keyword allow must not.
-            int tierIdx = -1; bool exactAllow = false, keywordAllow = false;
+            // An exact allow may override the complex-item pre-filter only by defName; a label or keyword allow must not.
+            int tierIdx = -1; bool exactAllow = false, keywordAllow = false, defAllow = false;
             for (int i = 0; i < tiers.Length; i++)
-                if (MatchesNameOrLabel(def, lbl, tiers[i].AllowedDefNames)) { tierIdx = i; exactAllow = true; break; }
+                if (MatchesNameOrLabel(def, lbl, tiers[i].AllowedDefNames))
+                { tierIdx = i; exactAllow = true; defAllow = MatchesNameOrLabel(def, "", tiers[i].AllowedDefNames); break; }
             if (tierIdx < 0)
                 for (int i = 0; i < tiers.Length; i++)
                     if (MatchesKeyword(kw, tiers[i].AllowedKeywords)) { tierIdx = i; keywordAllow = true; break; }
@@ -130,38 +136,36 @@ namespace KMHServerAddon.Features.Sites
             // Overridable only when the owner opted in AND the target tier is enabled and within the server max.
             if (!Items.KmhItemSafety.IsAllowedSiteOutput(def, out string hardReason))
             {
-                int idx = tierIdx >= 0 ? tierIdx : ClampTier(cfg.DefaultUnknownOutputTier) - 1;
+                int idx = tierIdx >= 0 ? tierIdx : ClampTier(cfg.Output.DefaultUnknownTier) - 1;
                 SiteOutputTier tt = tiers[idx];
-                bool canOverride = exactAllow && cfg.AllowExplicitComplexSiteOutputs && tt.Enabled
-                                   && (idx + 1) <= ClampTier(cfg.MaxAllowedSiteOutputTier);
+                bool canOverride = defAllow && cfg.Output.AllowExplicitComplex && tt.Enabled
+                                   && (idx + 1) <= ClampTier(cfg.Output.MaxAllowedTier);
                 if (!canOverride)
                 {
                     r.TierNumber = 4; r.IsUnknownOrSuspicious = true;
                     return Finalize(r, cfg, allowedFlagFromTier: false, blockReason: hardReason);
                 }
-                Diagnostics.ServerLog.Warn($"Sites: COMPLEX output '{def}' ({lbl}) allowed by exact allowlist + AllowExplicitComplexSiteOutputs (tier {idx + 1}) - owner opted in.");
+                Diagnostics.ServerLog.Warn($"Sites: COMPLEX output '{def}' ({lbl}) allowed by exact allowlist + Output.AllowExplicitComplex (tier {idx + 1}) - owner opted in.");
                 r.TierNumber = idx + 1; r.IsExplicitlyAllowed = true;
                 return Finalize(r, cfg, allowedFlagFromTier: true, blockReason: null);
             }
 
-            // 4) suspicious markers -> tier 4 unless an explicit allow already pinned it.
-            if (tierIdx < 0 && MatchesKeyword(kw, BlockedMarkers))
+            if (tierIdx < 0 && MatchesKeyword(dkw, BlockedMarkers))
             {
                 r.TierNumber = 4; r.IsUnknownOrSuspicious = true;
                 return Finalize(r, cfg, allowedFlagFromTier: false, blockReason: "rare/tech/crafted item - not a basic resource");
             }
 
-            // 5) auto-classify by keyword (highest tier match wins so plasteel != steel).
+            // Highest tier first, so plasteel is not read as steel.
             if (tierIdx < 0)
             {
-                if      (MatchesKeyword(kw, Tier3Keywords)) tierIdx = 2;
-                else if (MatchesKeyword(kw, Tier2Keywords)) tierIdx = 1;
-                else if (MatchesKeyword(kw, Tier1Keywords)) tierIdx = 0;
+                if      (MatchesKeyword(dkw, Tier3Keywords)) tierIdx = 2;
+                else if (MatchesKeyword(dkw, Tier2Keywords)) tierIdx = 1;
+                else if (MatchesKeyword(dkw, Tier1Keywords)) tierIdx = 0;
             }
 
-            // 6) unknown -> default unknown tier (blocked by default).
             bool unknown = tierIdx < 0;
-            if (unknown) tierIdx = ClampTier(cfg.DefaultUnknownOutputTier) - 1;
+            if (unknown) tierIdx = ClampTier(cfg.Output.DefaultUnknownTier) - 1;
 
             r.TierNumber = tierIdx + 1;
             r.IsExplicitlyAllowed = explicitAllow;
@@ -187,7 +191,7 @@ namespace KMHServerAddon.Features.Sites
             r.MaxOutputMultiplier = r.TierNumber >= 4 ? 1.0 : Math.Max(1.0, tier.MaxOutputMultiplier);
 
             bool tierEnabled  = tier.Enabled;
-            bool underMaxTier = r.TierNumber <= ClampTier(cfg.MaxAllowedSiteOutputTier);
+            bool underMaxTier = r.TierNumber <= ClampTier(cfg.Output.MaxAllowedTier);
             r.IsAllowed = allowedFlagFromTier && tierEnabled && underMaxTier && string.IsNullOrEmpty(blockReason);
 
             if (!r.IsAllowed && string.IsNullOrEmpty(blockReason))
@@ -202,7 +206,7 @@ namespace KMHServerAddon.Features.Sites
 
         private static SiteOutputTier[] Tiers(SitesConfig cfg)
         {
-            SiteOutputTier[] t = cfg.OutputTiers;
+            SiteOutputTier[] t = cfg.Output.Tiers;
             if (t == null || t.Length < 4) return SiteOutputTier.Defaults();  // defensive: always 4 tiers
             return t;
         }

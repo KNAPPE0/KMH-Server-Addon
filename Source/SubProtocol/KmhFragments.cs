@@ -13,7 +13,7 @@ namespace KMHServerAddon.SubProtocol
         // Base64 costs ~33%, so 32 KB of payload lands near 44 KB of envelope, well inside a 64 KB frame.
         public const int RawChunkBytes = 32 * 1024;
 
-        // A peer that can make us hold memory is a peer that can exhaust us.
+        // Bounds on what one peer can make the server hold in memory.
         public const int  MaxChunks               = 512;
         public const long MaxTransferBytes        = 8L * 1024 * 1024;
         public const int  MaxConcurrentPerPeer    = 4;
@@ -80,8 +80,17 @@ namespace KMHServerAddon.SubProtocol
 
             private readonly Dictionary<string, Transfer> _open = new Dictionary<string, Transfer>(StringComparer.Ordinal);
 
-            // `why` is set only on rejection, so a caller can log a real reason instead of silence.
+            // `why` is set only on rejection; locked because the sweeper prunes from another thread.
             public KmhEnvelope Accept(KmhEnvelope frag, out string why)
+            {
+                lock (_open) return AcceptLocked(frag, out why);
+            }
+
+            internal int OpenCount { get { lock (_open) return _open.Count; } }
+
+            internal int PruneExpired() { lock (_open) return Prune(); }
+
+            private KmhEnvelope AcceptLocked(KmhEnvelope frag, out string why)
             {
                 why = null;
                 if (frag == null) { why = "no envelope"; return null; }
@@ -111,7 +120,6 @@ namespace KMHServerAddon.SubProtocol
                     };
                     _open[tid] = t;
                 }
-                // A transfer's own header must not change halfway through.
                 else if (t.Parts.Length != n || t.TotalBytes != len
                          || !string.Equals(t.Kind, kind, StringComparison.Ordinal)
                          || !string.Equals(t.Hash, hash, StringComparison.Ordinal))
@@ -149,18 +157,22 @@ namespace KMHServerAddon.SubProtocol
             }
 
             // An abandoned transfer must not hold its buffers for the life of the connection.
-            private void Prune()
+            private int Prune()
             {
-                if (_open.Count == 0) return;
-                DateTime cutoff = DateTime.UtcNow.AddSeconds(-AssemblyTimeoutSeconds);
+                if (_open.Count == 0) return 0;
+                DateTime cutoff = DateTime.UtcNow.AddSeconds(-AssemblyTimeoutSeconds) + AgeForTest;
                 List<string> dead = null;
                 foreach (KeyValuePair<string, Transfer> kv in _open)
                     if (kv.Value.StartedUtc < cutoff) (dead = dead ?? new List<string>()).Add(kv.Key);
-                if (dead == null) return;
+                if (dead == null) return 0;
                 foreach (string k in dead) _open.Remove(k);
+                return dead.Count;
             }
 
-            public void Clear() => _open.Clear();
+            // Moves the clock forward for the sweeper test, which cannot wait out the real timeout.
+            internal static TimeSpan AgeForTest = TimeSpan.Zero;
+
+            public void Clear() { lock (_open) _open.Clear(); }
         }
     }
 }

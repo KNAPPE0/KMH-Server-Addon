@@ -49,14 +49,15 @@ namespace KMHServerAddon.Items
             KmhThingPayload Bone(string blob) => new KmhThingPayload
             { DefName = "Bone", StackCount = 75, ScribeXml = blob, Splittable = true, Fingerprint = "fp" + blob };
 
-            var vault = new List<KmhThingPayload> { Bone("<a/>"), Bone("<b/>"), Bone("<c/>"), Bone("<d/>") };
+            // A row's take drains its whole group, so a group holding two saved states would sell one item as the other.
+            var vault = new List<KmhThingPayload> { Bone("<a/>"), Bone("<b/>"), Bone("<c/>"), Bone("<d/>"), Bone("<a/>") };
             List<KmhThingPayload> shown = Features.Treasury.TreasuryStore.GroupForDisplay(vault);
-            r.Add(("Treasury: identical-looking stacks with different saved state show as one row",
-                   shown.Count == 1 && shown[0].StackCount == 300,
-                   $"{vault.Count} stored rows -> {shown.Count} shown, {(shown.Count > 0 ? shown[0].StackCount : 0)} units"));
+            r.Add(("Treasury: stacks with different saved state are separate rows; identical ones still share a row",
+                   shown.Count == 4 && shown[0].StackCount == 150,
+                   $"{vault.Count} stored rows -> {shown.Count} shown, {(shown.Count > 0 ? shown[0].StackCount : 0)} units in the first"));
 
             r.Add(("Treasury: grouping for display never alters the stored rows",
-                   vault.Count == 4 && vault[0].StackCount == 75 && vault[0].ScribeXml == "<a/>",
+                   vault.Count == 5 && vault[0].StackCount == 75 && vault[0].ScribeXml == "<a/>",
                    "the blobs are what a modded item's identity lives in"));
 
             var planks = new List<KmhThingPayload>
@@ -99,7 +100,7 @@ namespace KMHServerAddon.Items
                    KmhPayloadEscrow.DeliverableUnits(mixed, 1) <= 1
                    && KmhPayloadEscrow.DeliverableUnits(mixed, 5) <= 5, ""));
 
-            // Replayed independently below instead of calling the planner again, or the check would only prove it agrees with itself.
+            // Replayed independently, not via the planner, or the check would only prove the planner agrees with itself.
             var shapes = new List<List<KmhThingPayload>>
             {
                 new List<KmhThingPayload> { P(1, false, false) },

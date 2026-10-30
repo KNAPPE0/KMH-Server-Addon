@@ -8,15 +8,15 @@ namespace KMHServerAddon.Maintenance
     {
         public static void Run(Action<string> reply)
         {
-            reply("=== KMH audit (advisory - review, don't auto-act) ===");
+            reply("=== Colony Nexus audit (advisory - review, don't auto-act) ===");
 
             reply($"Economy policy: {Features.Economy.EconomyAccess.Describe()}");
 
             Features.Economy.EconomyConfig ecfg = Features.Economy.EconomyConfig.Current;
             if (ecfg.AnyGuildHallRule)
             {
-                reply($"Guild Hall rules ENABLED (createReq={ecfg.RequireGuildHallToCreateGuild}, treasuryReq={ecfg.RequireGuildHallForGuildTreasury}, " +
-                      $"contribReq={ecfg.RequireGuildHallForGuildContributions}, joinNear={ecfg.RequireMemberNearGuildHallToJoin}, remoteInvites={ecfg.AllowRemoteGuildInvites}, radius={ecfg.GuildHallAccessRadiusTiles}).");
+                reply($"Guild Hall rules ENABLED (createReq={ecfg.GuildHall.RequireToCreateGuild}, treasuryReq={ecfg.GuildHall.RequireForTreasury}, " +
+                      $"contribReq={ecfg.GuildHall.RequireForContributions}, joinNear={ecfg.GuildHall.RequireMemberNearHallToJoin}, remoteInvites={ecfg.GuildHall.AllowRemoteInvites}, radius={ecfg.GuildHall.AccessRadiusTiles}).");
                 var halls = Features.Guilds.GuildStore.AllGuildHallStatus();
                 int missing = 0;
                 foreach (var h in halls) if (!h.HasHall) { missing++; if (missing <= 15) reply($"  [REVIEW] guild '{h.Name}' has NO Guild Hall (rule is enabled - some actions will be blocked)."); }
@@ -37,10 +37,10 @@ namespace KMHServerAddon.Maintenance
             List<Features.PlayerStats.Dto.PlayerLeaderboardEntry> players = Features.PlayerStats.PlayerStatsStore.BuildSnapshot().Entries;
             players.Sort((a, b) => b.TotalWealth.CompareTo(a.TotalWealth));
             int wn = Math.Min(10, players.Count);
-            reply($"Top total wealth - reported colony + server-side KMH holdings ({wn}):");
+            reply($"Top total wealth - reported colony + server-side Colony Nexus holdings ({wn}):");
             for (int i = 0; i < wn; i++)
                 reply($"  {Util.SilverFmt.Format(players[i].TotalWealth)}  -  {players[i].Username}" +
-                      $"  ({Util.SilverFmt.Format(players[i].Wealth)} on-map + {Util.SilverFmt.Format(players[i].KmhWealth)} KMH)");
+                      $"  ({Util.SilverFmt.Format(players[i].Wealth)} on-map + {Util.SilverFmt.Format(players[i].KmhWealth)} Colony Nexus)");
 
             // A stock client reports the real market value, so a declared 0 means the client was modified.
             List<Features.Sites.Dto.SiteEntry> sites = Features.Sites.SiteStore.AllForApi();
@@ -48,9 +48,7 @@ namespace KMHServerAddon.Maintenance
             foreach (Features.Sites.Dto.SiteEntry s in sites)
                 if (s.MarketValuePerUnit <= 0f)
                     flagged.Add($"  tile {s.Tile}: {s.BaseAmountPerCycle}x {s.ItemDefName}/cycle by {s.OwnerUsername} - declared value 0 (client likely modified)");
-            reply($"Sites declaring zero item value ({flagged.Count}):");
-            if (flagged.Count == 0) reply("  (none)");
-            else foreach (string f in flagged) reply(f);
+            ReplyList(reply, $"Sites declaring zero item value ({flagged.Count}):", flagged);
 
             {
                 var cat = Features.ItemLabels.ItemLabelCache.AllForCatalog();
@@ -69,8 +67,8 @@ namespace KMHServerAddon.Maintenance
                 reply($"  allowed: {allowed} (T1={tierAllowed[1]} T2={tierAllowed[2]} T3={tierAllowed[3]} T4={tierAllowed[4]}), blocked: {blocked}, unknown/suspicious: {unknown}");
                 if (Features.Sites.SiteStore.LegacyBlockedSiteCount > 0)
                     reply($"  [REVIEW] {Features.Sites.SiteStore.LegacyBlockedSiteCount} existing site(s) PAUSED - output now blocked by current rules.");
-                if (!Features.Sites.SitesConfig.Current.UseSiteOutputTiers)
-                    reply("  [REVIEW] UseSiteOutputTiers=false - legacy path" + (Features.Sites.SitesConfig.Current.AllowUnsafeLegacySiteOutputs ? " with AllowUnsafeLegacySiteOutputs=ON (ANY def buildable - admin/dev only!)" : " (simple-resource gate still applies)"));
+                if (!Features.Sites.SitesConfig.Current.Output.UseTiers)
+                    reply("  [REVIEW] Output.UseTiers=false - legacy path" + (Features.Sites.SitesConfig.Current.Output.AllowUnsafeLegacy ? " with Output.AllowUnsafeLegacy=ON (ANY def buildable - admin/dev only!)" : " (simple-resource gate still applies)"));
                 if (danger.Count > 0) { reply($"  higher-tier allowed outputs to eyeball ({danger.Count}):"); foreach (string d in danger) reply(d); }
             }
 
@@ -88,16 +86,21 @@ namespace KMHServerAddon.Maintenance
                 else if (mc <= 1 && v.Silver > 0)
                     solos.Add($"  '{v.OwnerKey}' (1 member) holds {Util.SilverFmt.Format(v.Silver)}");
             }
-            reply($"Orphaned guild vaults ({orphans.Count}):");
-            if (orphans.Count == 0) reply("  (none)"); else foreach (string o in orphans) reply(o);
-            reply($"Solo-guild vaults ({solos.Count}):");
-            if (solos.Count == 0) reply("  (none)"); else foreach (string sv in solos) reply(sv);
+            ReplyList(reply, $"Orphaned guild vaults ({orphans.Count}):", orphans);
+            ReplyList(reply, $"Solo-guild vaults ({solos.Count}):", solos);
 
             // Anything held here is real value parked rather than destroyed, awaiting an admin decision.
             int recHeld = Features.Recovery.RecoveryStore.HeldCount;
             reply($"Recovery queue: {recHeld} held item/silver record(s)" + (recHeld > 0 ? " - review with 'kmh recover list'." : "."));
 
             reply("Deeper: kmh ledger [user] · kmh inspect treasury|sites · kmh recover list · kmh validate · kmh backups");
+        }
+
+        private static void ReplyList(Action<string> reply, string header, List<string> lines)
+        {
+            reply(header);
+            if (lines.Count == 0) reply("  (none)");
+            else foreach (string line in lines) reply(line);
         }
     }
 }

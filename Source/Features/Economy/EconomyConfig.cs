@@ -5,98 +5,214 @@ using Newtonsoft.Json.Linq;
 
 namespace KMHServerAddon.Features.Economy
 {
-    internal sealed class EconomyConfig
+    internal sealed class CustomEconomyRules
     {
-        public int SchemaVersion { get; set; } = 1;
+        public string PersonalAccess { get; set; } = "Remote";
+        public string GuildAccess    { get; set; } = "Remote";
 
-        public int MarketplaceTaxPercent { get; set; } = 5;
+        public int    DepositCooldownSeconds  { get; set; } = 0; // 0 = no cooldown
+        public int    WithdrawCooldownSeconds { get; set; } = 0;
+        public double DepositFeePercent       { get; set; } = 0.0;   // paid into the house pool
+        public double WithdrawFeePercent      { get; set; } = 0.0;
 
-        // A solo guild's vault is cleared too, since it would otherwise shelter the same silver.
-        public bool ResetEconomyOnNewSave { get; set; } = false;
+        public long MaxPersonalSilver { get; set; } = 0;   // 0 = no cap
+        public long MaxGuildSilver    { get; set; } = 0;
+
+        public bool RequireCaravanForItemDeposit  { get; set; } = false;
+        public bool RequireCaravanForItemWithdraw { get; set; } = false;
+        public bool BlockDuringRaid               { get; set; } = false;
+        public bool BlockDuringHostileMapEvent    { get; set; } = false;
+    }
+
+    internal sealed class TreasuryRules
+    {
+        // Prices opening a vault, not a trade, so it applies in every mode; 0 = off, waived while the vault is empty.
+        public int AccessFeeSilver { get; set; } = 0;
 
         // Enforced on every deposit whatever the mode says, because a deposit's amount is client-asserted.
-        public long MaxSilverDepositPerTx   { get; set; } = 1_000_000;
-        public int  MaxItemDepositQtyPerTx  { get; set; } = 5_000;
+        public long MaxSilverDepositPerTx  { get; set; } = 1_000_000;
+        public int  MaxItemDepositQtyPerTx { get; set; } = 5_000;
 
         // Holds a deposit pending until the client's save is durable, or the same silver exists in colony and treasury.
-        public bool RequireDurableLocalSaveForDeposits { get; set; } = true;
-        public int  PendingDepositTimeoutMinutes       { get; set; } = 120;
+        public bool RequireDurableLocalSave   { get; set; } = true;
+        public int  PendingTimeoutMinutes     { get; set; } = 120;
         // Only the player's own durable save resolves a pending deposit, so one who never saves is otherwise unbounded.
-        public int  MaxUnconfirmedDepositsPerPlayer    { get; set; } = 32;
+        public int  MaxUnconfirmedPerPlayer   { get; set; } = 32;
 
-        // Only Custom reads the individual knobs below; every other mode resolves into a preset policy.
-        public string EconomyMode                { get; set; } = "Balanced";
-        public string PersonalTreasuryAccessMode { get; set; } = "Remote";   // Remote|ColonyOnly|CaravanOnly|TreasurySiteRequired|Disabled
-        public string GuildTreasuryAccessMode    { get; set; } = "Remote";   // Remote|GuildHallRequired|CaravanNearGuildHall|Disabled
+        internal void Clamp()
+        {
+            if (MaxSilverDepositPerTx  < 0) MaxSilverDepositPerTx  = 0;   // 0 = no cap
+            if (MaxItemDepositQtyPerTx < 0) MaxItemDepositQtyPerTx = 0;
+            PendingTimeoutMinutes   = EconomyConfig.Bound(PendingTimeoutMinutes, 1, 24 * 60);
+            MaxUnconfirmedPerPlayer = EconomyConfig.Bound(MaxUnconfirmedPerPlayer, 1, 1000);
+            // Negative would pay players to open the vault; the ceiling keeps a typo from locking everyone out.
+            AccessFeeSilver = EconomyConfig.Bound(AccessFeeSilver, 0, 1_000_000);
+        }
+    }
 
-        public int    TreasuryDepositCooldownSeconds  { get; set; } = 0;     // 0 = no cooldown
-        public int    TreasuryWithdrawCooldownSeconds { get; set; } = 0;
-        public double TreasuryDepositFeePercent       { get; set; } = 0.0;   // 0..50, skimmed into the house pool
-        public double TreasuryWithdrawFeePercent      { get; set; } = 0.0;
-        public long   MaxPersonalTreasurySilver       { get; set; } = 0;     // 0 = no cap
-        public long   MaxGuildTreasurySilver          { get; set; } = 0;
-        public bool   RequireCaravanForItemDeposit    { get; set; } = false;
-        public bool   RequireCaravanForItemWithdraw   { get; set; } = false;
-        public bool   BlockTreasuryDuringRaid         { get; set; } = false;
-        public bool   BlockTreasuryDuringHostileMapEvent { get; set; } = false;
+    // A client decides what its colony holds, so a memory editor can mint goods; these bound what reaches the economy.
+    internal sealed class AntiCheatRules
+    {
+        // Silver-equivalent value one account may deposit in any 24 hours; 0 = no limit.
+        public long DailyDepositLimit          { get; set; } = 200_000;
+        // The same for accounts with fewer connected hours this season than NewPlayerHours; 0 = DailyDepositLimit.
+        public long NewPlayerDailyDepositLimit { get; set; } = 25_000;
+        public int  NewPlayerHours             { get; set; } = 10;
+        public bool AlertStaff                 { get; set; } = true;
 
+        internal void Clamp()
+        {
+            if (DailyDepositLimit          < 0) DailyDepositLimit          = 0;
+            if (NewPlayerDailyDepositLimit < 0) NewPlayerDailyDepositLimit = 0;
+            NewPlayerHours = EconomyConfig.Bound(NewPlayerHours, 0, 10_000);
+        }
+    }
+
+    internal sealed class GuildHallSettings
+    {
         // A guild with no hall is never blocked by proximity, so these flags are what force one to exist.
-        public bool RequireGuildHallToCreateGuild          { get; set; } = false;
-        public bool RequireGuildHallForGuildTreasury       { get; set; } = false;
-        public bool RequireGuildHallForGuildContributions  { get; set; } = false;
-        public int  GuildHallAccessRadiusTiles             { get; set; } = 10;   // "near the hall" = within this many tiles
-        public bool RequireCaravanNearGuildHallForContribution { get; set; } = false;
-        public bool RequireMemberNearGuildHallToJoin        { get; set; } = false;
-        public bool AllowRemoteGuildInvites                 { get; set; } = true;   // false = inviter must be near the hall
+        public bool RequireToCreateGuild      { get; set; } = false;
+        public bool RequireForTreasury        { get; set; } = false;
+        public bool RequireForContributions   { get; set; } = false;
+        public int  AccessRadiusTiles         { get; set; } = 10;
+        public bool RequireCaravanForContribution { get; set; } = false;
+        public bool RequireMemberNearHallToJoin   { get; set; } = false;
+        public bool AllowRemoteInvites            { get; set; } = true;   // false = inviter must be near the hall
 
-        [JsonIgnore] public bool AnyGuildHallRule { get; private set; }
+        internal void Clamp() => AccessRadiusTiles = EconomyConfig.Bound(AccessRadiusTiles, 0, 1000);
+
+        // Excludes the Custom access modes, which EconomyConfig folds in - this block cannot see them.
+        internal bool AnyRuleHere => RequireToCreateGuild || RequireForTreasury || RequireForContributions
+                                  || RequireCaravanForContribution || RequireMemberNearHallToJoin
+                                  || !AllowRemoteInvites;
+    }
+
+    internal sealed class MarketplaceRules
+    {
+        public int TaxPercent { get; set; } = 5;
+
+        // Applies only where a post did not specify its own expiry.
+        public int ListingLifetimeHours   { get; set; } = 168;
+        public int MaxOpenListingsPerUser { get; set; } = 25;
+
+        // Decimal silver, so a sub-1 price such as 0.55 is expressible.
+        public double MinUnitPrice { get; set; } = 0.01;
+        public double MaxUnitPrice { get; set; } = 100_000;
+
+        [JsonIgnore] public long MinUnitPriceMilli => (long)Math.Round(MinUnitPrice * 1000);
+        [JsonIgnore] public long MaxUnitPriceMilli => (long)Math.Round(MaxUnitPrice * 1000);
+
+        // A near-free listing launders value to an alt; enforced only where the catalog knows the item's worth.
+        public double MinPercentOfTrustedValue     { get; set; } = 2;
+        public double WarnBelowTrustedValuePercent { get; set; } = 25;
+
+        // Derived from the percent, because the enforcement math compares a 0..1 fraction.
+        [JsonIgnore] public double MinFractionOfTrustedValue  => MinPercentOfTrustedValue / 100.0;
+        [JsonIgnore] public double WarnFractionOfTrustedValue => WarnBelowTrustedValuePercent / 100.0;
+
+        public bool BlockSuspiciousUnderpricedListings { get; set; } = true;
 
         // A closed loop: the buyer's cost never moves, only the split between seller and house.
         public bool DynamicDemandPricingEnabled { get; set; } = false;
         public int  DemandTaxSwingPercent       { get; set; } = 50;
 
-        // Applies only where a post did not specify its own expiry.
-        public int MarketplaceListingLifetimeHours { get; set; } = 168; // 7 days
+        // Daily per-seller boom boost cap, so two accounts relisting to each other cannot drain the pool; 0 = no boost.
+        public int  BoomBoostMaxPerSellerPerDay { get; set; } = 1000;
 
-        public int MarketplaceMaxOpenListingsPerUser { get; set; } = 25;
+        internal void Clamp()
+        {
+            TaxPercent            = EconomyConfig.Bound(TaxPercent, 0, 50);
+            BoomBoostMaxPerSellerPerDay = EconomyConfig.Bound(BoomBoostMaxPerSellerPerDay, 0, 10_000_000);
+            DemandTaxSwingPercent = EconomyConfig.Bound(DemandTaxSwingPercent, 0, 90);
+            ListingLifetimeHours   = EconomyConfig.Bound(ListingLifetimeHours, 1, 24 * 365);
+            MaxOpenListingsPerUser = EconomyConfig.Bound(MaxOpenListingsPerUser, 1, 10_000);
+            MinUnitPrice = EconomyConfig.BoundD(MinUnitPrice, 0.001, 1_000_000);
+            MaxUnitPrice = EconomyConfig.BoundD(MaxUnitPrice, MinUnitPrice, 2_000_000);
+            MinPercentOfTrustedValue     = EconomyConfig.BoundD(MinPercentOfTrustedValue, 0.0, 100.0);
+            WarnBelowTrustedValuePercent = EconomyConfig.BoundD(WarnBelowTrustedValuePercent, 0.0, 100.0);
+        }
+    }
 
+    internal sealed class AuctionRules
+    {
+        public int MaxOpenPerUser       { get; set; } = 5;
+        public int DefaultDurationHours { get; set; } = 24;
+        public int MaxDurationHours     { get; set; } = 72;
+        public int AntiSnipeMinutes     { get; set; } = 5;
+
+        internal void Clamp()
+        {
+            MaxOpenPerUser       = EconomyConfig.Bound(MaxOpenPerUser, 1, 1_000);
+            DefaultDurationHours = EconomyConfig.Bound(DefaultDurationHours, 1, 24 * 30);
+            MaxDurationHours     = EconomyConfig.Bound(MaxDurationHours, DefaultDurationHours, 24 * 30);
+            AntiSnipeMinutes     = EconomyConfig.Bound(AntiSnipeMinutes, 0, 60);
+        }
+    }
+
+    internal sealed class WantRules
+    {
+        public int MaxOpenPerUser       { get; set; } = 10;
+        public int DefaultDurationHours { get; set; } = 72;
+        public int MaxDurationHours     { get; set; } = 168;
+
+        internal void Clamp()
+        {
+            MaxOpenPerUser       = EconomyConfig.Bound(MaxOpenPerUser, 1, 1_000);
+            DefaultDurationHours = EconomyConfig.Bound(DefaultDurationHours, 1, 24 * 30);
+            MaxDurationHours     = EconomyConfig.Bound(MaxDurationHours, DefaultDurationHours, 24 * 30);
+        }
+    }
+
+    internal sealed class RoadworksCosts
+    {
         // KMH-owned, and never read from RWT's own road config.
-        public int RoadworksSilverPerSegmentTrail   { get; set; } = 25;
-        public int RoadworksSilverPerSegmentRoad    { get; set; } = 75;
-        public int RoadworksSilverPerSegmentHighway { get; set; } = 200;
-        public int RoadworksMaxSegmentsPerProject { get; set; } = 64;   // rejects absurd route payloads
+        public int SilverPerSegmentTrail   { get; set; } = 25;
+        public int SilverPerSegmentRoad    { get; set; } = 75;
+        public int SilverPerSegmentHighway { get; set; } = 200;
+        public int MaxSegmentsPerProject   { get; set; } = 64;   // rejects absurd route payloads
 
-        // Decimal silver, so a sub-1 price such as 0.55 is expressible.
-        public double MarketplaceMinUnitPrice { get; set; } = 0.01;
+        internal void Clamp()
+        {
+            SilverPerSegmentTrail   = EconomyConfig.Bound(SilverPerSegmentTrail,   0, 1_000_000);
+            SilverPerSegmentRoad    = EconomyConfig.Bound(SilverPerSegmentRoad,    0, 1_000_000);
+            SilverPerSegmentHighway = EconomyConfig.Bound(SilverPerSegmentHighway, 0, 1_000_000);
+            MaxSegmentsPerProject   = EconomyConfig.Bound(MaxSegmentsPerProject, 1, 512);
+        }
+    }
 
-        public double MarketplaceMaxUnitPrice { get; set; } = 100_000;
+    internal sealed class EconomyConfig
+    {
+        public int SchemaVersion { get; set; } = 1;
 
-        [JsonIgnore] public long MarketplaceMinUnitPriceMilli => (long)Math.Round(MarketplaceMinUnitPrice * 1000);
-        [JsonIgnore] public long MarketplaceMaxUnitPriceMilli => (long)Math.Round(MarketplaceMaxUnitPrice * 1000);
+        // Every mode but Custom resolves to a preset.
+        public string EconomyMode { get; set; } = "Balanced";
 
-        // The obsolete-key prune must spare these until MigrateEconomyV3 has folded them into the decimal fields.
-        internal static readonly string[] LegacyAliasKeys = { "MarketplaceMinUnitPriceMilli", "MarketplaceMaxUnitPriceMilli" };
+        // Read ONLY when EconomyMode is Custom; grouped so the file itself shows that.
+        public CustomEconomyRules Custom { get; set; } = new CustomEconomyRules();
 
-        // A near-free listing launders value to an alt; enforced only where the catalog knows the item's worth.
-        public double MarketplaceMinPercentOfTrustedValue     { get; set; } = 2;
-        public double MarketplaceWarnBelowTrustedValuePercent { get; set; } = 25;
+        // Kill switches that outrank every preset, so no preset can turn a disabled treasury back on.
+        public bool DisablePersonalTreasury { get; set; } = false;
+        public bool DisableGuildTreasury    { get; set; } = false;
 
-        // Derived from the percent, because the enforcement math compares a 0..1 fraction.
-        [JsonIgnore] public double MarketplaceMinFractionOfTrustedValue  => MarketplaceMinPercentOfTrustedValue / 100.0;
-        [JsonIgnore] public double MarketplaceWarnFractionOfTrustedValue => MarketplaceWarnBelowTrustedValuePercent / 100.0;
-        public bool   MarketplaceBlockSuspiciousUnderpricedListings { get; set; } = true;
+        // A solo guild's vault is cleared too, since it would otherwise shelter the same silver.
+        public bool ResetEconomyOnNewSave { get; set; } = false;
 
-        public int AuctionMaxOpenPerUser      { get; set; } = 5;
-        public int AuctionDefaultDurationHours { get; set; } = 24;
-        public int AuctionMaxDurationHours    { get; set; } = 72;
-        public int AuctionAntiSnipeMinutes    { get; set; } = 5;   // a late bid extends the close by this much
+        public TreasuryRules    Treasury    { get; set; } = new TreasuryRules();
+        public GuildHallSettings GuildHall  { get; set; } = new GuildHallSettings();
+        public MarketplaceRules Marketplace { get; set; } = new MarketplaceRules();
+        public AuctionRules     Auctions    { get; set; } = new AuctionRules();
+        public WantRules        Wants       { get; set; } = new WantRules();
+        public RoadworksCosts   Roadworks   { get; set; } = new RoadworksCosts();
+        public AntiCheatRules   AntiCheat   { get; set; } = new AntiCheatRules();
 
-        public int WantMaxOpenPerUser       { get; set; } = 10;
-        public int WantDefaultDurationHours { get; set; } = 72;
-        public int WantMaxDurationHours     { get; set; } = 168; // 7 days
+        // Folds in the Custom access modes, which GuildHallSettings cannot see from inside its own block.
+        [JsonIgnore] public bool AnyGuildHallRule { get; private set; }
 
         private static EconomyConfig _current;
         public static EconomyConfig Current => _current ?? (_current = LoadOrDefault());
+
+        // Seam for the policy harness, which has to prove every caller resolves one effective answer.
+        internal static EconomyConfig ApplyForTest(EconomyConfig cfg) { EconomyConfig prev = _current; _current = cfg; return prev; }
 
         public static EconomyConfig LoadOrDefault()
         {
@@ -133,11 +249,11 @@ namespace KMHServerAddon.Features.Economy
         public static void Reload()
         {
             _current = LoadOrDefault();
-            Diagnostics.ServerLog.Info(
-                $"Economy config reloaded (tax {_current.MarketplaceTaxPercent}%, " +
-                $"price {_current.MarketplaceMinUnitPrice:0.###}-{_current.MarketplaceMaxUnitPrice:0.###}, " +
-                $"max {_current.MarketplaceMaxOpenListingsPerUser} listings/user, " +
-                $"lifetime {_current.MarketplaceListingLifetimeHours}h)");
+            Diagnostics.ServerLog.Diag(
+                $"Economy config reloaded (tax {_current.Marketplace.TaxPercent}%, " +
+                $"price {_current.Marketplace.MinUnitPrice:0.###}-{_current.Marketplace.MaxUnitPrice:0.###}, " +
+                $"max {_current.Marketplace.MaxOpenListingsPerUser} listings/user, " +
+                $"lifetime {_current.Marketplace.ListingLifetimeHours}h)");
         }
 
         // Seam for the migration harness, which has to prove a migrated file lands on values a listing can use.
@@ -145,51 +261,44 @@ namespace KMHServerAddon.Features.Economy
 
         private void ClampInPlace()
         {
-            if (MaxSilverDepositPerTx  < 0) MaxSilverDepositPerTx  = 0;   // 0 = no cap
-            if (MaxItemDepositQtyPerTx < 0) MaxItemDepositQtyPerTx = 0;
-            PendingDepositTimeoutMinutes = Clamp(PendingDepositTimeoutMinutes, 1, 24 * 60);
-            MaxUnconfirmedDepositsPerPlayer = Clamp(MaxUnconfirmedDepositsPerPlayer, 1, 1000);
-            TreasuryDepositCooldownSeconds  = Clamp(TreasuryDepositCooldownSeconds, 0, 3600);
-            TreasuryWithdrawCooldownSeconds = Clamp(TreasuryWithdrawCooldownSeconds, 0, 3600);
-            TreasuryDepositFeePercent       = ClampD(TreasuryDepositFeePercent, 0.0, 50.0);
-            TreasuryWithdrawFeePercent      = ClampD(TreasuryWithdrawFeePercent, 0.0, 50.0);
-            if (MaxPersonalTreasurySilver < 0) MaxPersonalTreasurySilver = 0;
-            if (MaxGuildTreasurySilver    < 0) MaxGuildTreasurySilver    = 0;
-            EconomyMode = NormalizeMode(EconomyMode, "Standard", ValidEconomyModes);
-            PersonalTreasuryAccessMode = NormalizeMode(PersonalTreasuryAccessMode, "Remote", ValidPersonalModes);
-            GuildTreasuryAccessMode    = NormalizeMode(GuildTreasuryAccessMode, "Remote", ValidGuildModes);
-            GuildHallAccessRadiusTiles = Clamp(GuildHallAccessRadiusTiles, 0, 1000);
+            // A hand-edited file can null a block outright, which would throw on the first read.
+            Custom      ??= new CustomEconomyRules();
+            Treasury    ??= new TreasuryRules();
+            GuildHall   ??= new GuildHallSettings();
+            Marketplace ??= new MarketplaceRules();
+            Auctions    ??= new AuctionRules();
+            Wants       ??= new WantRules();
+            Roadworks   ??= new RoadworksCosts();
+            AntiCheat   ??= new AntiCheatRules();
 
-            AnyGuildHallRule = RequireGuildHallToCreateGuild || RequireGuildHallForGuildTreasury
-                || RequireGuildHallForGuildContributions || RequireCaravanNearGuildHallForContribution
-                || RequireMemberNearGuildHallToJoin || !AllowRemoteGuildInvites
-                || string.Equals(GuildTreasuryAccessMode, "GuildHallRequired", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(GuildTreasuryAccessMode, "CaravanNearGuildHall", StringComparison.OrdinalIgnoreCase);
-            MarketplaceTaxPercent             = Clamp(MarketplaceTaxPercent, 0, 50);
-            DemandTaxSwingPercent             = Clamp(DemandTaxSwingPercent, 0, 90);
-            MarketplaceListingLifetimeHours   = Clamp(MarketplaceListingLifetimeHours, 1, 24 * 365);
-            MarketplaceMaxOpenListingsPerUser = Clamp(MarketplaceMaxOpenListingsPerUser, 1, 10_000);
-            RoadworksSilverPerSegmentTrail   = Clamp(RoadworksSilverPerSegmentTrail,   0, 1_000_000);
-            RoadworksSilverPerSegmentRoad    = Clamp(RoadworksSilverPerSegmentRoad,    0, 1_000_000);
-            RoadworksSilverPerSegmentHighway = Clamp(RoadworksSilverPerSegmentHighway, 0, 1_000_000);
-            RoadworksMaxSegmentsPerProject = Clamp(RoadworksMaxSegmentsPerProject, 1, 512);
-            MarketplaceMinUnitPrice           = ClampD(MarketplaceMinUnitPrice, 0.001, 1_000_000);
-            MarketplaceMaxUnitPrice           = ClampD(MarketplaceMaxUnitPrice, MarketplaceMinUnitPrice, 2_000_000);
-            MarketplaceMinPercentOfTrustedValue     = ClampD(MarketplaceMinPercentOfTrustedValue, 0.0, 100.0);
-            MarketplaceWarnBelowTrustedValuePercent = ClampD(MarketplaceWarnBelowTrustedValuePercent, 0.0, 100.0);
-            AuctionMaxOpenPerUser             = Clamp(AuctionMaxOpenPerUser, 1, 1_000);
-            AuctionDefaultDurationHours       = Clamp(AuctionDefaultDurationHours, 1, 24 * 30);
-            AuctionMaxDurationHours           = Clamp(AuctionMaxDurationHours, AuctionDefaultDurationHours, 24 * 30);
-            AuctionAntiSnipeMinutes           = Clamp(AuctionAntiSnipeMinutes, 0, 60);
-            WantMaxOpenPerUser                = Clamp(WantMaxOpenPerUser, 1, 1_000);
-            WantDefaultDurationHours          = Clamp(WantDefaultDurationHours, 1, 24 * 30);
-            WantMaxDurationHours              = Clamp(WantMaxDurationHours, WantDefaultDurationHours, 24 * 30);
+            Custom.DepositCooldownSeconds  = Bound(Custom.DepositCooldownSeconds, 0, 3600);
+            Custom.WithdrawCooldownSeconds = Bound(Custom.WithdrawCooldownSeconds, 0, 3600);
+            Custom.DepositFeePercent       = BoundD(Custom.DepositFeePercent, 0.0, 50.0);
+            Custom.WithdrawFeePercent      = BoundD(Custom.WithdrawFeePercent, 0.0, 50.0);
+            if (Custom.MaxPersonalSilver < 0) Custom.MaxPersonalSilver = 0;
+            if (Custom.MaxGuildSilver    < 0) Custom.MaxGuildSilver    = 0;
+            // A typo lands on the shipped default, never on Standard, the most permissive preset.
+            EconomyMode           = NormalizeMode(EconomyMode, "Balanced", ValidEconomyModes);
+            Custom.PersonalAccess = NormalizeMode(Custom.PersonalAccess, "Remote", ValidPersonalModes);
+            Custom.GuildAccess    = NormalizeMode(Custom.GuildAccess, "Remote", ValidGuildModes);
+
+            Treasury.Clamp();
+            GuildHall.Clamp();
+            Marketplace.Clamp();
+            Auctions.Clamp();
+            Wants.Clamp();
+            Roadworks.Clamp();
+            AntiCheat.Clamp();
+
+            AnyGuildHallRule = GuildHall.AnyRuleHere
+                || string.Equals(Custom.GuildAccess, "GuildHallRequired", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(Custom.GuildAccess, "CaravanNearGuildHall", StringComparison.OrdinalIgnoreCase);
         }
 
-        private static int Clamp(int v, int lo, int hi) => v < lo ? lo : (v > hi ? hi : v);
-        private static double ClampD(double v, double lo, double hi) => v < lo ? lo : (v > hi ? hi : v);
+        internal static int    Bound(int v, int lo, int hi) => v < lo ? lo : (v > hi ? hi : v);
+        internal static double BoundD(double v, double lo, double hi) => v < lo ? lo : (v > hi ? hi : v);
 
-        private static readonly string[] ValidEconomyModes  = { "Standard", "Balanced", "Localized", "Hardcore", "Custom" };
+        internal static readonly string[] ValidEconomyModes  = { "Standard", "Balanced", "Localized", "Hardcore", "Custom" };
         private static readonly string[] ValidPersonalModes = { "Remote", "ColonyOnly", "CaravanOnly", "TreasurySiteRequired", "Disabled" };
         private static readonly string[] ValidGuildModes    = { "Remote", "GuildHallRequired", "CaravanNearGuildHall", "Disabled" };
 
@@ -201,10 +310,23 @@ namespace KMHServerAddon.Features.Economy
             return fallback;
         }
 
-        // Custom returns the granular fields verbatim; every other mode ignores them entirely.
+        // Disabled is a kill switch, not a tuning knob, so no preset may re-enable a treasury turned off.
         public EconomyPolicy ResolvePolicy()
         {
-            string m = (EconomyMode ?? "Standard").Trim().ToLowerInvariant();
+            EconomyPolicy p = ResolveModePolicy();
+            bool personalOff = DisablePersonalTreasury
+                || string.Equals(p.PersonalAccess, "Disabled", StringComparison.OrdinalIgnoreCase);
+            bool guildOff    = DisableGuildTreasury
+                || string.Equals(p.GuildAccess, "Disabled", StringComparison.OrdinalIgnoreCase);
+            return personalOff || guildOff
+                ? p.WithAccess(personalOff ? "Disabled" : p.PersonalAccess, guildOff ? "Disabled" : p.GuildAccess)
+                : p;
+        }
+
+        // Custom returns the granular fields verbatim; every other mode ignores them entirely.
+        private EconomyPolicy ResolveModePolicy()
+        {
+            string m = NormalizeMode(EconomyMode, "Balanced", ValidEconomyModes).ToLowerInvariant();
             switch (m)
             {
                 case "balanced":
@@ -220,13 +342,13 @@ namespace KMHServerAddon.Features.Economy
                         depCd: 10, wdCd: 10, depFee: 2.0, wdFee: 2.0, maxPersonal: 0, maxGuild: 0,
                         reqCarDep: true, reqCarWd: true, blockRaid: true, blockHostile: true);
                 case "custom":
-                    return new EconomyPolicy("Custom", PersonalTreasuryAccessMode, GuildTreasuryAccessMode,
-                        TreasuryDepositCooldownSeconds, TreasuryWithdrawCooldownSeconds,
-                        TreasuryDepositFeePercent, TreasuryWithdrawFeePercent,
-                        MaxPersonalTreasurySilver, MaxGuildTreasurySilver,
-                        RequireCaravanForItemDeposit, RequireCaravanForItemWithdraw,
-                        BlockTreasuryDuringRaid, BlockTreasuryDuringHostileMapEvent);
-                default: // Standard - current behavior, everything permissive.
+                    return new EconomyPolicy("Custom", Custom.PersonalAccess, Custom.GuildAccess,
+                        Custom.DepositCooldownSeconds, Custom.WithdrawCooldownSeconds,
+                        Custom.DepositFeePercent, Custom.WithdrawFeePercent,
+                        Custom.MaxPersonalSilver, Custom.MaxGuildSilver,
+                        Custom.RequireCaravanForItemDeposit, Custom.RequireCaravanForItemWithdraw,
+                        Custom.BlockDuringRaid, Custom.BlockDuringHostileMapEvent);
+                default: // Standard: everything permissive.
                     return new EconomyPolicy("Standard", "Remote", "Remote",
                         0, 0, 0.0, 0.0, 0, 0, false, false, false, false);
             }
@@ -236,8 +358,8 @@ namespace KMHServerAddon.Features.Economy
     internal readonly struct EconomyPolicy
     {
         public readonly string Mode;
-        public readonly string PersonalAccess;   // Remote|ColonyOnly|CaravanOnly|TreasurySiteRequired|Disabled
-        public readonly string GuildAccess;      // Remote|GuildHallRequired|CaravanNearGuildHall|Disabled
+        public readonly string PersonalAccess;
+        public readonly string GuildAccess;
         public readonly int    DepositCooldownSec, WithdrawCooldownSec;
         public readonly double DepositFeePct, WithdrawFeePct;
         public readonly long   MaxPersonalSilver, MaxGuildSilver;
@@ -256,5 +378,10 @@ namespace KMHServerAddon.Features.Economy
         }
 
         public bool IsStrict => !string.Equals(Mode, "Standard", StringComparison.OrdinalIgnoreCase);
+
+        public EconomyPolicy WithAccess(string personal, string guild)
+            => new EconomyPolicy(Mode, personal, guild, DepositCooldownSec, WithdrawCooldownSec,
+                DepositFeePct, WithdrawFeePct, MaxPersonalSilver, MaxGuildSilver,
+                RequireCaravanForItemDeposit, RequireCaravanForItemWithdraw, BlockDuringRaid, BlockDuringHostileEvent);
     }
 }

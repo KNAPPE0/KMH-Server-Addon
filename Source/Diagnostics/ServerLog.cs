@@ -31,7 +31,7 @@ namespace KMHServerAddon.Diagnostics
         public static void Diag(string message)
             => ToFile("diag", message);
 
-        // Same, for something that repeats on a timer. Repeats are counted and reported, not written.
+        // For something on a timer: repeats are counted and reported, not written.
         public static void Diag(string key, string message)
         {
             if (KmhLogThrottle.Allow(key, TimeSpan.FromMinutes(2), DateTime.UtcNow.Ticks, out int suppressed))
@@ -60,6 +60,7 @@ namespace KMHServerAddon.Diagnostics
         {
             string line = $"{Constants.LogPrefix} {Safe(message)}";
             ToFile("error", message);
+            try { KmhErrorTally.Note(message, DateTime.UtcNow); } catch { /* counting must never fail a log line */ }
             try { Printer.Error(line); }
             catch { Console.Error.WriteLine($"[ERROR] {line}"); }
         }
@@ -69,14 +70,7 @@ namespace KMHServerAddon.Diagnostics
             Error($"{message}: {ex}");
         }
 
-        public static void Success(string message)
-        {
-            string line = $"{Constants.LogPrefix} {Safe(message)}";
-            ToFile("info", message);
-            if (!ToConsole(Maintenance.KmhConsoleLevel.Info)) return;
-            try { Printer.Title(line); }
-            catch { WriteColored(ConsoleColor.Green, line); }
-        }
+        public static void Success(string message) => Info(message);
 
         // Always recorded in the file; the console copy is what the owner's debug flag actually controls.
         public static void Debug(string message)

@@ -87,11 +87,11 @@ namespace KMHServerAddon.Maintenance
             return r;
         }
 
-            // Treasury's copy is deliberately narrower, so server-side bookkeeping is named rather than leaked.
+        // Treasury's copy is deliberately narrower, so server-side bookkeeping is named rather than leaked.
         private static List<(string, bool, string)> TreasuryChecks()
         {
             var r = new List<(string, bool, string)>();
-            var serverOnly = new[] { "RecentCommittedTxns", "CommittedDeposits", "LastSaveGeneration", "PendingTakes" };
+            var serverOnly = new[] { "RecentCommittedTxns", "CommittedDeposits", "LastSaveGeneration", "LedgerGenerations", "PendingTakes" };
             var missing = new List<string>();
             foreach (string name in serverOnly)
                 if (typeof(Features.Treasury.Dto.TreasurySnapshot).GetProperty(name) == null) missing.Add(name);
@@ -104,6 +104,7 @@ namespace KMHServerAddon.Maintenance
                    snap != null && (snap.RecentCommittedTxns == null || snap.RecentCommittedTxns.Count == 0)
                    && (snap.CommittedDeposits == null || snap.CommittedDeposits.Count == 0)
                    && (snap.PendingTakes == null || snap.PendingTakes.Count == 0)
+                   && (snap.LedgerGenerations == null || snap.LedgerGenerations.Count == 0)
                    && snap.LastSaveGeneration == 0,
                    "reading a treasury must also not create one"));
             return r;
@@ -144,7 +145,7 @@ namespace KMHServerAddon.Maintenance
                 AllowComplex = true, AllowTainted = true, AllowDamaged = true,
             };
             var r = KmhCopyCoverage.Check("Wants", w, Features.WantBoard.WantStore.CopyForTest(w));
-            // These five were the fields actually lost, which made a gear want match anything.
+            // Losing these five fields makes a copied gear want match anything.
             var c = Features.WantBoard.WantStore.CopyForTest(w);
             r.Add(("Wants: a copied want keeps the buyer's match constraints",
                    c.MinQuality == 4 && c.RequiredStuff == "Plasteel"

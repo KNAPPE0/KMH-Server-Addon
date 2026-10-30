@@ -43,7 +43,6 @@ namespace KMHServerAddon.Features.Identity
 
         public static bool IsKnown(string role) => Normalize(role) != None;
 
-        // The higher of two roles. Used when a player is both (say) a listed Developer and a live RWT admin.
         public static string Higher(string a, string b)
             => Priority(a) >= Priority(b) ? Normalize(a) : Normalize(b);
 

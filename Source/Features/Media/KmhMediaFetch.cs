@@ -28,13 +28,13 @@ namespace KMHServerAddon.Features.Media
             if (cfg == null) { result.Error = "no config"; return result; }
 
             using var budget = CancellationTokenSource.CreateLinkedTokenSource(outer);
-            budget.CancelAfter(TimeSpan.FromSeconds(cfg.TimeoutSeconds));
+            budget.CancelAfter(TimeSpan.FromSeconds(cfg.Fetch.TimeoutSeconds));
             CancellationToken ct = budget.Token;
 
             string current = url;
-            for (int hop = 0; hop <= cfg.MaxRedirects; hop++)
+            for (int hop = 0; hop <= cfg.Fetch.MaxRedirects; hop++)
             {
-                // A url that passes and then redirects elsewhere is how a host rule gets bypassed, so every hop is re-judged.
+                // Every hop is re-judged: passing and then redirecting elsewhere is how a host rule gets bypassed.
                 if (!Allowed(current, cfg, out string why))
                 {
                     result.Error = hop == 0 ? $"refused: {why}" : $"redirect refused: {why}";
@@ -79,17 +79,19 @@ namespace KMHServerAddon.Features.Media
 
                     // The header is only a claim, so it is trusted to refuse early but never to permit.
                     long? declared = res.Content.Headers.ContentLength;
-                    if (declared.HasValue && declared.Value > cfg.MaxSourceBytes)
+                    if (declared.HasValue && declared.Value > cfg.Images.MaxSourceBytes)
                     {
-                        result.Error = $"source too large: {declared.Value} bytes over the {cfg.MaxSourceBytes} limit";
+                        result.Error = $"source too large: {declared.Value} bytes over the {cfg.Images.MaxSourceBytes} limit";
                         return result;
                     }
 
                     byte[] body;
-                    try { body = await ReadCapped(res, cfg.MaxSourceBytes, ct).ConfigureAwait(false); }
+                    KMHServerAddon.Util.KmhBodyFailure failure;
+                    // The fetch budget already bounds the time; the shared reader bounds the size as it reads.
+                    try { (body, failure) = await KMHServerAddon.Util.KmhBoundedHttp.ReadBytesAsync(res, cfg.Images.MaxSourceBytes, Timeout.InfiniteTimeSpan, ct).ConfigureAwait(false); }
                     catch (OperationCanceledException) { result.Error = "timed out reading"; return result; }
-                    catch (InvalidDataException ex) { result.Error = ex.Message; return result; }
-                    catch (Exception ex) { result.Error = "read failed: " + ex.GetBaseException().Message; return result; }
+                    if (failure == KMHServerAddon.Util.KmhBodyFailure.TooLarge) { result.Error = $"source too large: over the {cfg.Images.MaxSourceBytes} byte limit"; return result; }
+                    if (failure != KMHServerAddon.Util.KmhBodyFailure.None) { result.Error = "read failed: " + KMHServerAddon.Util.KmhBoundedHttp.Describe(failure); return result; }
 
                     result.Ok = true;
                     result.Bytes = body;
@@ -99,7 +101,7 @@ namespace KMHServerAddon.Features.Media
                 }
             }
 
-            result.Error = $"too many redirects (over {cfg.MaxRedirects})";
+            result.Error = $"too many redirects (over {cfg.Fetch.MaxRedirects})";
             return result;
         }
 
@@ -113,7 +115,7 @@ namespace KMHServerAddon.Features.Media
             if (!Uri.TryCreate(url ?? "", UriKind.Absolute, out uri) || uri == null) { why = "unparseable url"; return false; }
             if (uri.Scheme != Uri.UriSchemeHttps) { why = "https only"; return false; }
 
-            string[] allowed = cfg?.SourceHostAllowList;
+            string[] allowed = cfg?.Fetch.SourceHostAllowList;
             if (allowed == null || allowed.Length == 0) return true;
             if (Chat.ChatImagePolicy.IsAllowedHost(uri.Host, allowed)) return true;
 
@@ -131,7 +133,7 @@ namespace KMHServerAddon.Features.Media
                 UseProxy                = false,
                 Credentials             = null,
                 AutomaticDecompression  = DecompressionMethods.All,
-                ConnectTimeout          = TimeSpan.FromSeconds(Math.Min(10, cfg.TimeoutSeconds)),
+                ConnectTimeout          = TimeSpan.FromSeconds(Math.Min(10, cfg.Fetch.TimeoutSeconds)),
                 PooledConnectionLifetime = TimeSpan.FromSeconds(30),
             };
 
@@ -157,23 +159,7 @@ namespace KMHServerAddon.Features.Media
                 throw last ?? new IOException("no usable address");
             };
 
-            return new HttpClient(handler, disposeHandler: true) { Timeout = TimeSpan.FromSeconds(cfg.TimeoutSeconds) };
-        }
-
-        // Capped as it reads: buffering the whole body first would hold the very thing the cap exists to refuse.
-        private static async Task<byte[]> ReadCapped(HttpResponseMessage res, int cap, CancellationToken ct)
-        {
-            using Stream stream = await res.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
-            using var buffer = new MemoryStream();
-            byte[] chunk = new byte[81920];
-            int read;
-            while ((read = await stream.ReadAsync(chunk, 0, chunk.Length, ct).ConfigureAwait(false)) > 0)
-            {
-                if (buffer.Length + read > cap)
-                    throw new InvalidDataException($"source too large: over the {cap} byte limit");
-                buffer.Write(chunk, 0, read);
-            }
-            return buffer.ToArray();
+            return new HttpClient(handler, disposeHandler: true) { Timeout = TimeSpan.FromSeconds(cfg.Fetch.TimeoutSeconds) };
         }
     }
 }

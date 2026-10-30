@@ -5,7 +5,7 @@ using System.Reflection;
 
 namespace KMHServerAddon.Transactions
 {
-    // A tripwire: it MUST fail once something implements IKmhValueMove, because recovery still cannot refund a Reserved move.
+    // A tripwire: it MUST fail once something implements IKmhValueMove, as recovery still cannot refund a Reserved move.
     internal static class KmhValueMoveAdoptionSelfTest
     {
         public static List<(string Name, bool Ok, string Detail)> Run()

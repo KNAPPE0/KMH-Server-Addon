@@ -35,12 +35,18 @@ namespace KMHServerAddon.AdminCommands
 
         private static readonly Entry[] All =
         {
-            new Entry { Topic = "server", Command = "kmh status",     Desc = "Server and KMH health report", AdminOnly = false, Featured = true },
+            new Entry { Topic = "server", Command = "kmh status",     Desc = "Server and Colony Nexus health report", AdminOnly = false, Featured = true },
+            new Entry { Topic = "server", Command = "kmh doctor",     Desc = "Every health check in one list, worst first, each with its fix", Featured = true },
             new Entry { Topic = "server", Command = "kmh diag",       Desc = "Data-pipeline counts and file sizes" },
-            new Entry { Topic = "server", Command = "kmh transport",  Desc = "KMH API transport status" },
+            new Entry { Topic = "server", Command = "kmh transport",  Desc = "Colony Nexus API transport status" },
             new Entry { Topic = "server", Command = "kmh extensions", Desc = "List loaded extensions" },
             new Entry { Topic = "server", Command = "kmh export",     Desc = "Write status.json for dashboards" },
             new Entry { Topic = "server", Command = "kmh save",       Desc = "Flush every store to disk now" },
+            new Entry { Topic = "server", Command = "kmh global",     Args = "<status|setup|defer|disable|visibility|unlink|rotate|recover|rebind>",
+                        Desc = "Join or leave the Colony Nexus server browser; unlink, rotate or recover this server's Global identity" },
+            new Entry { Topic = "server", Command = "kmh federation", Args = "<status|sync>", Desc = "Guild Federation links, queued reports and last sync" },
+            new Entry { Topic = "server", Command = "kmh reports",    Args = "[list [open|all|bug|suggestion|question]|show <ref>|status <ref> <state> [note]|delete <ref>|retry|forward <on|off>]", Desc = "Bug reports, suggestions and questions players sent, and their triage", Featured = true },
+            new Entry { Topic = "server", Command = "kmh perf",       Desc = "Transport traffic, send queues and save timings" },
 
             new Entry { Topic = "frontier", Command = "kmh frontier status", Desc = "Director state, budget and next action", Featured = true },
             new Entry { Topic = "frontier", Command = "kmh frontier list",   Desc = "Outposts and active operations" },
@@ -51,9 +57,11 @@ namespace KMHServerAddon.AdminCommands
             new Entry { Topic = "world", Command = "kmh worldquest", Args = "<sub>",  Desc = "Create, list or end a global quest" },
             new Entry { Topic = "world", Command = "kmh season",     Args = "<roll|reset>", Desc = "Archive leaders or wipe the season" },
 
-            new Entry { Topic = "sites", Command = "kmh site-catalog",   Args = "[reset]", Desc = "What KMH thinks each item is", Featured = true },
+            new Entry { Topic = "sites", Command = "kmh site-catalog",   Args = "[reset]", Desc = "What Colony Nexus thinks each item is", Featured = true },
             new Entry { Topic = "sites", Command = "kmh site-condition", Args = "<damage|repair> <tile> [points]", Desc = "Adjust a site's condition by hand" },
             new Entry { Topic = "sites", Command = "kmh roadworks",      Args = "<list|show|cancel>", Desc = "Inspect or cancel road projects" },
+            new Entry { Topic = "sites", Command = "kmh sites",          Args = "[inspect <user>]", Desc = "Every site, or one player's sites and workers" },
+            new Entry { Topic = "sites", Command = "kmh orphans",        Args = "[rebind-site <tile> <guild> | rebind-legacy [confirm] | release-vault <vault> <player>]", Desc = "Sites and vaults a disbanded guild left" },
 
             new Entry { Topic = "economy", Command = "kmh inspect",       Args = "<subsystem>", Desc = "Dump live entries with their ids", Featured = true },
             new Entry { Topic = "economy", Command = "kmh ledger",        Args = "[user] [count]", Desc = "Recent economy audit trail" },
@@ -63,11 +71,19 @@ namespace KMHServerAddon.AdminCommands
             new Entry { Topic = "economy", Command = "kmh contributions", Args = "<guild>", Desc = "Guild contribution breakdown" },
             new Entry { Topic = "economy", Command = "kmh drain-house",   Args = "<user>", Desc = "Move the house pool to a player" },
 
-            new Entry { Topic = "players", Command = "kmh audit-player",   Args = "<user>", Desc = "Everything KMH knows about a player", Featured = true },
-            new Entry { Topic = "players", Command = "kmh give-silver",    Args = "<user> <amount>", Desc = "Grant silver" },
-            new Entry { Topic = "players", Command = "kmh treasury-reset", Args = "<user|all>", Desc = "Clear a personal treasury" },
+            new Entry { Topic = "players", Command = "kmh audit-player",   Args = "<user>", Desc = "Everything Colony Nexus knows about a player", Featured = true },
+            new Entry { Topic = "players", Command = "kmh leaderboard",    Args = "[<category> [image]]", Desc = "A leaderboard, or the list of them; image writes it to KMH-Data/Leaderboards" },
+            new Entry { Topic = "players", Command = "kmh sim",            Args = "[colonies [list|remove <name>|remove-all]]", Desc = "Who is online, people vs simulated test accounts; their colonies, removed only with nobody online" },
+            new Entry { Topic = "players", Command = "kmh joins",          Args = "[count]", Desc = "Recent refused joins with the reason (full, mods, version), renamed Workshop mods matched by id, and connections RimWorld Together dropped on an error" },
+            new Entry { Topic = "players", Command = "kmh give-silver",    Args = "<user> <amount>", Desc = "Grant silver (owner or console only)" },
+            new Entry { Topic = "players", Command = "kmh treasury-reset", Args = "<user|all> <dry|confirm>", Desc = "One player: the same as wipe-economy; all: every personal vault, nothing else" },
             new Entry { Topic = "players", Command = "kmh reset-preview",  Args = "<user>", Desc = "Preview what a save-reset clears" },
             new Entry { Topic = "players", Command = "kmh wipe-economy",   Args = "<user> <dry|confirm>", Desc = "Clear a player's economy" },
+            new Entry { Topic = "players", Command = "kmh freeze",         Args = "<user> [reason] | <user> undo <dry|confirm>",
+                        Desc = "Stop an account's deposits, trades and transfers and hide it from the boards; undo takes back its guild donations and clears its economy", Featured = true },
+            new Entry { Topic = "players", Command = "kmh unfreeze",       Args = "<user>", Desc = "Lift a freeze" },
+            new Entry { Topic = "players", Command = "kmh frozen",         Desc = "List frozen accounts" },
+            new Entry { Topic = "players", Command = "kmh deposit-limit",  Args = "<user> [extra] [hours]", Desc = "An account's daily deposit limit and use; extra raises it for a while (default 24h)" },
             new Entry { Topic = "players", Command = "kmh wipe-player",    Args = "<user> <dry|confirm>", Desc = "Wipe a player entirely" },
             new Entry { Topic = "players", Command = "kmh purge",          Args = "<what> <user> <dry|confirm>", Desc = "Purge one player's listings or sites" },
             new Entry { Topic = "players", Command = "kmh reset-cleanup",  Args = "<user> <dry|confirm>", Desc = "Full rollback-abuse fix" },
@@ -77,6 +93,11 @@ namespace KMHServerAddon.AdminCommands
             new Entry { Topic = "config", Command = "kmh config",        Args = "[area] [all]", Desc = "Show settings changed from default", Featured = true },
             new Entry { Topic = "config", Command = "kmh config reload", Args = "<area>", Desc = "Reload one config area", Featured = true },
             new Entry { Topic = "config", Command = "kmh reload",        Args = "<area>", Desc = "Reload one config area" },
+            new Entry { Topic = "config", Command = "kmh restart",       Args = "confirm", Desc = "Restart this server (applies restart-only settings)" },
+            new Entry { Topic = "config", Command = "kmh config-editor", Args = "<status|allow|revoke|revoke-all> [player] [minutes]",
+                        Desc = "Console only: open an owner's in-game settings access for a while" },
+            new Entry { Topic = "config", Command = "kmh setup", Args = "[owner <name>]",
+                        Desc = "What is left to set up, with the command for each step", Featured = true },
             new Entry { Topic = "config", Command = "kmh maintenance",   Desc = "Maintenance-mode gate" },
             new Entry { Topic = "config", Command = "kmh migration-report", Desc = "Last data-migration report" },
             new Entry { Topic = "config", Command = "kmh enforce",       Args = "<on|off|status|publish>", Desc = "Lock players' Mod Options" },
@@ -96,14 +117,16 @@ namespace KMHServerAddon.AdminCommands
             new Entry { Topic = "check", Command = "kmh validate",  Args = "[area]", Desc = "Pre-flight configs and pools" },
             new Entry { Topic = "check", Command = "kmh transport-test", Desc = "API DoS-guard self-check" },
 
-            new Entry { Topic = "fix", Command = "kmh recover",  Args = "<list|retry|refund|drop>", Desc = "Triage parked value", Featured = true },
+            new Entry { Topic = "fix", Command = "kmh recover",  Args = "<list|player|retry|refund|drop>", Desc = "Triage parked value", Featured = true },
             new Entry { Topic = "fix", Command = "kmh cancel",   Args = "<kind> <id>", Desc = "Refund and remove one entry" },
+            new Entry { Topic = "fix", Command = "kmh quest",    Args = "<approve|reject|refund> <id>", Desc = "Settle a quest stuck in review" },
             new Entry { Topic = "fix", Command = "kmh repush",   Args = "[area]", Desc = "Re-push snapshots to clients" },
+            new Entry { Topic = "fix", Command = "kmh guild",    Args = "[inspect <name>|repair]", Desc = "One guild's vault, hall, perks and members, or reconcile membership" },
             new Entry { Topic = "fix", Command = "kmh reload-marketplace", Desc = "Reload Marketplace.json into the store" },
             new Entry { Topic = "fix", Command = "kmh rebuild-standings", Desc = "Reload and re-push standings" },
             new Entry { Topic = "fix", Command = "kmh rebuild-player",    Args = "<user>", Desc = "Rebuild one player's derived data" },
 
-            new Entry { Topic = "advanced", Command = "kmh selftest",       Desc = "Does this build honour its contracts" },
+            new Entry { Topic = "advanced", Command = "kmh selftest",       Desc = "Build contract suite (offline runner only; refused live)" },
             new Entry { Topic = "advanced", Command = "kmh support-bundle", Desc = "One shareable zip for a bug report" },
         };
 
@@ -126,6 +149,40 @@ namespace KMHServerAddon.AdminCommands
             return false;
         }
 
+        // The words a command's first argument may be, read from its Args: "<a|b c|d>" or "[a|b <x>]" gives a, b, d.
+        public static List<string> SubcommandsOf(string command)
+        {
+            var outp = new List<string>();
+            foreach (Entry e in All)
+            {
+                if (!string.Equals(e.Command, "kmh " + command, StringComparison.OrdinalIgnoreCase)) continue;
+                string a = (e.Args ?? "").Trim();
+                if (a.Length < 2 || (a[0] != '<' && a[0] != '[')) return outp;
+                char close = a[0] == '<' ? '>' : ']';
+                var cur = new System.Text.StringBuilder();
+                int depth = 0;
+                for (int i = 1; i < a.Length; i++)
+                {
+                    char ch = a[i];
+                    if (depth == 0 && ch == close) break;
+                    if (ch == '<' || ch == '[') depth++;
+                    else if (ch == '>' || ch == ']') depth--;
+                    if (depth == 0 && ch == '|') { AddWord(outp, cur); continue; }
+                    cur.Append(ch);
+                }
+                AddWord(outp, cur);
+                return outp;
+            }
+            return outp;
+        }
+
+        private static void AddWord(List<string> into, System.Text.StringBuilder sb)
+        {
+            string w = sb.ToString().Trim().Split(' ')[0];
+            sb.Clear();
+            if (w.Length > 0) into.Add(w);
+        }
+
         public static bool HasTopic(string topic)
         {
             foreach ((string t, string _) in Topics)
@@ -135,7 +192,7 @@ namespace KMHServerAddon.AdminCommands
 
         public static void Root(Action<string> reply, bool isAdmin)
         {
-            reply("KMH commands");
+            reply("Colony Nexus commands");
             foreach ((string topic, string title) in Topics)
             {
                 List<Entry> shown = Visible(topic, isAdmin, featuredOnly: true);

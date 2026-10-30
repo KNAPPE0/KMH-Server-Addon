@@ -8,24 +8,39 @@ namespace KMHServerAddon.Maintenance
     // Source-level checks, because the failure mode is control flow rather than a value a test can read.
     internal static class KmhDiscordRelaySelfTest
     {
-        private static string ReadSource(string relative)
+        // Banning and running arbitrary server commands are different powers, so neither switch may imply the other.
+        private static void ModerationGate(List<(string, bool, string)> r)
         {
-            try
+            string src = ReadSource(Path.Combine("Features", "Discord", "Commands", "DiscordSlashCommands.cs"));
+            if (src == null)
             {
-                // BaseDirectory, not Assembly.Location, which is empty inside the shipped single-file bundle.
-                string dir = Path.GetDirectoryName(AppContext.BaseDirectory.TrimEnd('\\', '/'));
-                for (int i = 0; i < 8 && dir != null; i++)
-                {
-                    string candidate = Path.Combine(dir, "Source", relative);
-                    if (File.Exists(candidate)) return File.ReadAllText(candidate);
-                    candidate = Path.Combine(dir, relative);
-                    if (File.Exists(candidate)) return File.ReadAllText(candidate);
-                    dir = Path.GetDirectoryName(dir);
-                }
+                r.Add(Diagnostics.KmhSelfTestResult.Skipped("Discord moderation: the gate is wired", "source not available (shipped build)"));
+                return;
             }
-            catch { }
-            return null;
+
+            string[] moderation = { "DoBan", "DoUnban", "DoBanList", "DoWhois" };
+            var wrong = new List<string>();
+            foreach (string name in moderation)
+            {
+                Match m = Regex.Match(src, @"DiscordSlashCommands\s*$|" + Regex.Escape(name)
+                                         + @"\([^)]*\)\s*\{(?<body>[\s\S]{0,400})");
+                string body = m.Groups["body"].Value;
+                if (body.Length == 0 || body.Contains("RequireConsole(")) wrong.Add(name);
+            }
+            r.Add(("Discord moderation: bans do not ride on the arbitrary-console switch",
+                   wrong.Count == 0, wrong.Count == 0 ? "" : string.Join(", ", wrong.ToArray())));
+
+            // The reverse: running any server command must stay behind it.
+            Match run = Regex.Match(src, @"DoConsoleRun\([^)]*\)\s*\{(?<body>[\s\S]{0,300})");
+            r.Add(("Discord moderation: running any server command still needs Console.Allow",
+                   run.Groups["body"].Value.Contains("RequireConsole("), ""));
+
+            // Every moderation reply names a player, and whois names their address.
+            r.Add(("Discord moderation: the gate requires the Admin channel",
+                   Regex.IsMatch(src, @"RequireModeration[\s\S]{0,700}?AdminChannelId"), ""));
         }
+
+        private static string ReadSource(string relative) => KmhSecurityAuditSelfTest.ReadSource(relative);
 
         public static List<(string Name, bool Ok, string Detail)> Run()
         {
@@ -34,13 +49,34 @@ namespace KMHServerAddon.Maintenance
             string bridge = ReadSource(Path.Combine("Features", "Discord", "Core", "DiscordBridge.cs"));
             if (bridge == null)
             {
-                r.Add(("Discord relay: source not available (shipped build) - wiring checks skipped", true, ""));
+                r.Add(Diagnostics.KmhSelfTestResult.Skipped("Discord relay: the relay is wired", "source not available (shipped build)"));
             }
             else
             {
-                // Counted rather than pattern-matched, since a regex over the call stops at a nested ')'.
-                int marks = Regex.Matches(bridge, @"relayed\s*=\s*true\s*;").Count;
-                r.Add(("Discord relay: both bridges mark the same relay flag", marks == 2, marks + " of 2"));
+                // Counted, since a regex stops at a nested ')'; the expected count derives from the bridges wired.
+                int bridges = Regex.Matches(bridge, @"(RelayDiscordToInGame|\w*DiscordBridge\.Ingest)\(").Count;
+                int marks   = Regex.Matches(bridge, @"relayed\s*=\s*true\s*;").Count;
+                r.Add(("Discord relay: every wired bridge marks the same relay flag",
+                       bridges > 0 && marks == bridges, marks + " of " + bridges));
+
+                ModerationGate(r);
+
+                // Read off the ingest's own condition, not a token distance, which a comment between them would break.
+                bool ingestGuard = Regex.IsMatch(bridge,
+                    @"if \(relayable\s*&&\s*!worldOwnsChannel\s*&&\s*!rwtTookIt");
+
+                // One channel on both KMH bridges would deliver each Discord message twice to the same players.
+                r.Add(("Discord relay: a channel shared by both KMH bridges delivers once, not twice",
+                       ingestGuard && bridge.Contains("bool worldOwnsChannel"), ""));
+
+                // Owners often set KmhChat.Channel to Channels.Chat; a line the RWT bridge took must not reach KMH chat too.
+                r.Add(("Discord relay: a line the RWT bridge carried is not ingested by KMH chat as well",
+                       ingestGuard && Regex.IsMatch(bridge, @"rwtTookIt\s*=\s*true\s*;"),
+                       ingestGuard ? "" : "A SHARED RWT/KMH CHANNEL DELIVERS TWICE"));
+
+                // Gate on what the RWT bridge took, not the channel: it cannot carry pictures, so channel gating drops images.
+                bool imagesSurvive = Regex.IsMatch(bridge, @"bool rwtTookIt = false;[\s\S]{0,200}?if \(hasText");
+                r.Add(("Discord relay: an image still reaches KMH chat on a shared RWT channel", imagesSurvive, ""));
 
                 bool earlyReturn = Regex.IsMatch(bridge, @"RelayDiscordToInGame[\s\S]{0,120}?\n\s*return\s*;");
                 r.Add(("Discord relay: the RWT bridge does not return before KMH's bridge runs", !earlyReturn,
@@ -62,7 +98,7 @@ namespace KMHServerAddon.Maintenance
             string ingest = ReadSource(Path.Combine("Features", "Discord", "Posting", "KmhChatDiscordBridge.cs"));
             if (ingest == null)
             {
-                r.Add(("Discord relay: ingest source not available - diagnostics checks skipped", true, ""));
+                r.Add(Diagnostics.KmhSelfTestResult.Skipped("Discord relay: ingest carries diagnostics", "ingest source not available"));
             }
             else
             {
@@ -328,8 +364,8 @@ namespace KMHServerAddon.Maintenance
                    && nonHex.Length > 0, ""));
 
             // A signed CDN url expires in 24h but chat history keeps 48, so identity must outlive the link.
-            const string signed = "https://media.discordapp.net/attachments/125676983546937344/918551905582600212/"
-                                + "Shiroket-3.gif?ex=6a8736a0&is=6a85e520&hm=a92f2801d3249016a61e";
+            const string signed = "https://media.discordapp.net/attachments/111111111111111111/222222222222222222/"
+                                + "anim.gif?ex=6a8736a0&is=6a85e520&hm=00000000000000000000";
             System.DateTime expiry = Features.Chat.ChatDiscordMedia.SignedExpiryUtc(signed) ?? System.DateTime.MinValue;
             r.Add(("media: a Discord signature's expiry is read out of the url",
                    expiry.Year == 2026 && expiry.Month == 8 && expiry.Day == 20, expiry.ToString("u")));
@@ -343,7 +379,7 @@ namespace KMHServerAddon.Maintenance
 
             r.Add(("media: the channel and attachment come out of the url path",
                    Features.Chat.ChatDiscordMedia.TryParseAttachmentUrl(signed, out ulong chId, out ulong attId, out string fname)
-                   && chId == 125676983546937344UL && attId == 918551905582600212UL && fname == "Shiroket-3.gif",
+                   && chId == 111111111111111111UL && attId == 222222222222222222UL && fname == "anim.gif",
                    $"{chId}/{attId}/{fname}"));
 
             string mref = Features.Chat.ChatDiscordMedia.MakeRef(chId, 999UL, attId);
@@ -460,7 +496,7 @@ namespace KMHServerAddon.Maintenance
             }
 
             r.Add(("media: a long signed url has a short label for display",
-                   Features.Chat.ChatDiscordMedia.ShortLabel(signed) == "Shiroket-3.gif"
+                   Features.Chat.ChatDiscordMedia.ShortLabel(signed) == "anim.gif"
                    && Features.Chat.ChatDiscordMedia.ShortLabel("https://klipy.com/gifs/thing") == "klipy.com",
                    Features.Chat.ChatDiscordMedia.ShortLabel(signed)));
 
@@ -506,12 +542,10 @@ namespace KMHServerAddon.Maintenance
             r.Add(("images: a non-image extension is still refused",
                    Features.Chat.ChatImagePolicy.Vet(on, "https://cdn.discordapp.com/a/b.exe", false) == "", ""));
 
-            // Previews off means off, whatever else is true.
             var off = new Features.Chat.ChatConfig { AllowImagePreviews = false };
             r.Add(("images: previews off refuses everything, knownImage included",
                    Features.Chat.ChatImagePolicy.Vet(off, "https://cdn.discordapp.com/a/b.png", false, true) == "", ""));
 
-            // Typed urls are a separate permission from attachments.
             var noTyped = new Features.Chat.ChatConfig
             {
                 AllowImagePreviews = true, AllowTypedImageUrls = false,
@@ -528,7 +562,7 @@ namespace KMHServerAddon.Maintenance
             // ApplyTranscode being correct is worth nothing if Vet never calls it, so the call site is checked too.
             r.Add(("images: a VETTED Discord proxy url carries the format hint",
                    Features.Chat.ChatImagePolicy.Vet(on, "https://images-ext-1.discordapp.net/external/a/b", false, true)
-                       .Contains("format="), 
+                       .Contains("format="),
                    Features.Chat.ChatImagePolicy.Vet(on, "https://images-ext-1.discordapp.net/external/a/b", false, true)));
             r.Add(("images: a vetted gif keeps its animation through the hint",
                    Features.Chat.ChatImagePolicy.Vet(on, "https://media.discordapp.net/a/b.gif", false)
@@ -544,7 +578,7 @@ namespace KMHServerAddon.Maintenance
                                     + "media1.tenor.com/m/xyz/cry-bozo.gif";
             const string klipyPage  = "https://klipy.com/gifs/lloyd-frontera-tged";
 
-            // Copied from a real session's Chat.json, where one of these animated and the other did not; an invented fixture agreed with both rules.
+            // From a real Chat.json where one animated and the other did not; an invented fixture agreed with both rules.
             const string liveStill = "https://images-ext-1.discordapp.net/external/6FTlKxk6I0RUZgXIh66KEceOsueMc-OEGa_f62-cCmk/"
                                    + "https/static.klipy.com/ii/d7aec6f6f171607374b2065c836f92f4/4b/4e/uW5TytnV.webp";
             const string liveThumb = "https://images-ext-1.discordapp.net/external/EfW8x0oykfeZ9jod-I352bt7VuAIUGxww1pE17HOxE4/"
@@ -578,7 +612,7 @@ namespace KMHServerAddon.Maintenance
             r.Add(("images: a gif source behind a proxy is still a gif",
                    Features.Chat.ChatMediaUrl.IsGif(on, tenorProxy), ""));
 
-            // Measured 2026-09-11 on this exact wrapper shape: ?format=gif returned all 42 frames, ?format=png a flat still.
+            // On this exact wrapper shape the proxy's ?format=gif returned all 42 frames, ?format=png a flat still.
             r.Add(("images: a WRAPPED webp is asked for gif, so the fallback still animates",
                    Features.Chat.ChatImagePolicy.ApplyTranscode(on, klipyProxy)
                        .EndsWith("format=gif", StringComparison.Ordinal),
@@ -643,11 +677,11 @@ namespace KMHServerAddon.Maintenance
             r.Add(("images: the media behind a share page still passes",
                    Features.Chat.ChatImagePolicy.Vet(on, tenorProxy, false, true).Length > 0, ""));
 
-            // Every refusal now carries a reason. A blank one meant an owner had nothing to act on.
+            // A blank refusal reason leaves an owner nothing to act on.
             r.Add(("images: a refusal names the gate that refused it",
                    Features.Chat.ChatImagePolicy.Vet(on, "https://evil.example/a.png", false, false, out string hostWhy) == ""
                    && hostWhy.Contains("host not allow-listed"), hostWhy));
-            // Measured 2026-09-11: asking the proxy to re-encode a 212KB jpeg turned it into 1.1MB of png for the same picture.
+            // Asking the proxy to re-encode a 212KB jpeg returned 1.1MB of png for the same picture.
             r.Add(("images: a format the client already reads is asked for nothing",
                    Features.Chat.ChatImagePolicy.ApplyTranscode(on, "https://media.discordapp.net/attachments/1/2/shot.png")
                        == "https://media.discordapp.net/attachments/1/2/shot.png"
@@ -751,7 +785,7 @@ namespace KMHServerAddon.Maintenance
 
             // A separate permission from attachments, because an attachment passed through the owner's Discord.
             bool typedOn = Features.Chat.ChatConfig.Current?.AllowTypedImageUrls == true;
-            r.Add(("images: typed URLs need their own opt-in, separate from attachments",
+            r.Add(("images: typed URLs follow their own switch, separate from attachments",
                    typedOn || Features.Chat.ChatImagePolicy.Vet("https://cdn.discordapp.com/a/b.png", typedByPlayer: true) == "",
                    typedOn ? "owner enabled typed URLs" : ""));
 

@@ -38,6 +38,16 @@ namespace KMHServerAddon.Maintenance
                    covered.Contains(typeof(Features.PlayerStats.PlayerStatsStore)),
                    "standings must be in the reset clearers - roll only archives and advances"));
 
+            // Ids restart at 1, so a refund or reward still owed to the old season would collide with the new season's.
+            Features.Auctions.AuctionStore.PlantPendingRefundForTest("selftest_season_bidder", 120);
+            Features.World.WorldStore.PlantPendingPayoutForTest(1, "selftest_season_player", 80);
+            Features.Auctions.AuctionStore.ClearForNewSeason();
+            Features.World.WorldStore.ClearForNewSeason();
+            int auctionLeft = Features.Auctions.AuctionStore.PendingRefundCountForTest;
+            int worldLeft = Features.World.WorldStore.PendingPayoutsCopy().Count;
+            r.Add(("Season: auction refunds and world-quest rewards owed to the old season go with it",
+                   auctionLeft == 0 && worldLeft == 0, $"auction refunds left {auctionLeft}, world payouts left {worldLeft}"));
+
             MethodInfo roll = typeof(Features.Seasons.SeasonStore)
                 .GetMethod("RollSeason", BindingFlags.Public | BindingFlags.Static);
             r.Add(("Season: rolling a season is a distinct operation from wiping the economy",

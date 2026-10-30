@@ -25,7 +25,7 @@ namespace KMHServerAddon.Items
 
         public enum TakeKind { Whole, Split, Skip }
 
-        // A partial take from an atomic stack is refused rather than shrunk, because splitting it would duplicate saved state.
+        // A partial take from an atomic stack is refused, not shrunk: splitting it would duplicate saved state.
         public static TakeKind PlanTake(int have, int take, bool splittable)
         {
             if (take <= 0 || have <= 0) return TakeKind.Skip;

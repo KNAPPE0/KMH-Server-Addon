@@ -21,7 +21,7 @@ namespace KMHServerAddon.Items
         [JsonProperty("quality")]        public int    Quality       { get; set; } = 0;    // 0 = none, 1..7
         [JsonProperty("tainted")]        public bool   Tainted       { get; set; } = false;
 
-        // Opaque client-produced blob: stored verbatim, never parsed, and stripped from wire snapshots.
+        // Client-produced blob, stripped from wire snapshots; read only to verify it and to sync its health on a merge.
         [JsonProperty("scribe_xml")]     public string ScribeXml     { get; set; } = "";
         [JsonProperty("fidelity")]       public string Fidelity      { get; set; } = FidelityLegacy;
 
@@ -34,7 +34,7 @@ namespace KMHServerAddon.Items
         // The client's claim that this is a fungible resource; old payloads default to false.
         [JsonProperty("mergeable")]          public bool Mergeable        { get; set; } = false;
 
-        // Whether units can be taken off THIS stack - a weaker claim than Mergeable, which combines two separately captured stacks.
+        // Units can be taken off THIS stack: a weaker claim than Mergeable, which combines two separately captured stacks.
         [JsonProperty("splittable")]         public bool Splittable       { get; set; } = false;
         [JsonProperty("rot_progress_ticks")] public long RotProgressTicks { get; set; } = -1;   // -1 = unknown
     }

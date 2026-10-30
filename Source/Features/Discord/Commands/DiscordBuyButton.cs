@@ -1,8 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Threading.Tasks;
-using Discord;
-using Discord.WebSocket;
+using Kmh.Discord.Wire;
 using KMHServerAddon.Diagnostics;
 using KMHServerAddon.Features.ItemLabels;
 using KMHServerAddon.Features.LinkedAccounts;
@@ -17,35 +16,35 @@ namespace KMHServerAddon.Features.Discord
         private static readonly ConcurrentDictionary<string, long> _debounce
             = new ConcurrentDictionary<string, long>();
 
-        public static MessageComponent BuildBuyComponents(MarketplaceListing l)
+        public static KmhComponentSpec BuildBuyComponents(MarketplaceListing l)
         {
             if (l == null || l.RemainingQty <= 0) return null;
 
             // A season reset restarts listing ids at 1, so the generation travels with the id and is checked on click.
             long gen = Features.Economy.KmhEconomyReset.Generation;
-            ComponentBuilder cb = new ComponentBuilder();
-            cb.WithButton(
-                label:    "Buy 1",
-                customId: $"kmh-buy:{gen}:{l.Id}:1",
-                style:    ButtonStyle.Success);
+            KmhComponentSpec spec = new KmhComponentSpec();
+            spec.Buttons.Add(new KmhButtonSpec
+            {
+                Label = "Buy 1", CustomId = $"kmh-buy:{gen}:{l.Id}:1", Style = "success",
+            });
             if (l.RemainingQty >= 10)
             {
-                cb.WithButton(
-                    label:    "Buy 10",
-                    customId: $"kmh-buy:{gen}:{l.Id}:10",
-                    style:    ButtonStyle.Primary);
+                spec.Buttons.Add(new KmhButtonSpec
+                {
+                    Label = "Buy 10", CustomId = $"kmh-buy:{gen}:{l.Id}:10", Style = "primary",
+                });
             }
-            cb.WithButton(
-                label:    $"Buy all ({l.RemainingQty})",
-                customId: $"kmh-buy:{gen}:{l.Id}:all",
-                style:    ButtonStyle.Secondary);
-            return cb.Build();
+            spec.Buttons.Add(new KmhButtonSpec
+            {
+                Label = $"Buy all ({l.RemainingQty})", CustomId = $"kmh-buy:{gen}:{l.Id}:all", Style = "secondary",
+            });
+            return spec;
         }
 
-        public static async Task OnInteraction(SocketMessageComponent component)
+        public static async Task OnInteraction(KmhDiscordInteraction component)
         {
             if (component == null) return;
-            string customId = component.Data?.CustomId ?? "";
+            string customId = component.CustomId ?? "";
             if (!customId.StartsWith("kmh-buy:", StringComparison.Ordinal)) return;
 
             try
@@ -55,30 +54,43 @@ namespace KMHServerAddon.Features.Discord
             catch (Exception ex)
             {
                 ServerLog.Error("Discord: buy-button handler threw", ex);
-                try
-                {
-                    if (!component.HasResponded)
-                        await component.RespondAsync("Buy failed with an unexpected error.", ephemeral: true)
-                            .ConfigureAwait(false);
-                }
-                catch { }
+                try { await component.Respond("Buy failed with an unexpected error.").ConfigureAwait(false); }
+                catch (Exception) { }
             }
         }
 
-        private static async Task HandleBuyClick(SocketMessageComponent component, string customId)
+        // kmh-buy:{generation}:{listing}:{1|10|all}; quantity is the LAST segment, or "Buy 1" on #57 buys 57.
+        internal static bool TryParse(string customId, out long generation, out long listingId, out string quantity)
         {
-            string[] segs = customId.Split(':');
-            if (segs.Length != 4 || !long.TryParse(segs[1], out long builtUnderGen)
-                || !long.TryParse(segs[2], out long listingId))
+            generation = 0; listingId = 0; quantity = "";
+            string[] segs = (customId ?? "").Split(':');
+            if (segs.Length != 4 || segs[0] != "kmh-buy" || !long.TryParse(segs[1], out generation)
+                || !long.TryParse(segs[2], out listingId)) return false;
+            quantity = segs[3];
+            return true;
+        }
+
+        // Null for a malformed quantity; "all" is what is left, capped like any other.
+        internal static int? QuantityFor(string quantity, int remaining)
+        {
+            int qty;
+            if (string.Equals(quantity, "all", StringComparison.OrdinalIgnoreCase)) qty = Math.Min(remaining, 10_000);
+            else if (!int.TryParse(quantity, out qty) || qty <= 0) return null;
+            return Math.Min(qty, 10_000);
+        }
+
+        private static async Task HandleBuyClick(KmhDiscordInteraction component, string customId)
+        {
+            if (!TryParse(customId, out long builtUnderGen, out long listingId, out string quantity))
             {
-                await component.RespondAsync("Malformed buy button.", ephemeral: true).ConfigureAwait(false);
+                await component.Respond("Malformed buy button.").ConfigureAwait(false);
                 return;
             }
             if (!KmhStaleAction.StillCurrent(builtUnderGen))
             {
-                await component.RespondAsync(
+                await component.Respond(
                     "That button is from before the last economy reset - listing numbers have been reused since. " +
-                    "Run the marketplace command again for current listings.", ephemeral: true).ConfigureAwait(false);
+                    "Run the marketplace command again for current listings.").ConfigureAwait(false);
                 return;
             }
 
@@ -92,9 +104,8 @@ namespace KMHServerAddon.Features.Discord
                 long sinceMs   = lastTicks == 0 ? long.MaxValue : (nowTicks - lastTicks) / TimeSpan.TicksPerMillisecond;
                 if (sinceMs < DebounceWindowMs)
                 {
-                    await component.RespondAsync(
-                        "Still processing your previous click - give it a moment.",
-                        ephemeral: true).ConfigureAwait(false);
+                    await component.Respond("Still processing your previous click - give it a moment.")
+                        .ConfigureAwait(false);
                     return;
                 }
                 _debounce[key] = nowTicks;
@@ -112,10 +123,19 @@ namespace KMHServerAddon.Features.Discord
             string caller = LinkedAccountsStore.FindUsernameByDiscordId(clickerId);
             if (string.IsNullOrEmpty(caller))
             {
-                await component.RespondAsync(
+                await component.Respond(
                     "Link your Discord first to use buy buttons. " +
-                    "In-game: `/kmh link`, then here: `!kmh-link <code>`.",
-                    ephemeral: true).ConfigureAwait(false);
+                    "In-game: `/kmh link`, then here: `!kmh-link <code>`.").ConfigureAwait(false);
+                return;
+            }
+            if (Features.Moderation.BanGate.IsBannedAccount(caller))
+            {
+                await component.Respond("Your Colony Nexus account is banned on this server.").ConfigureAwait(false);
+                return;
+            }
+            if (Features.Moderation.KmhEconomyGuard.IsFrozen(caller))
+            {
+                await component.Respond(Features.Moderation.KmhEconomyGuard.FrozenRefusal).ConfigureAwait(false);
                 return;
             }
 
@@ -130,53 +150,55 @@ namespace KMHServerAddon.Features.Discord
             }
             if (listing == null)
             {
-                await component.RespondAsync($"Listing #{listingId} no longer exists.", ephemeral: true)
-                    .ConfigureAwait(false);
+                await component.Respond($"Listing #{listingId} no longer exists.").ConfigureAwait(false);
                 return;
             }
             if (string.Equals(listing.SellerUsername, caller, StringComparison.OrdinalIgnoreCase))
             {
-                await component.RespondAsync("You can't buy your own listing.", ephemeral: true)
-                    .ConfigureAwait(false);
+                await component.Respond("You can't buy your own listing.").ConfigureAwait(false);
                 return;
             }
 
-            int qty;
-            if (string.Equals(segs[2], "all", StringComparison.OrdinalIgnoreCase))
+            int? wanted = QuantityFor(quantity, listing.RemainingQty);
+            if (wanted == null)
             {
-                qty = Math.Min(listing.RemainingQty, 10_000);
-            }
-            else if (!int.TryParse(segs[2], out qty) || qty <= 0)
-            {
-                await component.RespondAsync("Malformed quantity.", ephemeral: true).ConfigureAwait(false);
+                await component.Respond("Malformed quantity.").ConfigureAwait(false);
                 return;
             }
-            if (qty > 10_000) qty = 10_000;
+            int qty = wanted.Value;
 
             int  boughtQty = Math.Min(qty, listing.RemainingQty);
             long expected  = (long)listing.UnitPriceSilver * boughtQty;
             if (expected > int.MaxValue || expected < 0)
             {
-                await component.RespondAsync("Purchase value too large - try a smaller quantity.", ephemeral: true)
-                    .ConfigureAwait(false);
+                await component.Respond("Purchase value too large - try a smaller quantity.").ConfigureAwait(false);
                 return;
             }
 
             if (!Maintenance.KmhAdmission.AllowsPlayerFeature(Maintenance.KmhIngress.Discord, "marketplace", out string blocked))
             {
-                await component.RespondAsync(blocked, ephemeral: true).ConfigureAwait(false);
+                await component.Respond(blocked).ConfigureAwait(false);
                 return;
             }
 
             // Deferred first, because Discord drops an interaction that has not responded within three seconds.
-            await component.DeferAsync(ephemeral: true).ConfigureAwait(false);
+            await component.Defer().ConfigureAwait(false);
 
-            if (!MarketplaceStore.Buy(caller, listingId, qty, out string sellerUsername, out boughtQty, out int paidSilver))
+            // Admitted again at the purchase: a reset or backup that began during the defer waits for it or refuses it.
+            bool bought;
+            string sellerUsername;
+            int paidSilver;
+            using (Maintenance.KmhValueOps.Scope op = Maintenance.KmhValueOps.BeginFeature(Maintenance.KmhIngress.Discord, "marketplace", out blocked))
             {
-                await component.FollowupAsync(
+                sellerUsername = null; paidSilver = 0;
+                bought = op != null && MarketplaceStore.Buy(caller, listingId, qty, out sellerUsername, out boughtQty, out paidSilver);
+            }
+            if (blocked != null) { await component.Followup(blocked).ConfigureAwait(false); return; }
+            if (!bought)
+            {
+                await component.Followup(
                     "Buy failed - insufficient silver, listing already sold, or another " +
-                    "concurrent transaction beat you to it.",
-                    ephemeral: true).ConfigureAwait(false);
+                    "concurrent transaction beat you to it.").ConfigureAwait(false);
                 return;
             }
 
@@ -185,9 +207,9 @@ namespace KMHServerAddon.Features.Discord
             MarketplaceHandler.PushTreasuryTo(sellerUsername);
 
             string label = ItemLabelCache.LabelFor(listing.ItemDefName, listing.StuffDefName, listing.QualityIndex);
-            await component.FollowupAsync(
-                $"Bought **{boughtQty}× {DiscordText.Escape(label)}** for `{paidSilver}s`. Items delivered to your treasury.",
-                ephemeral: true).ConfigureAwait(false);
+            await component.Followup(
+                $"Bought **{boughtQty}× {DiscordText.Escape(label)}** for `{paidSilver}s`. Items delivered to your treasury.")
+                .ConfigureAwait(false);
             ServerLog.Info(
                 $"Discord: {caller} bought x{boughtQty} of listing #{listingId} from {sellerUsername} via button");
         }

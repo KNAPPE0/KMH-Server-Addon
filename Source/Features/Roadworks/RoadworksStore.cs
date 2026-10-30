@@ -8,6 +8,11 @@ namespace KMHServerAddon.Features.Roadworks
     internal static class RoadworksStore
     {
         private static readonly object _lock = new object();
+        // Cancel and finish refunds are owed in the same save as the change. Declared below _lock because it captures it.
+        private static readonly Transactions.KmhOwedPayouts _owed = new Transactions.KmhOwedPayouts("Roadworks", _lock, SaveToDisk);
+        private static readonly Dictionary<string, long> _appliedWork = new Dictionary<string, long>(StringComparer.Ordinal);
+        // A cycle's record clears the moment its work is laid, so a week of markers covers any replay many times over.
+        private static readonly long AppliedWorkTtl = TimeSpan.FromDays(7).Ticks;
         private static readonly Dictionary<string, RoadSegment> _segments =
             new Dictionary<string, RoadSegment>(StringComparer.Ordinal);
         private static readonly Dictionary<long, RoadProject> _projects = new Dictionary<long, RoadProject>();
@@ -46,7 +51,7 @@ namespace KMHServerAddon.Features.Roadworks
             Economy.EconomyConfig cfg = Economy.EconomyConfig.Current;
             var snap = new RoadworksSnapshot
             {
-                MaxRouteSegments = cfg.RoadworksMaxSegmentsPerProject,
+                MaxRouteSegments = cfg.Roadworks.MaxSegmentsPerProject,
                 AllowRoadworks   = Sites.SitesConfig.Current.AllowRoadworks,
                 WorkPerWorker     = Sites.SiteStore.RoadworkBaseWorkPerWorker,
                 WorkPerSkillLevel = Sites.SiteStore.RoadworkWorkPerSkillLevel,
@@ -68,13 +73,21 @@ namespace KMHServerAddon.Features.Roadworks
             return snap;
         }
 
-        // Turned off sends none, so clients withdraw what they applied; the store keeps them, so it is reversible.
-
-        // A copy, so a suite can compare the shared list against what the store actually holds.
         internal static List<RoadSegment> SegmentsForTest() { lock (_lock) return new List<RoadSegment>(_segments.Values); }
 
         // Costs a connected client one extra snapshot, which is what lets a suite prove the shared list is not stale.
         internal static void BumpRevisionForTest() { lock (_lock) _revision++; }
+        internal static void InsertProjectForTest(RoadProject p) { lock (_lock) _projects[p.Id] = p; }
+        internal static void InsertSegmentForTest(RoadSegment s) { lock (_lock) _segments[RoadKeys.For(s)] = s; }
+        internal static RoadProject ProjectForTest(long id) { lock (_lock) return _projects.TryGetValue(id, out RoadProject p) ? p : null; }
+        internal static void RemoveForTest(long projectId, IEnumerable<string> segmentKeys)
+        {
+            lock (_lock)
+            {
+                _projects.Remove(projectId);
+                foreach (string k in segmentKeys) if (k != null) _segments.Remove(k);
+            }
+        }
 
         // The whole planet's roads are the same for every player, so a broadcast to fifty of them builds this once.
         private static List<RoadSegmentDto> _sharedSegments;
@@ -93,6 +106,7 @@ namespace KMHServerAddon.Features.Roadworks
             return _sharedSegments;
         }
 
+        // Turned off sends none, so clients withdraw what they applied; the store keeps them, so it is reversible.
         internal static List<RoadSegmentDto> SegmentsForSnapshot(IEnumerable<RoadSegment> segments, bool allow)
         {
             var outp = new List<RoadSegmentDto>();
@@ -124,6 +138,8 @@ namespace KMHServerAddon.Features.Roadworks
                     SegmentsTotal = Math.Max(0, (p.Route?.Count ?? 0) - 1),
                     SegmentsDone = p.CurrentSegment, CurrentProgress = p.CurrentProgress,
                     EscrowSilver = p.EscrowSilver, EscrowUnspent = UnspentEscrow(p),
+                    RouteTiles  = (p.Route ?? new List<RoadTile>()).ConvertAll(t => t.TileId),
+                    RouteLayers = (p.Route ?? new List<RoadTile>()).ConvertAll(t => t.LayerId),
                 });
             }
             return outp;
@@ -197,6 +213,10 @@ namespace KMHServerAddon.Features.Roadworks
             if (!Sites.SitesConfig.Current.AllowRoadworks)
             { reason = "Roadworks is turned off on this server."; return false; }
             if (route == null || route.Count < 2) { reason = "A route needs at least two tiles."; return false; }
+            // Pricing skips a malformed step, so the build must never be handed one either.
+            for (int i = 0; i + 1 < route.Count; i++)
+                if (!RoadKeys.IsWellFormed(route[i], route[i + 1]))
+                { reason = "That route has a step that isn't between two different valid tiles."; return false; }
 
             // Authority, archetype and tier come from the site, never from the caller.
             bool found = Sites.SiteStore.TryGetSiteFacts(siteTile, username, out bool canManage, out string archetype, out int siteTier);
@@ -204,8 +224,8 @@ namespace KMHServerAddon.Features.Roadworks
             if (reason != null) return false;
 
             Economy.EconomyConfig cfg = Economy.EconomyConfig.Current;
-            if (route.Count - 1 > cfg.RoadworksMaxSegmentsPerProject)
-            { reason = $"That route is too long ({route.Count - 1} segments, max {cfg.RoadworksMaxSegmentsPerProject})."; return false; }
+            if (route.Count - 1 > cfg.Roadworks.MaxSegmentsPerProject)
+            { reason = $"That route is too long ({route.Count - 1} segments, max {cfg.Roadworks.MaxSegmentsPerProject})."; return false; }
 
             string t = RoadTiers.Normalize(tier);
             int maxActive = MaxActiveProjectsForTier(siteTier);
@@ -222,9 +242,23 @@ namespace KMHServerAddon.Features.Roadworks
 
             int cost = RoadTiers.SilverPerSegment(t) * buildable.Count;
 
-            // Charge outside the store lock - TreasuryStore has its own.
-            if (cost > 0 && !Treasury.TreasuryStore.WithdrawSilver(username, cost, $"roadworks project ({buildable.Count} segment(s), {RoadTiers.DisplayName(t)})"))
-            { reason = "Your treasury doesn't have enough silver for that route."; return false; }
+            // The charge rides a ledger row written before the debit, and the project is saved naming that row: a crash
+            // before the save is refunded at boot, one after it keeps the project funded - never both.
+            Transactions.KmhTransaction tx = null;
+            if (cost > 0)
+            {
+                string summary = $"roadworks project ({buildable.Count} segment(s), {RoadTiers.DisplayName(t)})";
+                tx = Transactions.KmhTransactionRepository.OpenTake(username, Transactions.KmhTxType.Purchase, summary, siteTile, cost,
+                         null, null, destination: "roadworks", targetKind: Transactions.KmhTransactionRepository.TargetRoadStart);
+                if (tx == null) { reason = "The server couldn't record that charge - nothing was taken. Try again shortly."; return false; }
+                if (!Treasury.TreasuryStore.WithdrawBundleForTxn(username, cost, new List<KeyValuePair<string, int>>(), tx.TakeMarker, summary))
+                {
+                    Transactions.KmhTransactionRepository.Abort(tx);
+                    reason = "Your treasury doesn't have enough silver for that route.";
+                    return false;
+                }
+            }
+            AtStartPhaseForTest?.Invoke("charged");
 
             // Everything checked before the charge could have moved while the treasury lock was held, so re-ask now.
             bool stillFound = Sites.SiteStore.TryGetSiteFacts(siteTile, username, out bool stillManage,
@@ -233,6 +267,8 @@ namespace KMHServerAddon.Features.Roadworks
 
             long now = DateTime.UtcNow.Ticks;
             int refundDelta = 0;
+            string deltaMarker = null;
+            bool saved = false;
             if (commitRefusal == null)
                 lock (_lock)
                 {
@@ -243,7 +279,7 @@ namespace KMHServerAddon.Features.Roadworks
                         commitRefusal = $"This Roadworks site already has {MaxActiveProjectsForTier(stillTier)} active project(s).";
                     else
                     {
-                        // Part of the route may have been laid while we were paying, so escrow only what is still left.
+                        // Part of the route may have been laid during the charge, so escrow only what is still left.
                         int finalCost = RoadTiers.SilverPerSegment(t) * stillBuildable.Count;
                         refundDelta = Math.Max(0, cost - finalCost);
                         project = new RoadProject
@@ -251,47 +287,65 @@ namespace KMHServerAddon.Features.Roadworks
                             Id = _nextProjectId++, OwnerUsername = username, SiteTile = siteTile, Tier = t,
                             Route = new List<RoadTile>(route), CurrentSegment = 0, CurrentProgress = 0,
                             State = RoadProject.StateBuilding, CreatedUtcTicks = now, UpdatedUtcTicks = now,
-                            EscrowSilver = finalCost, EscrowSilverSpent = 0,
+                            EscrowSilver = finalCost, EscrowSilverSpent = 0, StartTxId = tx?.Id ?? "",
                         };
                         _projects[project.Id] = project;
+                        // The part already built is owed back in the same save that funds the project.
+                        if (refundDelta > 0)
+                            deltaMarker = _owed.RecordLocked(new Transactions.KmhOwedPayout
+                            {
+                                Marker = $"road:{project.Id}:{now}:delta", User = username, Silver = refundDelta,
+                                Note = $"roadworks project #{project.Id} - part of the route was already built",
+                            });
                         _revision++;
+                        saved = SaveToDisk();
+                        if (!saved) { _projects.Remove(project.Id); _owed.ForgetLocked(deltaMarker); _revision++; }
                     }
                 }
 
-            if (commitRefusal != null)
+            if (commitRefusal != null || !saved)
             {
-                if (cost > 0)
-                    Items.KmhPayloadEscrow.DeliverSilver(username, cost,
-                        $"roadworks project not started ({commitRefusal})", "roadworks refund could not be credited");
+                RefundStart(tx);
                 project = null;
-                reason = commitRefusal + (cost > 0 ? " Your silver was refunded." : "");
+                reason = commitRefusal != null
+                    ? commitRefusal + (cost > 0 ? " Your silver was refunded." : "")
+                    : "The server couldn't save that project - your silver was returned. Try again shortly.";
                 return false;
             }
-            // The escrow already left the treasury, so a start the disk never took hands the whole charge back.
-            if (!SaveToDisk())
-            {
-                lock (_lock) { _projects.Remove(project.Id); _revision++; }
-                if (cost > 0)
-                    Items.KmhPayloadEscrow.DeliverSilver(username, cost,
-                        "roadworks project could not be saved", "roadworks refund could not be credited");
-                project = null;
-                reason = "The server couldn't save that project - your silver was returned. Try again shortly.";
-                return false;
-            }
-            if (refundDelta > 0)
-                Items.KmhPayloadEscrow.DeliverSilver(username, refundDelta,
-                    $"roadworks project #{project.Id} - part of the route was already built", "roadworks refund could not be credited");
+            AtStartPhaseForTest?.Invoke("saved");
+            if (tx != null) Transactions.KmhTransactionRepository.Settle(tx);
+            _owed.Settle(deltaMarker);
             RaiseSiteChanged(siteTile, username, "road_started");
             Diagnostics.ServerLog.Info($"Roadworks: {username} started project #{project.Id} - {RoadTiers.DisplayName(t)} escrowed at {project.EscrowSilver} silver"
                 + (refundDelta > 0 ? $" ({refundDelta} returned - part of the route was already built)." : "."));
             return true;
         }
 
-        // Completed segments stay; unspent escrow returns.
+        internal static Action<string> AtStartPhaseForTest;
+
+        // On the row's own refund marker, so this and boot recovery return the charge once between them.
+        private static void RefundStart(Transactions.KmhTransaction tx)
+        {
+            if (tx != null && !Transactions.KmhTransactionRepository.Compensate(tx))
+                Diagnostics.ServerLog.Error($"Roadworks: charge {tx.Id} could not be refunded yet - the row stays open and the next boot refunds it.");
+        }
+
+        // A project saved naming the row that funded it: boot settles that row instead of refunding it.
+        internal static bool HoldsStart(string txId)
+        {
+            if (string.IsNullOrEmpty(txId)) return false;
+            lock (_lock)
+                foreach (RoadProject p in _projects.Values)
+                    if (p != null && string.Equals(p.StartTxId, txId, StringComparison.Ordinal)) return true;
+            return false;
+        }
+
+        // Completed segments stay; unspent escrow returns, owed in the same save that cancels.
         public static bool CancelProject(string username, long projectId, out int refunded, out string reason)
         {
             refunded = 0; reason = null;
             RoadProject p;
+            string marker;
             lock (_lock)
             {
                 if (!_projects.TryGetValue(projectId, out p)) { reason = "No such project."; return false; }
@@ -303,9 +357,15 @@ namespace KMHServerAddon.Features.Roadworks
                 p.State = RoadProject.StateCancelled;
                 p.UpdatedUtcTicks = DateTime.UtcNow.Ticks;
                 _revision++;
-                // Durable before the refund, or the restart reopens the project with escrow the owner already has.
+                marker = _owed.RecordLocked(new Transactions.KmhOwedPayout
+                {
+                    Marker = $"road:{p.Id}:{p.CreatedUtcTicks}:cancel", User = username, Silver = refunded,
+                    Note = $"roadworks project #{projectId} cancelled - unbuilt segments refunded",
+                });
+                // Durable with its refund owed, or the restart reopens the project with escrow the owner already has.
                 if (!SaveToDisk())
                 {
+                    _owed.ForgetLocked(marker);
                     p.EscrowSilverSpent = p.EscrowSilver - refunded;
                     p.State = RoadProject.StateBuilding;
                     refunded = 0; _revision++;
@@ -313,8 +373,7 @@ namespace KMHServerAddon.Features.Roadworks
                     return false;
                 }
             }
-            if (refunded > 0)
-                Items.KmhPayloadEscrow.DeliverSilver(username, refunded, $"roadworks project #{projectId} cancelled - unbuilt segments refunded", "roadworks refund could not be credited");
+            _owed.Settle(marker);
             RaiseSiteChanged(p.SiteTile, username, "road_cancelled");
             Diagnostics.ServerLog.Info($"Roadworks: project #{projectId} cancelled by {username}; {refunded} silver returned, completed segments kept.");
             return true;
@@ -356,47 +415,153 @@ namespace KMHServerAddon.Features.Roadworks
             lock (_lock) return _projects.TryGetValue(projectId, out RoadProject p) && p != null ? p.OwnerUsername : null;
         }
 
+        private static int AdvanceLocked(RoadProject p, double work, long now)
+        {
+            int completed = 0;
+            double perSegment = RoadTiers.WorkPerSegment(p.Tier);
+            double remaining = work;
+            while (remaining > 0 && p.CurrentSegment + 1 < p.Route.Count)
+            {
+                double need = perSegment * (1.0 - p.CurrentProgress);
+                if (remaining < need) { p.CurrentProgress += remaining / perSegment; remaining = 0; break; }
+
+                remaining -= need;
+                RoadTile a = p.Route[p.CurrentSegment], b = p.Route[p.CurrentSegment + 1];
+                p.CurrentSegment++;
+                p.CurrentProgress = 0;
+
+                string k = RoadKeys.For(a, b);
+                if (k != null && RoadKeys.IsWellFormed(a, b) && !_segments.ContainsKey(k))
+                {
+                    _segments[k] = new RoadSegment
+                    {
+                        A = a, B = b, Tier = p.Tier, OwnerUsername = p.OwnerUsername,
+                        SourceSiteTile = p.SiteTile, ProjectId = p.Id, BuiltUtcTicks = now,
+                    };
+                    p.EscrowSilverSpent = Math.Min(p.EscrowSilver, p.EscrowSilverSpent + RoadTiers.SilverPerSegment(p.Tier));
+                    completed++;
+                }
+            }
+            if (p.CurrentSegment + 1 >= p.Route.Count) p.State = RoadProject.StateComplete;
+            p.UpdatedUtcTicks = now;
+            if (completed > 0) _revision++;
+            return completed;
+        }
+
         public static int AdvanceProject(long projectId, double work)
         {
             if (work <= 0) return 0;
-            int completed = 0;
-            long now = DateTime.UtcNow.Ticks;
+            int completed;
+            string owner;
             lock (_lock)
             {
                 if (!_projects.TryGetValue(projectId, out RoadProject p)) return 0;
                 if (p.State != RoadProject.StateBuilding) return 0;
-
-                double perSegment = RoadTiers.WorkPerSegment(p.Tier);
-                double remaining = work;
-                while (remaining > 0 && p.CurrentSegment + 1 < p.Route.Count)
-                {
-                    double need = perSegment * (1.0 - p.CurrentProgress);
-                    if (remaining < need) { p.CurrentProgress += remaining / perSegment; remaining = 0; break; }
-
-                    remaining -= need;
-                    RoadTile a = p.Route[p.CurrentSegment], b = p.Route[p.CurrentSegment + 1];
-                    p.CurrentSegment++;
-                    p.CurrentProgress = 0;
-
-                    string k = RoadKeys.For(a, b);
-                    if (k != null && !_segments.ContainsKey(k))
-                    {
-                        _segments[k] = new RoadSegment
-                        {
-                            A = a, B = b, Tier = p.Tier, OwnerUsername = p.OwnerUsername,
-                            SourceSiteTile = p.SiteTile, ProjectId = p.Id, BuiltUtcTicks = now,
-                        };
-                        p.EscrowSilverSpent = Math.Min(p.EscrowSilver, p.EscrowSilverSpent + RoadTiers.SilverPerSegment(p.Tier));
-                        completed++;
-                    }
-                }
-                if (p.CurrentSegment + 1 >= p.Route.Count) p.State = RoadProject.StateComplete;
-                p.UpdatedUtcTicks = now;
-                if (completed > 0) _revision++;
+                owner = p.OwnerUsername;
+                completed = AdvanceLocked(p, work, DateTime.UtcNow.Ticks);
             }
-            if (completed > 0) SaveToDisk();
+            // Only sections that are on disk count toward a federation.
+            if (completed > 0 && SaveToDisk())
+                Global.Federation.FederationService.RecordGuildWork("road", owner, completed);
+            RefundFinished();
             return completed;
         }
+
+        // The marker is saved with the progress: a replay finds it and lays nothing, and a failed save undoes both.
+        // True also when no active project is left to lay the work on.
+        public static bool ApplyWorkOnce(string marker, int siteTile, double work)
+        {
+            if (string.IsNullOrEmpty(marker) || work <= 0) return true;
+            var worked = new List<(string Owner, int Segments)>();
+            lock (_lock)
+            {
+                if (_appliedWork.ContainsKey(marker)) return true;
+                var active = new List<RoadProject>();
+                foreach (RoadProject p in _projects.Values)
+                    if (p != null && p.SiteTile == siteTile && p.State == RoadProject.StateBuilding) active.Add(p);
+                if (active.Count == 0) return true;
+                var before = active.ConvertAll(p => p.ShallowClone());
+                var segmentsBefore = new HashSet<string>(_segments.Keys, StringComparer.Ordinal);
+                long now = DateTime.UtcNow.Ticks;
+                double each = work / active.Count;
+                foreach (RoadProject p in active)
+                {
+                    int n = AdvanceLocked(p, each, now);
+                    if (n > 0) worked.Add((p.OwnerUsername, n));
+                }
+                _appliedWork[marker] = now;
+                if (!SaveToDisk())
+                {
+                    foreach (RoadProject b in before) _projects[b.Id] = b;
+                    foreach (string k in new List<string>(_segments.Keys)) if (!segmentsBefore.Contains(k)) _segments.Remove(k);
+                    _appliedWork.Remove(marker);
+                    _revision++;
+                    return false;
+                }
+            }
+            foreach ((string owner, int n) in worked) Global.Federation.FederationService.RecordGuildWork("road", owner, n);
+            RefundFinished();
+            return true;
+        }
+
+        internal static bool WorkAppliedForTest(string marker) { lock (_lock) return marker != null && _appliedWork.ContainsKey(marker); }
+
+        // A segment someone else built first, or a price change mid-project, leaves escrow the project never spent.
+        // The refund is owed in the same save that marks it spent, so a restart neither drops nor repeats it.
+        internal static long RefundFinished()
+        {
+            var markers = new List<string>();
+            long total = 0;
+            lock (_lock)
+            {
+                var due = new List<(RoadProject P, int SpentBefore, string Marker)>();
+                foreach (RoadProject p in _projects.Values)
+                    if (p != null && p.State == RoadProject.StateComplete && p.EscrowSilver > p.EscrowSilverSpent)
+                    {
+                        int silver = p.EscrowSilver - p.EscrowSilverSpent;
+                        string m = _owed.RecordLocked(new Transactions.KmhOwedPayout
+                        {
+                            Marker = $"road:{p.Id}:{p.CreatedUtcTicks}:finished", User = p.OwnerUsername, Silver = silver,
+                            Note = $"roadworks project #{p.Id} finished - {silver} silver for segments it never built refunded",
+                        });
+                        due.Add((p, p.EscrowSilverSpent, m));
+                        p.EscrowSilverSpent = p.EscrowSilver;
+                        total += silver;
+                    }
+                if (due.Count == 0) return 0;
+                _revision++;
+                if (!SaveToDisk())
+                {
+                    foreach (var d in due) { d.P.EscrowSilverSpent = d.SpentBefore; _owed.ForgetLocked(d.Marker); }
+                    _revision++;
+                    return 0;
+                }
+                foreach (var d in due)
+                {
+                    if (d.Marker != null) markers.Add(d.Marker);
+                    Diagnostics.ServerLog.Info($"Roadworks: project #{d.P.Id} finished; {d.P.EscrowSilver - d.SpentBefore} unspent escrow owed back to {d.P.OwnerUsername}.");
+                }
+            }
+            foreach (string m in markers) _owed.Settle(m);
+            return total;
+        }
+
+        // Boot, and the sweep: refunds written down and then interrupted, or refused by the vault.
+        public static void RecoverOnBoot()
+        {
+            (int paid, int left) = _owed.Resume();
+            if (paid > 0 || left > 0) Diagnostics.ServerLog.Warn($"Roadworks: recovery paid {paid} interrupted refund(s), {left} still owed.");
+        }
+
+        public static int RetryOwed() => _owed.Count == 0 ? 0 : _owed.Resume(quiet: true).paid;
+        internal static int OwedCount => _owed.Count;
+
+        // The caller saves: a reset writes this down as one of its steps.
+        internal static int DropOwedFor(string user) { lock (_lock) return _owed.DropForLocked(user); }
+
+        internal static int OwedCountForTest => _owed.Count;
+        internal static (long Silver, int Units) UnpaidOwedForTest(string user) => _owed.UnpaidTotals(user);
+        internal static Action<string> AtPayoutPhaseForTest { set => _owed.AtPhaseForTest = value; }
 
         // Roadworks is a Site archetype, so extensions observe it through SiteChanged rather than a parallel event.
         private static void RaiseSiteChanged(int tile, string owner, string reason)
@@ -411,7 +576,7 @@ namespace KMHServerAddon.Features.Roadworks
 
         public static void ClearForNewSeason()
         {
-            lock (_lock) { _segments.Clear(); _projects.Clear(); _revision++; _nextProjectId = 1; }
+            lock (_lock) { _segments.Clear(); _projects.Clear(); _owed.ClearLocked(); _appliedWork.Clear(); _revision++; _nextProjectId = 1; }
             SaveToDisk();
         }
 
@@ -466,6 +631,9 @@ namespace KMHServerAddon.Features.Roadworks
             lock (_lock)
             {
                 _segments.Clear(); _projects.Clear();
+                _owed.LoadLocked(s.Owed);
+                _appliedWork.Clear();
+                if (s.AppliedWork != null) foreach (KeyValuePair<string, long> kv in s.AppliedWork) _appliedWork[kv.Key] = kv.Value;
                 if (s.Segments != null)
                     foreach (RoadSegment seg in s.Segments)
                     {
@@ -480,7 +648,7 @@ namespace KMHServerAddon.Features.Roadworks
                 _nextProjectId = Math.Max(1, s.NextProjectId);
                 foreach (RoadProject p in _projects.Values) if (p.Id >= _nextProjectId) _nextProjectId = p.Id + 1;
             }
-            Diagnostics.ServerLog.Info($"Roadworks: loaded {_segments.Count} road segment(s), {_projects.Count} project(s).");
+            Diagnostics.ServerLog.Diag($"Roadworks: loaded {_segments.Count} road segment(s), {_projects.Count} project(s).");
         }
 
         // False means memory-only: a project's escrowed silver is then refundable twice, so callers must roll back.
@@ -490,10 +658,14 @@ namespace KMHServerAddon.Features.Roadworks
             long seq;
             lock (_lock)
             {
-                s.Segments.AddRange(_segments.Values);
-                s.Projects.AddRange(_projects.Values);
+                s.Segments.AddRange(KmhDeepCopy.OfList(_segments.Values));
+                s.Projects.AddRange(KmhDeepCopy.OfList(_projects.Values));
                 s.Revision = _revision;
                 s.NextProjectId = _nextProjectId;
+                s.Owed = _owed.SnapshotLocked();
+                long cutoff = DateTime.UtcNow.Ticks - AppliedWorkTtl;
+                foreach (string k in new List<string>(_appliedWork.Keys)) if (_appliedWork[k] < cutoff) _appliedWork.Remove(k);
+                s.AppliedWork = new Dictionary<string, long>(_appliedWork, StringComparer.Ordinal);
                 seq = JsonFileStore.NextSequence();
             }
             return JsonFileStore.Save(KmhDataPaths.RoadworksFile, s, seq);

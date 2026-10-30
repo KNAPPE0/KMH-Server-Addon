@@ -86,7 +86,7 @@ namespace KMHServerAddon.Features.Sites.Dto
         public const string ArchetypeQuarry    = "quarry";
         public const string ArchetypeWoodland  = "woodland";
         public const string ArchetypeRoadworks = "roadworks";
-        // Additive in v1.3.0: a site saved by an older build simply never carries it.
+        // Additive: a site saved by an older build simply never carries it.
         public const string ArchetypeRanch     = "ranch";
 
         [JsonProperty("tile")]              public int    Tile             { get; set; } = -1;
@@ -113,8 +113,6 @@ namespace KMHServerAddon.Features.Sites.Dto
         [JsonProperty("claim_eligible_username")] public string ClaimEligibleUsername { get; set; } = "";
         // Caller-scoped and decided by the server: whether THIS caller may claim it right now.
         [JsonProperty("can_claim")]         public bool   CanClaim      { get; set; } = false;
-
-
 
         // Identity and defaults only: it does not change how production is computed, so an old site produces the same.
         [JsonProperty("archetype")]         public string Archetype       { get; set; } = "";
@@ -195,6 +193,9 @@ namespace KMHServerAddon.Features.Sites.Dto
         [JsonProperty("base_skill_level")] public int    BaseSkillLevel  { get; set; } = 0;
         [JsonProperty("destination")]      public string Destination     { get; set; } = SiteEntry.DestTreasury;
 
+        // Payout and authority read this rather than parsing the key.
+        [JsonProperty("username")]          public string Username          { get; set; } = "";
+
         // Client-reported and advisory: a headless server cannot verify the pawn, so nothing gates on it.
         [JsonProperty("pawn_name")]         public string PawnName          { get; set; } = "";
         [JsonProperty("pawn_load_id")]      public int    PawnLoadId        { get; set; } = -1;
@@ -208,7 +209,7 @@ namespace KMHServerAddon.Features.Sites.Dto
 
         public WorkerProgressDto ShallowClone() => (WorkerProgressDto)MemberwiseClone();
 
-        // Server-owned XP and the level brought in at join only - never the client's reported pawn skill, which bought a free skill 20.
+        // Server-earned XP only: the client's reported pawn skill would hand out a free level 20.
         [JsonIgnore] public int EarnedLevel
         {
             get

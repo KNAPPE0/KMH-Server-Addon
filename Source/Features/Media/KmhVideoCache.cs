@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using KMHServerAddon.Diagnostics;
@@ -49,7 +49,8 @@ namespace KMHServerAddon.Features.Media
 
         public static void Start()
         {
-            Maintenance.KmhScheduler.Register("video-cache-sweep", TimeSpan.FromHours(1), Sweep, TimeSpan.FromMinutes(5));
+            Maintenance.KmhScheduler.Register("video-cache-sweep", TimeSpan.FromHours(1), Sweep,
+                Maintenance.KmhJobKind.Infrastructure, TimeSpan.FromMinutes(5));
             try
             {
                 if (!Directory.Exists(Folder)) return;
@@ -59,7 +60,7 @@ namespace KMHServerAddon.Features.Media
                 foreach (FileInfo f in held) bytes += f.Length;
                 MediaConfig cfg = MediaConfig.Current;
                 ServerLog.Info($"Video cache: {held.Length} file(s), {bytes / (1024 * 1024)}MB of "
-                             + $"{cfg.VideoCacheMaxMegabytes}MB, kept {cfg.VideoCacheHours}h.");
+                             + $"{cfg.Video.CacheMaxMegabytes}MB, kept {cfg.Video.CacheHours}h.");
             }
             catch { }
         }
@@ -68,8 +69,8 @@ namespace KMHServerAddon.Features.Media
         public static void Sweep()
         {
             MediaConfig cfg = MediaConfig.Current;
-            long limit = (long)Math.Max(1, cfg.VideoCacheMaxMegabytes) * 1024 * 1024;
-            int hours = Math.Max(0, cfg.VideoCacheHours);
+            long limit = (long)Math.Max(1, cfg.Video.CacheMaxMegabytes) * 1024 * 1024;
+            int hours = Math.Max(0, cfg.Video.CacheHours);
 
             try
             {

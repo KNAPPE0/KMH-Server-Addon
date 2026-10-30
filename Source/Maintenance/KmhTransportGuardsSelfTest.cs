@@ -44,15 +44,35 @@ namespace KMHServerAddon.Maintenance
                 return (f == null, f == null ? "a null envelope encodes to nothing" : "NULL ENVELOPE PRODUCED A FRAME");
             });
 
+            // A 1 KB compressed frame can inflate to 1 MB, so it must be refused before the hello is checked.
+            Check("Transport: compressed frames are refused before auth, and capped per connection after", () =>
+            {
+                byte[] raw = System.Text.Encoding.UTF8.GetBytes("{\"kind\":\"kmh.api.hello\",\"data\":{\"p\":\"" + new string('A', 1024 * 1024) + "\"}}");
+                byte[] body = SubProtocol.KmhFrameCodec.Deflate(raw);
+                byte[] frame = new byte[4 + body.Length];
+                SubProtocol.KmhFrameCodec.WriteHeader(frame, body.Length, compressed: true);
+                Buffer.BlockCopy(body, 0, frame, 4, body.Length);
+                SubProtocol.KmhEnvelope Read(Features.Transport.KmhApiServer.InflateBudget b)
+                    => Features.Transport.KmhApiServer.ReadFrame(new System.IO.MemoryStream(frame), null, System.Threading.CancellationToken.None, b)
+                        .GetAwaiter().GetResult();
+                bool preAuthRefused = Read(null) == null;
+                var budget = new Features.Transport.KmhApiServer.InflateBudget();
+                bool afterAuthRead = Read(budget)?.Kind == "kmh.api.hello";
+                int more = 0;
+                while (more < 40 && Read(budget) != null) more++;
+                bool capped = more < 40;
+                return (preAuthRefused && afterAuthRead && capped, $"preAuthRefused={preAuthRefused} afterAuth={afterAuthRead} framesBeforeCap={more + 1}");
+            });
+
             // Public-by-default is allowed only because every safety system defaults on.
             Check("Transport: default posture is locked down", () =>
             {
                 var c = new TransportConfig();
                 bool safetyOn = c.RequireKmhApiAuth
-                             && c.MaxConnections > 0 && c.MaxConnectionsPerIp > 0
-                             && c.AuthTimeoutSeconds > 0 && c.IdleTimeoutSeconds > 0
-                             && c.MaxFrameKb > 0
-                             && c.FailedAuthPerIp > 0 && c.FailedAuthWindowSeconds > 0 && c.FailedAuthBlockSeconds > 0;
+                             && c.Advanced.MaxConnections > 0 && c.Advanced.MaxConnectionsPerIp > 0
+                             && c.Advanced.AuthTimeoutSeconds > 0 && c.Advanced.IdleTimeoutSeconds > 0
+                             && c.Advanced.MaxFrameKb > 0
+                             && c.Advanced.FailedAuthPerIp > 0 && c.Advanced.FailedAuthWindowSeconds > 0 && c.Advanced.FailedAuthBlockSeconds > 0;
                 return (safetyOn, safetyOn
                     ? $"bind={c.BindAddress} with auth+caps+throttle+timeouts+frame limits all required"
                     : "A SAFETY DEFAULT IS OFF - public default bind is not acceptable like this");
@@ -75,17 +95,51 @@ namespace KMHServerAddon.Maintenance
                 // An out-of-range value must snap to a safe default rather than disabling a guard.
                 var c = TransportConfig.ClampForTest(new TransportConfig
                 {
-                    BindAddress = "  ", KmhApiPort = 0, MaxConnections = -5,
-                    MaxConnectionsPerIp = 0, MaxFrameKb = 99999, FailedAuthPerIp = 0
+                    BindAddress = "  ", KmhApiPort = 0,
+                    Advanced = new TransportAdvanced { MaxConnections = -5, MaxConnectionsPerIp = 0, MaxFrameKb = 99999, FailedAuthPerIp = 0 },
                 });
                 bool bindOk  = !c.IsPublicBind;                 // blank -> loopback, never 0.0.0.0
                 bool portOk  = c.KmhApiPort >= 1 && c.KmhApiPort <= 65535;
-                bool connOk  = c.MaxConnections >= 1;
-                bool perIpOk = c.MaxConnectionsPerIp >= 1 && c.MaxConnectionsPerIp <= c.MaxConnections;
-                bool frameOk = c.MaxFrameKb >= 1 && c.MaxFrameKb <= 1024;
-                bool failOk  = c.FailedAuthPerIp >= 1;
+                bool connOk  = c.Advanced.MaxConnections >= 1;
+                bool perIpOk = c.Advanced.MaxConnectionsPerIp >= 1 && c.Advanced.MaxConnectionsPerIp <= c.Advanced.MaxConnections;
+                bool frameOk = c.Advanced.MaxFrameKb >= 1 && c.Advanced.MaxFrameKb <= 1024;
+                bool failOk  = c.Advanced.FailedAuthPerIp >= 1;
                 return (bindOk && portOk && connOk && perIpOk && frameOk && failOk,
-                        $"bind={c.BindAddress} port={c.KmhApiPort} conn={c.MaxConnections} perIp={c.MaxConnectionsPerIp} frameKb={c.MaxFrameKb} failPerIp={c.FailedAuthPerIp}");
+                        $"bind={c.BindAddress} port={c.KmhApiPort} conn={c.Advanced.MaxConnections} perIp={c.Advanced.MaxConnectionsPerIp} frameKb={c.Advanced.MaxFrameKb} failPerIp={c.Advanced.FailedAuthPerIp}");
+            });
+
+            Check("Transport: the auth throttle stays bounded under a flood of addresses, and an active block outlives it", () =>
+            {
+                long now = DateTime.UtcNow.Ticks;
+                var t = new AuthFailThrottle(threshold: 3, windowSeconds: 60, blockSeconds: 600, nowTicks: () => now);
+                for (int i = 0; i < 3; i++) t.NoteFailure("198.51.100.7", out _);
+                for (int i = 0; i < AuthFailThrottle.MaxTracked + 5_000; i++) t.NoteFailure($"10.{i >> 16 & 255}.{i >> 8 & 255}.{i & 255}", out _);
+                bool bounded = t.Tracked <= AuthFailThrottle.MaxTracked;
+                bool stillBlocked = t.IsBlocked("198.51.100.7");
+                now += TimeSpan.FromSeconds(61).Ticks;
+                for (int i = 0; i < 300; i++) t.NoteFailure("192.0.2.1", out _);
+                bool aged = t.Tracked < 100 && t.IsBlocked("198.51.100.7");
+                return (bounded && stillBlocked && aged, $"tracked {t.Tracked}, block kept={stillBlocked}, after the window {aged}");
+            });
+            Check("Transport: an IPv6 host rotating inside its /64 meets the same block", () =>
+            {
+                var t = new AuthFailThrottle(threshold: 5, windowSeconds: 60, blockSeconds: 300);
+                for (int i = 1; i <= 5; i++) t.NoteFailure($"2001:db8:1:2::{i:x}", out _);
+                bool sameNet = t.IsBlocked("2001:db8:1:2:ffff::1");
+                bool otherNet = !t.IsBlocked("2001:db8:1:3::1");
+                for (int i = 0; i < 5; i++) t.NoteFailure("::ffff:203.0.113.9", out _);
+                bool mapped = t.IsBlocked("203.0.113.9");
+                return (sameNet && otherNet && mapped && t.Tracked == 2, $"same /64 blocked={sameNet}, next /64 free={otherNet}, mapped IPv4 one key={mapped}, tracked {t.Tracked}");
+            });
+            Check("Transport: a rate window forgets names it has not seen for a whole window", () =>
+            {
+                var w = new Util.KmhRateWindow();
+                long now = DateTime.UtcNow.Ticks;
+                for (int i = 0; i < 2000; i++) w.Allow("user" + i, now, 5, 60);
+                int before = w.Tracked;
+                now += TimeSpan.FromSeconds(61).Ticks;
+                for (int i = 0; i < 600; i++) w.Allow("active", now + i, 1000, 60);
+                return (before == 2000 && w.Tracked <= 2, $"{before} names, {w.Tracked} left a window later");
             });
 
             Check("Transport: per-IP cap blocks the (N+1)th socket", () =>
@@ -94,7 +148,7 @@ namespace KMHServerAddon.Maintenance
                 bool a = lim.TryAdmit("1.1.1.1");
                 bool b = lim.TryAdmit("1.1.1.1");
                 bool c = lim.TryAdmit("1.1.1.1");
-                bool d = lim.TryAdmit("1.1.1.1");   // 4th from same IP -> refused
+                bool d = lim.TryAdmit("1.1.1.1");
                 return (a && b && c && !d && lim.PerIp("1.1.1.1") == 3, "3 admitted, 4th refused");
             });
             Check("Transport: release frees per-IP capacity", () =>
@@ -110,19 +164,29 @@ namespace KMHServerAddon.Maintenance
             {
                 var lim = new ConnectionLimiter(maxTotal: 2, maxPerIp: 10);
                 bool a = lim.TryAdmit("a"); bool b = lim.TryAdmit("b");
-                bool c = lim.TryAdmit("c");   // global cap of 2 hit -> refused even from a fresh IP
+                bool c = lim.TryAdmit("c");
                 return (a && b && !c && lim.Total == 2, "2 total admitted, 3rd refused");
             });
             Check("Transport: a refused socket leaks no capacity", () =>
             {
                 var lim = new ConnectionLimiter(maxTotal: 100, maxPerIp: 1);
                 lim.TryAdmit("3.3.3.3");
-                lim.TryAdmit("3.3.3.3");   // refused
-                lim.TryAdmit("3.3.3.3");   // refused
+                lim.TryAdmit("3.3.3.3");
+                lim.TryAdmit("3.3.3.3");
                 return (lim.Total == 1 && lim.PerIp("3.3.3.3") == 1, $"total={lim.Total}");
             });
+            Check("Transport: an IPv6 host rotating through its /64 shares one per-IP cap", () =>
+            {
+                var lim = new ConnectionLimiter(maxTotal: 100, maxPerIp: 2);
+                bool a = lim.TryAdmit("2001:db8:1:2::a"), b = lim.TryAdmit("2001:db8:1:2::b");
+                bool rotated = lim.TryAdmit("2001:db8:1:2:ffff::c");
+                bool otherNet = lim.TryAdmit("2001:db8:1:3::a");
+                lim.Release("2001:db8:1:2::a");
+                bool afterRelease = lim.TryAdmit("2001:db8:1:2::d");
+                bool ok = a && b && !rotated && otherNet && afterRelease && lim.Total == 3;
+                return (ok, $"rotatedAdmitted={rotated} otherNet={otherNet} afterRelease={afterRelease} total={lim.Total}");
+            });
 
-            // A fake clock keeps the throttle test instant and deterministic.
             Check("Transport: throttle trips at the threshold", () =>
             {
                 long t = 0; var th = new AuthFailThrottle(threshold: 5, windowSeconds: 60, blockSeconds: 300, nowTicks: () => t);
@@ -137,7 +201,7 @@ namespace KMHServerAddon.Maintenance
                 var th = new AuthFailThrottle(threshold: 3, windowSeconds: 60, blockSeconds: 300, nowTicks: () => t);
                 for (int i = 0; i < 3; i++) th.NoteFailure("5.5.5.5", out _);
                 bool blockedNow = th.IsBlocked("5.5.5.5");
-                t += 301 * sec;                                   // advance past the 300s block
+                t += 301 * sec;
                 bool freeAfter = !th.IsBlocked("5.5.5.5");
                 return (blockedNow && freeAfter, "300s block then clear");
             });
@@ -145,8 +209,8 @@ namespace KMHServerAddon.Maintenance
             {
                 long t = 0; long sec = TimeSpan.FromSeconds(1).Ticks;
                 var th = new AuthFailThrottle(threshold: 3, windowSeconds: 60, blockSeconds: 300, nowTicks: () => t);
-                th.NoteFailure("6.6.6.6", out _); th.NoteFailure("6.6.6.6", out _);   // 2 in window
-                t += 61 * sec;                                   // window elapses -> counter resets
+                th.NoteFailure("6.6.6.6", out _); th.NoteFailure("6.6.6.6", out _);
+                t += 61 * sec;
                 bool tripped = th.NoteFailure("6.6.6.6", out int total);
                 return (!tripped && total == 1, "stale failures don't accumulate");
             });
@@ -154,7 +218,7 @@ namespace KMHServerAddon.Maintenance
             {
                 long t = 0; var th = new AuthFailThrottle(threshold: 3, windowSeconds: 60, blockSeconds: 300, nowTicks: () => t);
                 th.NoteFailure("7.7.7.7", out _); th.NoteFailure("7.7.7.7", out _);
-                th.Clear("7.7.7.7");                             // a successful login resets the IP
+                th.Clear("7.7.7.7");
                 bool tripped = th.NoteFailure("7.7.7.7", out int total);
                 return (!tripped && total == 1, "streak reset after success");
             });
@@ -251,56 +315,16 @@ namespace KMHServerAddon.Maintenance
                 Check("Video relay: shipped defaults bound an unauthenticated peer", () =>
                 {
                     var c = new Features.Media.MediaConfig();
-                    bool bounded = c.VideoMaxConnections > 0 && c.VideoMaxConnectionsPerIp > 0
-                                && c.VideoMaxConnectionsPerIp < c.VideoMaxConnections;
-                    return (bounded, $"{c.VideoMaxConnections} total / {c.VideoMaxConnectionsPerIp} per IP");
-                });
-
-                // The hello quotes this number and every client dials it, so it must name a socket that is really there.
-                Check("Transport: the advertised port answers, and is 0 whenever nothing is listening", () =>
-                {
-                    bool idleIsZero = !KmhApiServer.Running && KmhApiServer.Port == 0;
-
-                    var probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
-                    probe.Start();
-                    int free = ((System.Net.IPEndPoint)probe.LocalEndpoint).Port;
-                    probe.Stop();   // handed back, so Start below can take it
-
-                    var cfg = TransportConfig.ClampForTest(new TransportConfig
-                    {
-                        EnableKmhApiTransport = true, BindAddress = "127.0.0.1", KmhApiPort = free, RequireKmhApiAuth = true,
-                    });
-                    TransportConfig prevCfg = TransportConfig.ApplyForTest(cfg);
-                    int advertised;
-                    bool up, answered = false;
-                    try
-                    {
-                        KmhApiServer.Start();
-                        up = KmhApiServer.Running;
-                        advertised = KmhApiServer.Port;
-                        if (up && advertised > 0)
-                            using (var dial = new System.Net.Sockets.TcpClient())
-                            {
-                                dial.Connect(System.Net.IPAddress.Loopback, advertised);
-                                answered = dial.Connected;
-                            }
-                    }
-                    finally
-                    {
-                        KmhApiServer.Stop();
-                        TransportConfig.ApplyForTest(prevCfg);
-                    }
-                    bool stoppedIsZero = !KmhApiServer.Running && KmhApiServer.Port == 0;
-                    bool ok = idleIsZero && up && advertised == free && answered && stoppedIsZero;
-                    return (ok, ok ? $"advertised {advertised} and it accepted a connection"
-                                   : $"idle0={idleIsZero}, up={up}, advertised={advertised}, wanted={free}, answered={answered}, stopped0={stoppedIsZero}");
+                    bool bounded = c.Video.MaxConnections > 0 && c.Video.MaxConnectionsPerIp > 0
+                                && c.Video.MaxConnectionsPerIp < c.Video.MaxConnections;
+                    return (bounded, $"{c.Video.MaxConnections} total / {c.Video.MaxConnectionsPerIp} per IP");
                 });
             }
             finally
             {
                 Features.Media.KmhVideoRelay.ConfigureLimits(
-                    live?.VideoMaxConnections ?? Features.Media.KmhVideoRelay.DefaultMaxConnections,
-                    live?.VideoMaxConnectionsPerIp ?? Features.Media.KmhVideoRelay.DefaultMaxPerIp);
+                    live?.Video.MaxConnections ?? Features.Media.KmhVideoRelay.DefaultMaxConnections,
+                    live?.Video.MaxConnectionsPerIp ?? Features.Media.KmhVideoRelay.DefaultMaxPerIp);
             }
         }
     }

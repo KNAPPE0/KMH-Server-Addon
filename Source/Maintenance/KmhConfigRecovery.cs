@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.IO;
 using KMHServerAddon.Diagnostics;
 
@@ -36,47 +37,80 @@ namespace KMHServerAddon.Maintenance
             catch (Exception ex) { error = ex.Message; return false; }
         }
 
-        // Attempts recovery for a single failed config from its copy inside the latest boot backup. Logs what it did.
         public static void RecoverFromLatestBackup(string name, string activePath, object typeSample)
         {
-            string backupCopy = LatestBackupCopyOf(activePath);
-            bool haveBackup   = backupCopy != null && File.Exists(backupCopy);
-            bool backupValid  = haveBackup
-                && KmhConfigValidation.LoadTest(SafeRead(backupCopy), typeSample, out _);
+            List<string> copies = BackupCopiesOf(activePath);
+            int pick = NewestThatLoads(copies.ConvertAll(SafeRead), typeSample);
+            string backupCopy = pick >= 0 ? copies[pick] : null;
 
-            switch (Decide(currentValid: false, haveBackup, backupValid))
+            switch (Decide(currentValid: false, haveBackup: copies.Count > 0, backupValid: backupCopy != null))
             {
                 case Action.RestoreFromBackup:
+                    string kept = KeepBroken(activePath);
                     if (RestoreFile(activePath, backupCopy, typeSample, out string err))
-                        ServerLog.Info($"Config recovery: restored {name} from the boot backup (its migrated copy failed the load-test).");
+                        ServerLog.Warn($"Config recovery: {name} did not load, so it was restored from backup "
+                                     + $"{BackupNameOf(backupCopy)}."
+                                     + (kept != null ? $" Your broken file is kept beside it as {Path.GetFileName(kept)}." : ""));
                     else
-                        ServerLog.Error($"Config recovery: {name} failed load-test and the backup restore failed ({err}). It loads safe defaults; fix it by hand.");
+                        ServerLog.Error($"Config recovery: {name} did not load and the backup restore failed ({err}). It loads safe defaults; fix it by hand.");
                     break;
                 default:
-                    ServerLog.Error($"Config recovery: {name} failed load-test and no clean backup exists. It loads safe defaults; restore from KMH-Data-Backups if the values mattered.");
+                    ServerLog.Error($"Config recovery: {name} did not load and no backup has a copy that does. It runs on safe defaults "
+                                  + "and the file is left as it is - fix it, or restore it from KMH-Data-Backups.");
                     break;
             }
         }
 
-        // The same config's path inside the newest boot backup directory, or null if none.
-        private static string LatestBackupCopyOf(string activePath)
+        // Newest first; the first copy that loads wins. This boot's own backup is the newest and holds the same broken file.
+        internal static int NewestThatLoads(IList<string> jsonNewestFirst, object typeSample)
+        {
+            for (int i = 0; i < (jsonNewestFirst?.Count ?? 0); i++)
+                if (!string.IsNullOrWhiteSpace(jsonNewestFirst[i]) && KmhConfigValidation.LoadTest(jsonNewestFirst[i], typeSample, out _)) return i;
+            return -1;
+        }
+
+        // A copy of what the owner wrote, so a restore never silently throws away their edits.
+        private static string KeepBroken(string activePath)
         {
             try
             {
+                if (!File.Exists(activePath)) return null;
+                string kept = activePath + ".broken-" + DateTime.UtcNow.ToString("yyyyMMdd-HHmmss");
+                File.Copy(activePath, kept, overwrite: true);
+                return kept;
+            }
+            catch { return null; }
+        }
+
+        private static string BackupNameOf(string copyPath)
+        {
+            string root = Path.GetFullPath(Persistence.KmhDataPaths.BackupRoot).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            string full = Path.GetFullPath(copyPath);
+            if (!full.StartsWith(root, StringComparison.OrdinalIgnoreCase)) return Path.GetFileName(full);
+            string rest = full.Substring(root.Length);
+            int cut = rest.IndexOf(Path.DirectorySeparatorChar);
+            return cut > 0 ? rest.Substring(0, cut) : rest;
+        }
+
+        private static List<string> BackupCopiesOf(string activePath)
+        {
+            var copies = new List<string>();
+            try
+            {
                 var backups = Persistence.KmhDataBackup.List();
-                if (backups == null || backups.Count == 0) return null;
+                if (backups == null) return copies;
                 string rel = GetRelative(Persistence.KmhDataPaths.Folder, activePath);
                 foreach (var b in backups)   // List() is newest-first
                 {
                     string candidate = Path.Combine(Persistence.KmhDataPaths.BackupRoot, b.Name, rel);
-                    if (File.Exists(candidate)) return candidate;
+                    if (File.Exists(candidate)) copies.Add(candidate);
                 }
             }
             catch { }
-            return null;
+            return copies;
         }
 
-        private static string GetRelative(string root, string full)
+        internal static string GetRelative(string root, string full)
         {
             string r = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
             string f = Path.GetFullPath(full);

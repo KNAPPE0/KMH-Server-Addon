@@ -71,8 +71,15 @@ namespace KMHServerAddon.Policy
         // Re-coerced on load, so a hand-edited Policies.json with a quoted number is corrected rather than trusted.
         public static void LoadFromDisk()
         {
+            bool present = System.IO.File.Exists(Persistence.KmhDataPaths.PoliciesFile);
             if (!Persistence.JsonFileStore.TryLoad(Persistence.KmhDataPaths.PoliciesFile, out FileShape shape) || shape?.Systems == null)
-            { _overrides.Clear(); return; }
+            {
+                _overrides.Clear();
+                // A file that exists but did not load is kept; only a missing one counts as nothing to keep.
+                _loadedEmpty = !present;
+                return;
+            }
+            _loadedEmpty = true;
 
             _overrides.Clear();
             foreach (KeyValuePair<string, Dictionary<string, object>> sys in shape.Systems)
@@ -83,7 +90,21 @@ namespace KMHServerAddon.Policy
             }
         }
 
+        // Written only while an override exists: an empty Policies.json tells owners there is something to edit.
         public static void SaveToDisk()
-            => Persistence.JsonFileStore.Save(Persistence.KmhDataPaths.PoliciesFile, new FileShape { Systems = new Dictionary<string, Dictionary<string, object>>(_overrides) });
+        {
+            string path = Persistence.KmhDataPaths.PoliciesFile;
+            if (_overrides.Count == 0)
+            {
+                // Only a file this process read as empty is removed; an unreadable one is left for the owner to inspect.
+                if (_loadedEmpty && System.IO.File.Exists(path))
+                    try { System.IO.File.Delete(path); } catch (System.IO.IOException) { } catch (System.UnauthorizedAccessException) { }
+                return;
+            }
+            Persistence.JsonFileStore.Save(path, new FileShape { Systems = new Dictionary<string, Dictionary<string, object>>(_overrides) });
+            _loadedEmpty = true;
+        }
+
+        private static bool _loadedEmpty = true;
     }
 }

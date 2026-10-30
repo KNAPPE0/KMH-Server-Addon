@@ -47,7 +47,8 @@ namespace KMH.Sdk.Server
         /// <summary>Broadcasts a typed payload to all verified clients; use sparingly for scale.</summary>
         void Broadcast(string kind, object data);
 
-        /// <summary>Discord surface: registers extension commands when the bridge is enabled, rejects reserved kmh-* names, and runs handlers on the Discord gateway thread.</summary>
+        /// <summary>Registers a Discord command when the bridge is enabled; reserved kmh-* names are rejected.</summary>
+        /// <remarks>Handlers run on the Discord gateway thread.</remarks>
         void RegisterDiscordCommand(string command, Action<IKmhDiscordCommand> handler);
     }
 }

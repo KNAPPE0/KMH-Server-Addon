@@ -39,6 +39,15 @@ namespace KMHServerAddon.Features.PlayerStats.Dto
     public class ColonistRosterSnapshot
     {
         [JsonProperty("colonists")] public List<ColonistEntry> Colonists { get; set; } = new List<ColonistEntry>();
+        // Older clients ignore it.
+        [JsonProperty("fallen")]    public List<FallenColonistEntry> Fallen { get; set; } = new List<FallenColonistEntry>();
+    }
+
+    public class FallenColonistEntry
+    {
+        [JsonProperty("colonist")]       public ColonistEntry Colonist { get; set; } = new ColonistEntry();
+        [JsonProperty("colony_day")]     public int  ColonyDay    { get; set; } = 0;
+        [JsonProperty("died_utc_ticks")] public long DiedUtcTicks { get; set; } = 0;
     }
 
     // Owner and colony are stamped server-side, never taken from the client's row.
@@ -46,6 +55,8 @@ namespace KMHServerAddon.Features.PlayerStats.Dto
     {
         [JsonProperty("owner")]   public string Owner  { get; set; } = "";
         [JsonProperty("colony")]  public string Colony { get; set; } = "";
+        // The pawn's ThingID, absent from older clients: a rename is the same colonist, a shared nickname is two.
+        [JsonProperty("id")]      public string Id     { get; set; } = "";
         [JsonProperty("name")]    public string Name   { get; set; } = "";
         [JsonProperty("title")]   public string Title  { get; set; } = "";
         [JsonProperty("age")]     public int    Age    { get; set; } = 0;
@@ -67,9 +78,9 @@ namespace KMHServerAddon.Features.PlayerStats.Dto
     public class ColonistProfile
     {
         [JsonProperty("name")]           public string Name          { get; set; } = "";
-        [JsonProperty("title")]          public string Title         { get; set; } = "";   // role, e.g. "Combat Engineer"
-        [JsonProperty("gender_age")]     public string GenderAge     { get; set; } = "";   // "Female, age 44 (131)"
-        [JsonProperty("descriptor")]     public string Descriptor    { get; set; } = "";   // "Baseliner • Colony"
+        [JsonProperty("title")]          public string Title         { get; set; } = "";
+        [JsonProperty("gender_age")]     public string GenderAge     { get; set; } = "";
+        [JsonProperty("descriptor")]     public string Descriptor    { get; set; } = "";
         [JsonProperty("days_in_colony")] public int    DaysInColony  { get; set; } = 0;
 
         [JsonProperty("childhood")]      public string Childhood     { get; set; } = "";

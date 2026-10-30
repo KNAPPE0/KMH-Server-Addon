@@ -13,9 +13,18 @@ namespace KMHServerAddon.SubProtocol
         public const string Frontier = "frontier";
         // Without this token a client must not push item metadata - the facts would land nowhere.
         public const string SiteMeta = "site_meta";
+        // Advertised so an older client never offers the button, rather than offering one nothing answers.
+        public const string ConfigEditor = "config_editor";
+        // Gates the kmh.federation.* kinds; a server without it speaks only the older guild treasury.
+        public const string Federation = "federation";
+        // Wants priced in milli-silver: without it a client posts whole silver, which an older server reads.
+        public const string WantDecimalPrices = "want_decimal_prices";
 
         private static readonly List<string> _all = new List<string>
         {
+            ConfigEditor,
+            Federation,
+            WantDecimalPrices,
             DecimalPrices,
             WealthFlag,
             WorldEventEnd,
@@ -23,6 +32,7 @@ namespace KMHServerAddon.SubProtocol
             Roadworks,
             Frontier,
             SiteMeta,
+            Features.Enforcement.EnforcementAdmission.Capability,
         };
 
         public static string Manifest => string.Join(",", _all);

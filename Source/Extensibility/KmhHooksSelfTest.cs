@@ -29,7 +29,7 @@ namespace KMHServerAddon.Extensibility
 
             r.Add(("Hooks: lone throw -> allow", !KmhHooks.Aggregate(new[] { Throws }, 0, "t", _ => { }).Denied, ""));
 
-            // The visibility hook runs once per listing per viewer, so a down extension used to print one line each.
+            // The visibility hook runs once per listing per viewer, so a down extension must not print one line each.
             string floodName = "flood-probe-" + Guid.NewGuid().ToString("N").Substring(0, 8);
             int lines = 0;
             for (int i = 0; i < 50; i++) KmhHooks.Aggregate(new[] { Throws }, 0, floodName, _ => lines++);
@@ -38,9 +38,9 @@ namespace KMHServerAddon.Extensibility
             // Suppressed failures are counted, not discarded: an owner has to be able to see the scale of an outage.
             string tallyName = "tally-probe-" + Guid.NewGuid().ToString("N").Substring(0, 8);
             string last = null;
-            KmhHooks.Aggregate(new[] { Throws }, 0, tallyName, m => last = m);           // reports, opens the window
-            for (int i = 0; i < 3; i++) KmhHooks.Aggregate(new[] { Throws }, 0, tallyName, m => last = m);  // suppressed
-            KmhHooks.ResetErrorWindowForTest(tallyName);                                  // the minute elapses
+            KmhHooks.Aggregate(new[] { Throws }, 0, tallyName, m => last = m);
+            for (int i = 0; i < 3; i++) KmhHooks.Aggregate(new[] { Throws }, 0, tallyName, m => last = m);
+            KmhHooks.ResetErrorWindowForTest(tallyName);
             KmhHooks.Aggregate(new[] { Throws }, 0, tallyName, m => last = m);
             r.Add(("Hooks: the suppressed count is reported when logging resumes",
                    last != null && last.Contains("+3 more"), last ?? "(nothing reported)"));

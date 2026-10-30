@@ -56,7 +56,7 @@ namespace KMHServerAddon.Features.Economy
         private static readonly Dictionary<string, Queue<long>> _recent = new Dictionary<string, Queue<long>>(StringComparer.OrdinalIgnoreCase);
         private static readonly HashSet<string> _warnedUnsupported = new HashSet<string>(StringComparer.Ordinal);
 
-        private const long HugeSilverThreshold = 5_000_000;   // audit-warn a single deposit/withdraw at or above this
+        private const long HugeSilverThreshold = 5_000_000;
 
         public static EconomyPolicy Policy => EconomyConfig.Current.ResolvePolicy();
 
@@ -92,10 +92,10 @@ namespace KMHServerAddon.Features.Economy
                 case "colonyonly": if (ctx.Known && !ctx.HasColony)  { reason = "Treasury access requires a colony map."; return false; } return true;
                 case "caravanonly":if (ctx.Known && !ctx.HasCaravan) { reason = "Treasury access requires a caravan.";   return false; } return true;
                 case "treasurysiterequired":
-                    if (!TreasurySitesImplemented) { WarnUnsupportedOnce("PersonalTreasuryAccessMode=TreasurySiteRequired"); return true; }
+                    if (!TreasurySitesImplemented) { WarnUnsupportedOnce("Custom.PersonalAccess=TreasurySiteRequired"); return true; }
                     if (ctx.Known && !ctx.NearTreasurySite) { reason = "Treasury access requires a Treasury Site."; return false; }
                     return true;
-                default: return true;   // Remote
+                default: return true;
             }
         }
 
@@ -109,14 +109,14 @@ namespace KMHServerAddon.Features.Economy
             {
                 case "disabled": reason = "Guild treasury is disabled on this server."; return false;
                 case "guildhallrequired":
-                    if (!GuildHallsImplemented) { WarnUnsupportedOnce("GuildTreasuryAccessMode=GuildHallRequired"); return true; }
+                    if (!GuildHallsImplemented) { WarnUnsupportedOnce("guild access GuildHallRequired"); return true; }
                     if (ctx.Known && !ctx.NearGuildHall) { reason = "Guild treasury requires Guild Hall access."; return false; }
                     return true;
                 case "caravannearguildhall":
-                    if (!GuildHallsImplemented) { WarnUnsupportedOnce("GuildTreasuryAccessMode=CaravanNearGuildHall"); return true; }
+                    if (!GuildHallsImplemented) { WarnUnsupportedOnce("guild access CaravanNearGuildHall"); return true; }
                     if (ctx.Known && (!ctx.HasCaravan || !ctx.CaravanIsNearHall)) { reason = "Guild treasury requires a caravan near your Guild Hall."; return false; }
                     return true;
-                default: return true;   // Remote
+                default: return true;
             }
         }
 
@@ -127,7 +127,6 @@ namespace KMHServerAddon.Features.Economy
         }
 
         // Read here but recorded only on success, so a denied action never starts the timer.
-
         public static bool OnCooldown(string username, bool isWithdraw, out int remainingSec)
         {
             remainingSec = 0;
@@ -166,14 +165,13 @@ namespace KMHServerAddon.Features.Economy
             return true;
         }
 
-        // A fee is destroyed rather than paid to anyone, which is what takes silver out of circulation.
         public static int DepositFeeOn(int amount)  => FeeOn(amount, Policy.DepositFeePct);
         public static int WithdrawFeeOn(int amount) => FeeOn(amount, Policy.WithdrawFeePct);
         private static int FeeOn(int amount, double pct)
         {
             if (amount <= 0 || pct <= 0) return 0;
             int fee = (int)Math.Floor(amount * pct / 100.0);
-            return Math.Max(0, Math.Min(amount - 1, fee));   // never fee the whole amount away
+            return Math.Max(0, Math.Min(amount - 1, fee));
         }
 
         // Advisory logging only: nothing here ever denies an action.

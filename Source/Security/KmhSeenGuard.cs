@@ -36,7 +36,7 @@ namespace KMHServerAddon.Security
 
         public bool MarkIfNew(string key) => MarkIfNew(key, DateTime.UtcNow.Ticks);
 
-        // For a caller that marks before it acts: nothing happened, so the key must work again rather than stay claimed for the window.
+        // For a caller that marks before it acts: nothing happened, so the key must work again, not stay claimed.
         public void Release(string key)
         {
             if (!string.IsNullOrEmpty(key)) _seen.TryRemove(key, out _);

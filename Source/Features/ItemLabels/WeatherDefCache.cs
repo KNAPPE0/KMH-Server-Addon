@@ -5,12 +5,13 @@ using KMHServerAddon.Persistence;
 
 namespace KMHServerAddon.Features.ItemLabels
 {
-    // Client-reported GameConditionDefs (defName -> label); feeds discovered weather when AutoDiscoverWeather=true.
     internal static class WeatherDefCache
     {
         private static readonly object _lock = new object();
         private static Dictionary<string, string> _defs
             = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        internal const int MaxDefs = 2_000;
 
         public static void Apply(Dictionary<string, string> incoming)
         {
@@ -18,11 +19,12 @@ namespace KMHServerAddon.Features.ItemLabels
             int added = 0;
             lock (_lock)
             {
+                // First-seen, bounded like the item labels: these feed the weather pool every client sees.
                 foreach (KeyValuePair<string, string> kv in incoming)
                 {
-                    if (string.IsNullOrEmpty(kv.Key) || string.IsNullOrEmpty(kv.Value)) continue;
-                    if (!_defs.TryGetValue(kv.Key, out string existing) || !string.Equals(existing, kv.Value, StringComparison.Ordinal))
-                    { _defs[kv.Key] = kv.Value; added++; }
+                    if (!Util.KmhSafe.CatalogEntryFits(kv.Key, kv.Value) || _defs.ContainsKey(kv.Key)) continue;
+                    if (_defs.Count >= MaxDefs) break;
+                    _defs[kv.Key] = kv.Value; added++;
                 }
             }
             if (added > 0)
@@ -44,7 +46,7 @@ namespace KMHServerAddon.Features.ItemLabels
             if (JsonFileStore.TryLoad(KmhDataPaths.WeatherDefsFile, out Dictionary<string, string> loaded) && loaded != null)
             {
                 lock (_lock) _defs = new Dictionary<string, string>(loaded, StringComparer.OrdinalIgnoreCase);
-                ServerLog.Info($"WeatherDefs: loaded {loaded.Count} condition def(s) from disk");
+                ServerLog.Diag($"WeatherDefs: loaded {loaded.Count} condition def(s) from disk");
             }
         }
 

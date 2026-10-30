@@ -41,7 +41,7 @@ namespace KMHServerAddon.Extensibility
         public event Action<MailSentEvent>             MailSent;
         public event Action<ChatMessagePostedEvent>    ChatMessagePosted;
 
-        // SafeRaise walks the delegate chain by hand, because Action<T>.Invoke stops at the first subscriber that throws.
+        // SafeRaise walks the delegate chain by hand: Action<T>.Invoke stops at the first subscriber that throws.
         internal void RaisePlayerJoined    (PlayerJoinedEvent     e) => SafeRaise(PlayerJoined,     e, nameof(PlayerJoined));
         internal void RaisePlayerLeft      (PlayerLeftEvent       e) => SafeRaise(PlayerLeft,       e, nameof(PlayerLeft));
         internal void RaisePlayerLinked    (PlayerLinkedEvent     e) => SafeRaise(PlayerLinked,     e, nameof(PlayerLinked));

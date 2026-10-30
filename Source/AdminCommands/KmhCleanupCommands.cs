@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using KMHServerAddon.Diagnostics;
 
@@ -11,17 +11,17 @@ namespace KMHServerAddon.AdminCommands
         {
             string user = args != null && args.Length > 1 ? args[1] : "";
             if (string.IsNullOrEmpty(user)) { reply("Usage: kmh audit-player <user>"); return; }
-            reply($"=== KMH audit for '{user}' (read-only) ===");
+            reply($"=== Colony Nexus audit for '{user}' (read-only) ===");
             Features.Economy.EconomyPolicy ecp = Features.Economy.EconomyAccess.Policy;
             string access = string.Equals(ecp.PersonalAccess, "Remote", StringComparison.OrdinalIgnoreCase)
                 ? "" : $" (access={ecp.PersonalAccess}: accrued but withdrawable only when the player meets that rule"
                        + (string.Equals(ecp.PersonalAccess, "Disabled", StringComparison.OrdinalIgnoreCase) ? " - Disabled = locked until re-enabled)" : ")");
             reply($"  treasury silver: {Util.SilverFmt.Format(Features.Treasury.TreasuryStore.GetPersonalSilver(user))}{access}");
-            // Treasury only, so this is a floor rather than the total a v1.3.0 client actually scales raids against.
+            // Treasury only, so this is a floor rather than the total a client actually scales raids against.
             string wealthNote = Features.FeaturesConfig.Current.Wealth
                 ? "raid/threat scaling on v1.3.0+ clients also counts the escrow listed below"
                 : "not in raid/threat scaling - Features.Wealth off";
-            reply($"  KMH off-map value: ~{Util.SilverFmt.Format(Features.Treasury.TreasuryStore.PersonalOffMapValue(user))} silver-equiv (treasury silver + item value only; {wealthNote})");
+            reply($"  Colony Nexus off-map value: ~{Util.SilverFmt.Format(Features.Treasury.TreasuryStore.PersonalOffMapValue(user))} silver-equiv (treasury silver + item value only; {wealthNote})");
             (int mpListings, int mpItems) = Features.Marketplace.MarketplaceStore.AdminPurgeSeller(user, dryRun: true);
             reply($"  marketplace listings: {mpListings} ({mpItems} item(s) escrowed)");
             int auc = 0; foreach (Features.Auctions.Dto.AuctionDto a in Features.Auctions.AuctionStore.AllForAdmin()) if (string.Equals(a?.SellerUsername, user, StringComparison.OrdinalIgnoreCase)) auc++;
@@ -56,7 +56,7 @@ namespace KMHServerAddon.AdminCommands
             {
                 if (s == null) continue;
                 if (Features.Sites.SiteOwnership.IsOwnedBy(s, user)) owned++;
-                if (s.Workers != null && s.Workers.Contains(user, StringComparer.OrdinalIgnoreCase)) worked++;
+                if (s.Workers != null && s.Workers.Any(w => Features.Sites.SiteWorkerKey.IsOwnedBy(w, user))) worked++;
             }
             reply($"  sites: {owned} owned, {worked} worked");
             int colCount = 0, colFlags = 0;
@@ -65,9 +65,7 @@ namespace KMHServerAddon.AdminCommands
             {
                 if (c == null || !string.Equals(c.Owner, user, StringComparison.OrdinalIgnoreCase)) continue;
                 colCount++;
-                int[] sk = { c.SkShooting, c.SkMelee, c.SkMedicine, c.SkCrafting, c.SkConstruction };
-                int over20 = 0, at20 = 0; foreach (int s in sk) { if (s > 20) over20++; if (s >= 20) at20++; }
-                if (over20 > 0 || (at20 >= 4 && c.Days < 60)) colFlags++;
+                if (KmhValidateCommands.SkillReviewReason(c) != null) colFlags++;
             }
             reply($"  colonists: {colCount} in records" + (colFlags > 0 ? $" - {colFlags} flagged for skill review ('kmh validate colonists'; review-only)" : ""));
             Maintenance.KmhPlayerCleanup.Residual(user, reply);
@@ -93,8 +91,19 @@ namespace KMHServerAddon.AdminCommands
             var (roadProjects, roadSilver) = Features.Roadworks.RoadworksStore.PurgeOwner(user, dryRun: true);
             if (roadProjects > 0)
                 reply($"  WOULD CLEAR: {roadProjects} roadworks project(s) ({Util.SilverFmt.Format(roadSilver)} reserved silver burned; completed roads kept)");
+            int bids = 0;
+            foreach (Features.Auctions.Dto.AuctionDto a in Features.Auctions.AuctionStore.AllForAdmin())
+                if (a != null && a.CurrentBid > 0 && Eq(a.HighBidder, user) && !Eq(a.SellerUsername, user)) bids++;
+            if (bids > 0) reply($"  WOULD CLEAR: {bids} leading auction bid(s) (bid silver burned; those auctions go on)");
+            int open = Transactions.KmhTransactionRepository.PendingCountFor(user);
+            if (open > 0) reply($"  WOULD CLOSE: {open} unfinished transaction(s), unpaid to them; a trade partner's side is finished or returned first");
+            int owed = Features.Delivery.DeliveryStore.OwedFor(user).Count;
+            if (owed > 0) reply($"  WOULD CLEAR: {owed} delivery(ies) owed to the old colony and not yet confirmed");
+            reply("  WOULD CLEAR: payouts and refunds owed but not yet paid (mail, quests, world quests, auctions, wants, sites, roadworks).");
             reply("  KEPT: username, Discord link, guild membership/rank, donations already in guild vaults, ledger history.");
         }
+
+        private static bool Eq(string a, string b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
 
         public static void ReloadMarketplace(Action<string> reply)
         {

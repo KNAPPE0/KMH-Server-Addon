@@ -10,10 +10,7 @@ namespace KMHServerAddon.Features.Chat
         internal static string SourceOf(string url)
         {
             if (string.IsNullOrWhiteSpace(url)) return url ?? "";
-
-            Uri uri;
-            try { if (!Uri.TryCreate(url.Trim(), UriKind.Absolute, out uri) || uri == null) return url; }
-            catch { return url; }
+            if (!TryParseAbsolute(url.Trim(), out Uri uri)) return url;
 
             // The indexes below follow the wrapper's shape: /external/<signature>/<scheme>/<host>/<rest...>
             string[] seg = uri.AbsolutePath.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
@@ -45,10 +42,7 @@ namespace KMHServerAddon.Features.Chat
         // Unknown means the url names no media file at all, which is what a share page looks like.
         internal static Kind KindOf(ChatConfig cfg, string url)
         {
-            string source = SourceOf(url);
-            string path;
-            try { path = Uri.TryCreate(source, UriKind.Absolute, out Uri u) && u != null ? u.AbsolutePath : source; }
-            catch { path = source; }
+            string path = PathOf(SourceOf(url));
 
             if (ChatImagePolicy.HasExtension(path, cfg?.VideoFileExtensions)) return Kind.Video;
             if (ChatImagePolicy.HasExtension(path, GifExtensions)) return Kind.Gif;
@@ -68,7 +62,7 @@ namespace KMHServerAddon.Features.Chat
         internal static bool ClientCanDecode(string url)
             => ChatImagePolicy.HasExtension(PathOf(SourceOf(StripFormatParam(url ?? ""))), ClientDecodable);
 
-        // The ?format= hint is stripped first, since it is what would make the answer no for the very media that needs converting.
+        // The ?format= hint is stripped first, or it would say no for the very media that needs converting.
         internal static bool NeedsResolver(ChatConfig cfg, string vettedUrl)
         {
             if (string.IsNullOrWhiteSpace(vettedUrl)) return false;
@@ -115,6 +109,12 @@ namespace KMHServerAddon.Features.Chat
         {
             try { return Uri.TryCreate(url, UriKind.Absolute, out Uri u) && u != null ? u.AbsolutePath : url; }
             catch { return url; }
+        }
+
+        internal static bool TryParseAbsolute(string url, out Uri uri)
+        {
+            try { return Uri.TryCreate(url, UriKind.Absolute, out uri) && uri != null; }
+            catch { uri = null; return false; }
         }
 
         // An extension-less url is accepted only on Discord's own CDN, and only where Discord itself called it media.

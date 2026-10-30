@@ -39,7 +39,7 @@ namespace KMHServerAddon.Features.Mail
             return cfg;
         }
 
-        // Keep every limit in a sane range so a hand-edited config can't disable the guards or strand value.
+        // Clamped so a hand-edited config cannot disable the guards or strand value.
         public void Clamp()
         {
             MaxSubjectLength  = Clamp(MaxSubjectLength,   8, 256);

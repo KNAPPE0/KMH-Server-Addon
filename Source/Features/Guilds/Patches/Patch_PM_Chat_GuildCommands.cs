@@ -32,10 +32,10 @@ namespace KMHServerAddon.Features.Guilds.Patches
             catch (Exception ex)
             {
                 ServerLog.Error("Guild command handler threw", ex);
-                try { PM_Chat.SendConsoleMessage(client, "[KMH] Guild command failed unexpectedly."); }
-                catch { /* worst-case nothing we can do */ }
+                try { PM_Chat.SendConsoleMessage(client, "[Colony Nexus] Guild command failed unexpectedly."); }
+                catch { }
             }
-            return false; // skip RWT's chat-command dispatch - we handled it
+            return false; // skips RWT's own chat-command dispatch
         }
 
         private static void HandleCommand(ServerClient client, string raw)
@@ -57,6 +57,30 @@ namespace KMHServerAddon.Features.Guilds.Patches
             Array.Copy(restParts, 0, parts, 1, restParts.Length);
             string sub = parts.Length > 1 ? parts[1].ToLowerInvariant() : "help";
 
+            // A second way into the guild stores: a change clears the router's gates for kmh.guild.* (a held or unhandshaken
+            // session changes nothing) and is counted for its whole run so a reset or backup waits for it.
+            if (Mutates(sub) && (Features.Enforcement.EnforcementAdmission.IsHeld(client) || !KmhHandshakeHandler.IsCompatible(client)))
+            {
+                Reply(client, "Guild changes need Colony Nexus running and admitted on this server.");
+                return;
+            }
+            // Same freeze the router applies, or a frozen account could still donate through chat.
+            if (Mutates(sub) && Features.Moderation.KmhEconomyGuard.IsFrozen(username))
+            {
+                Reply(client, Features.Moderation.KmhEconomyGuard.FrozenRefusal);
+                return;
+            }
+            Maintenance.KmhValueOps.Scope op = null;
+            if (Mutates(sub) && (op =Maintenance.KmhValueOps.BeginFeature(Maintenance.KmhIngress.ClientChat, "guilds", out string refusal)) == null)
+            {
+                Reply(client, refusal);
+                return;
+            }
+            using (op) Dispatch(client, username, sub, parts);
+        }
+
+        private static void Dispatch(ServerClient client, string username, string sub, string[] parts)
+        {
             switch (sub)
             {
                 case "create":   HandleCreate(client, username, parts);   return;
@@ -78,6 +102,18 @@ namespace KMHServerAddon.Features.Guilds.Patches
             }
         }
 
+        private static bool Mutates(string sub)
+        {
+            switch (sub)
+            {
+                case "create": case "join": case "leave": case "transfer": case "invite":
+                case "setopen": case "deposit": case "withdraw": case "buyperk":
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
         private static void HandleInvite(ServerClient client, string username, string[] parts)
         {
             if (parts.Length < 3) { Reply(client, "Usage: /kmh guild invite <username>"); return; }
@@ -87,7 +123,7 @@ namespace KMHServerAddon.Features.Guilds.Patches
                 Reply(client, $"Invited {target}. They can /kmh guild join now.");
                 ServerLog.Info($"Guild: {username} invited {target}");
                 Notifications.KmhNotify.ToUser(target.Trim(), "positive", $"Guild invite: {gname}",
-                    $"{username} invited you to join '{gname}'. Open the Guild Hall (KMH tab) to accept or decline.");
+                    $"{username} invited you to join '{gname}'. Open the Guild Hall (Colony Nexus tab) to accept or decline.");
             }
             else Reply(client, $"Could not invite: {err}");
         }
@@ -174,7 +210,7 @@ namespace KMHServerAddon.Features.Guilds.Patches
                 Reply(client, "Usage: /kmh guild create <name>");
                 return;
             }
-            string name = string.Join(" ", new ArraySegment<string>(parts, 2, parts.Length - 2));
+            string name = string.Join(" ", parts, 2, parts.Length - 2);
             if (GuildStore.CreateGuildAndJoinAsAdmin(username, name, out string err))
             {
                 Reply(client, $"Guild '{name}' created. You are its Admin.");
@@ -193,7 +229,7 @@ namespace KMHServerAddon.Features.Guilds.Patches
                 Reply(client, "Usage: /kmh guild join <name>");
                 return;
             }
-            string name = string.Join(" ", new ArraySegment<string>(parts, 2, parts.Length - 2));
+            string name = string.Join(" ", parts, 2, parts.Length - 2);
             if (GuildStore.JoinGuild(username, name, out string err))
             {
                 Reply(client, $"Joined guild '{name}'.");
@@ -262,7 +298,7 @@ namespace KMHServerAddon.Features.Guilds.Patches
 
         private static void HandleHelp(ServerClient client)
         {
-            Reply(client, "KMH guild commands:");
+            Reply(client, "Colony Nexus guild commands:");
             Reply(client, "  /kmh guild create <name>      - start a new guild (you become Admin)");
             Reply(client, "  /kmh guild join <name>        - join an existing guild");
             Reply(client, "  /kmh guild leave              - leave your current guild");
@@ -280,7 +316,7 @@ namespace KMHServerAddon.Features.Guilds.Patches
 
         private static void Reply(ServerClient client, string text)
         {
-            try { PM_Chat.SendConsoleMessage(client, $"[KMH] {text}"); }
+            try { PM_Chat.SendConsoleMessage(client, $"[Colony Nexus] {text}"); }
             catch (Exception ex) { ServerLog.Error("Guild Reply send failed", ex); }
         }
     }

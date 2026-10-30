@@ -2,7 +2,7 @@
 
 namespace KMHServerAddon.Util
 {
-    // "def|stuff|quality", mirroring the patch mod's UI/ItemKeys.cs - if the two formats drift, vault keys stop matching.
+    // Must mirror the patch mod's UI/ItemKeys.cs, or vault keys stop matching.
     internal static class ItemKey
     {
         public const char Sep = '|';
@@ -11,19 +11,38 @@ namespace KMHServerAddon.Util
             { "", "Awful", "Poor", "Normal", "Good", "Excellent", "Masterwork", "Legendary" };
 
         public static string Compose(string defName, string stuffDefName, int qualityIndex)
+            => Compose(defName, stuffDefName, qualityIndex, null);
+
+        public static string Compose(string defName, string stuffDefName, int qualityIndex, string innerDefName)
         {
-            if (string.IsNullOrEmpty(stuffDefName) && qualityIndex <= 0) return defName ?? "";
-            return $"{defName}{Sep}{stuffDefName ?? ""}{Sep}{qualityIndex}";
+            if (string.IsNullOrEmpty(innerDefName))
+            {
+                if (string.IsNullOrEmpty(stuffDefName) && qualityIndex <= 0) return defName ?? "";
+                return $"{defName}{Sep}{stuffDefName ?? ""}{Sep}{qualityIndex}";
+            }
+            return $"{defName}{Sep}{stuffDefName ?? ""}{Sep}{qualityIndex}{Sep}{innerDefName}";
         }
 
         public static void Split(string key, out string defName, out string stuffDefName, out int qualityIndex)
+            => Split(key, out defName, out stuffDefName, out qualityIndex, out _);
+
+        public static void Split(string key, out string defName, out string stuffDefName, out int qualityIndex,
+                                 out string innerDefName)
         {
-            defName = key ?? ""; stuffDefName = ""; qualityIndex = 0;
+            defName = key ?? ""; stuffDefName = ""; qualityIndex = 0; innerDefName = "";
             if (string.IsNullOrEmpty(key) || key.IndexOf(Sep) < 0) return;
             string[] parts = key.Split(Sep);
             defName = parts[0];
             if (parts.Length > 1) stuffDefName = parts[1];
             if (parts.Length > 2 && int.TryParse(parts[2], out int q) && q >= 0 && q <= 7) qualityIndex = q;
+            if (parts.Length > 3) innerDefName = parts[3];
+        }
+
+        // The def whose label a key should show: the building inside, when there is one.
+        public static string DisplayDefOf(string key)
+        {
+            Split(key, out string def, out _, out _, out string inner);
+            return string.IsNullOrEmpty(inner) ? def : inner;
         }
 
         // Quality 0 means no requirement, not "Awful".

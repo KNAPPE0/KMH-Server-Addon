@@ -5,15 +5,16 @@ namespace KMHServerAddon.Features.Guilds
     // Each capability names its minimum rank once here, rather than as inline comparisons across GuildStore.
     internal enum GuildCapability
     {
-        Invite,          // moderator+
-        ManageMembers,   // kick/promote/demote: moderator+, and must outrank the target
-        SetMotd,         // admin+
-        SaveSettings,    // admin+
-        BuyPerk,         // admin+
-        SetOpenJoin,     // admin+
-        SetRelationship, // alliance/hostility: admin+
-        TransferOwner,   // owner only
-        Disband,         // owner only
+        Invite,
+        ManageMembers,
+        SetMotd,
+        SaveSettings,
+        BuyPerk,
+        SetOpenJoin,
+        SetRelationship,
+        ManageSites,
+        TransferOwner,
+        Disband,
     }
 
     internal static class GuildPermissions
@@ -36,6 +37,7 @@ namespace KMHServerAddon.Features.Guilds
         {
             switch (cap)
             {
+                case GuildCapability.ManageSites:     return GuildMemberDto.RankOfficer;
                 case GuildCapability.Invite:
                 case GuildCapability.ManageMembers:   return GuildMemberDto.RankModerator;
                 case GuildCapability.SetMotd:
@@ -49,7 +51,7 @@ namespace KMHServerAddon.Features.Guilds
             }
         }
 
-        // The rank gate only; a member action also has to clear OutranksTarget below.
+        // The rank gate only; an action on a member must go through CanActOnMember.
         public static bool Can(string actorRank, GuildCapability cap)
             => RankOrder(actorRank) <= RankOrder(MinRank(cap));
 

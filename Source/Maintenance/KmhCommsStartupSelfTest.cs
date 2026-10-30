@@ -25,15 +25,15 @@ namespace KMHServerAddon.Maintenance
             catch (System.Exception ex) when (ex is FileNotFoundException || ex is System.TypeInitializationException
                                               || ex is System.TypeLoadException)
             {
-                unavailable = "not asked - needs a running server (RWT assemblies absent)";
+                unavailable = "needs a running server (RWT assemblies absent)";
             }
 
             if (unavailable != null)
             {
-                r.Add(("startup: a clean boot and `kmh reload all` reach the same Communications state", true, unavailable));
-                r.Add(("startup: reloading again changes nothing, so the state is genuinely settled", true, unavailable));
-                r.Add(("startup: the comparison covers chat presentation, staff, media and capabilities", true, unavailable));
-                r.Add(("startup: applying is what re-reads the file, so a late rewrite cannot be missed", true, unavailable));
+                r.Add(Diagnostics.KmhSelfTestResult.Skipped("startup: a clean boot and `kmh reload all` reach the same Communications state", unavailable));
+                r.Add(Diagnostics.KmhSelfTestResult.Skipped("startup: reloading again changes nothing, so the state is genuinely settled", unavailable));
+                r.Add(Diagnostics.KmhSelfTestResult.Skipped("startup: the comparison covers chat presentation, staff, media and capabilities", unavailable));
+                r.Add(Diagnostics.KmhSelfTestResult.Skipped("startup: applying is what re-reads the file, so a late rewrite cannot be missed", unavailable));
             }
             else
             {
@@ -96,12 +96,30 @@ namespace KMHServerAddon.Maintenance
                 r.Add(("startup: the hello carries the role map and the revision",
                        helloSrc2.Contains("staff_roles") && helloSrc2.Contains("comms_rev"), ""));
 
+            // Two hello acks for one connection arrive on different threads; a lost race left it never marked compatible.
+            {
+                var conn = new ServerClient(null, null, createListener: false);
+                int threw = 0;
+                System.Threading.Tasks.Parallel.For(0, 20000, new System.Threading.Tasks.ParallelOptions { MaxDegreeOfParallelism = 8 }, i =>
+                {
+                    try { SubProtocol.KmhHandshakeHandler.StoreClientCaps(conn, i % 2 == 0 ? new[] { "a" } : new[] { "b" }); }
+                    catch (Exception) { System.Threading.Interlocked.Increment(ref threw); }
+                });
+                bool stored = SubProtocol.KmhHandshakeHandler.ClientDeclares(conn, "a")
+                           || SubProtocol.KmhHandshakeHandler.ClientDeclares(conn, "b");
+                r.Add(("startup: concurrent hello acks for one connection record its capabilities without throwing",
+                       threw == 0 && stored, $"{threw} of 20000 threw"));
+            }
+
             // Balanced is a real preset, not a label: the zeros in Economy.json are Custom-only fields.
             var balanced = new Features.Economy.EconomyConfig
             {
                 EconomyMode = "Balanced",
-                TreasuryDepositFeePercent = 0, TreasuryWithdrawFeePercent = 0,
-                TreasuryDepositCooldownSeconds = 0, TreasuryWithdrawCooldownSeconds = 0,
+                Custom = new Features.Economy.CustomEconomyRules
+                {
+                    DepositFeePercent = 0, WithdrawFeePercent = 0,
+                    DepositCooldownSeconds = 0, WithdrawCooldownSeconds = 0,
+                },
             };
             Features.Economy.EconomyPolicy bp = balanced.ResolvePolicy();
             r.Add(("economy: Balanced applies real friction even when the Custom fields are all zero",
@@ -109,25 +127,28 @@ namespace KMHServerAddon.Maintenance
                    && bp.DepositCooldownSec == 5 && bp.WithdrawCooldownSec == 5,
                    $"{bp.DepositFeePct}%/{bp.WithdrawFeePct}%, {bp.DepositCooldownSec}s/{bp.WithdrawCooldownSec}s"));
             r.Add(("economy: only Custom reads the granular fields",
-                   new Features.Economy.EconomyConfig { EconomyMode = "Custom", TreasuryDepositFeePercent = 7 }
-                       .ResolvePolicy().DepositFeePct == 7.0, ""));
+                   new Features.Economy.EconomyConfig
+                   {
+                       EconomyMode = "Custom",
+                       Custom = new Features.Economy.CustomEconomyRules { DepositFeePercent = 7 },
+                   }.ResolvePolicy().DepositFeePct == 7.0, ""));
 
             // These caps are live under every mode, unlike the Custom-only fields above.
             var freshEco = new Features.Economy.EconomyConfig();
             r.Add(("economy: the always-live transaction caps are sane for a new server",
-                   freshEco.MaxSilverDepositPerTx == 1_000_000 && freshEco.MaxItemDepositQtyPerTx == 5_000,
-                   $"{freshEco.MaxSilverDepositPerTx} silver / {freshEco.MaxItemDepositQtyPerTx} items"));
+                   freshEco.Treasury.MaxSilverDepositPerTx == 1_000_000 && freshEco.Treasury.MaxItemDepositQtyPerTx == 5_000,
+                   $"{freshEco.Treasury.MaxSilverDepositPerTx} silver / {freshEco.Treasury.MaxItemDepositQtyPerTx} items"));
             r.Add(("mail: a new server caps an attachment well below a billion",
                    new Features.Mail.MailConfig().MaxAttachSilver == 500_000, ""));
             r.Add(("frontier: a new v1.3.0 server has Frontier Operations on",
                    new Features.Frontier.FrontierConfig().Enabled, ""));
 
-            // The Custom premium is the archetype multiplier, not the global site scalar; conflating them cuts every price by 55%.
+            // Custom's premium is the archetype multiplier, not the site scalar; conflating them cuts every price by 55%.
             r.Add(("sites: Custom costs 1.35x a preset through the archetype multiplier",
                    System.Math.Abs(Features.Sites.SiteArchetypeRegistry.Get(Features.Sites.SiteArchetypes.Custom).CostMultiplier - 1.35) < 0.001,
                    Features.Sites.SiteArchetypeRegistry.Get(Features.Sites.SiteArchetypes.Custom).CostMultiplier.ToString()));
             r.Add(("sites: the global price scalar is left at 3.0 and is NOT the Custom premium",
-                   System.Math.Abs(new Features.Sites.SitesConfig().CustomSitePriceMultiplier - 3.0) < 0.001, ""));
+                   System.Math.Abs(new Features.Sites.SitesConfig().Costs.PriceMultiplier - 3.0) < 0.001, ""));
 
             // A diff that cannot report a difference would make the whole suite decorative.
             var left  = new SortedDictionary<string, string>(System.StringComparer.Ordinal) { { "a", "1" }, { "b", "2" } };
@@ -182,7 +203,7 @@ namespace KMHServerAddon.Maintenance
             string mainSrc = ReadSource("Main.cs");
             if (mainSrc != null)
             {
-                int backfill = mainSrc.IndexOf("KmhConfigMigration.ApplyIfNeeded", System.StringComparison.Ordinal);
+                int backfill = mainSrc.IndexOf("KmhConfigMigration.Prepare", System.StringComparison.Ordinal);
                 int gate     = mainSrc.IndexOf("KmhConfigValidation.GateOnBoot", System.StringComparison.Ordinal);
                 int apply    = mainSrc.IndexOf("CommsStartup.ApplyAtBoot", System.StringComparison.Ordinal);
                 r.Add(("startup: Communications is applied after config migration and the boot gate, never before",
@@ -230,13 +251,13 @@ namespace KMHServerAddon.Maintenance
             try
             {
                 Features.Chat.ChatConfig probe = Features.Chat.ChatConfig.LoadOrDefault();
-                int was = probe.MaxRecentPerChannel;
+                int was = probe.Limits.MaxRecentPerChannel;
                 int want = was == 77 ? 78 : 77;
-                probe.MaxRecentPerChannel = want;
+                probe.Limits.MaxRecentPerChannel = want;
                 JsonFileStore.Save(path, probe);
 
                 Features.Comms.CommsStartup.ApplyChat(push: false);
-                return Features.Chat.ChatConfig.Current.MaxRecentPerChannel == want;
+                return Features.Chat.ChatConfig.Current.Limits.MaxRecentPerChannel == want;
             }
             catch { return false; }
             finally

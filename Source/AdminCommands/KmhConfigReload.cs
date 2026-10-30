@@ -3,7 +3,7 @@ using System.Collections.Generic;
 
 namespace KMHServerAddon.AdminCommands
 {
-    // A self-test walks the assembly for config classes and fails if one is missing here, so a new config must land in this list.
+    // A self-test fails if any config class in the assembly is missing here, so every new config goes in this list.
     internal static class KmhConfigReload
     {
         internal sealed class Entry
@@ -11,8 +11,9 @@ namespace KMHServerAddon.AdminCommands
             public string Area;
             public Type   ConfigType;      // what the coverage test matches against
             public Action Reload;          // null = not reloadable
-            public string ExemptReason;
             public string Note;
+            // Named here so the console and the in-game editor agree on which fields still need a restart.
+            public string RestartOnly;
         }
 
         public static IEnumerable<Entry> All()
@@ -48,6 +49,10 @@ namespace KMHServerAddon.AdminCommands
                                      Note = "resolver limits pushed to connected clients; the cache keeps what it holds" };
             yield return new Entry { Area = "mail",        ConfigType = typeof(Features.Mail.MailConfig),
                                      Reload = Features.Mail.MailConfig.Reload };
+            yield return new Entry { Area = "federation",  ConfigType = typeof(Features.Global.Federation.FederationConfig),
+                                     Reload = Features.Global.Federation.FederationConfig.Reload };
+            yield return new Entry { Area = "mods",        ConfigType = typeof(Features.Mods.ModPolicyConfig),
+                                     Reload = Features.Mods.ModPolicyConfig.Reload };
             yield return new Entry
             {
                 Area = "staff", ConfigType = typeof(Features.Identity.StaffConfig),
@@ -57,17 +62,29 @@ namespace KMHServerAddon.AdminCommands
             };
             yield return new Entry { Area = "enforcement", ConfigType = typeof(Features.Enforcement.EnforcementConfig),
                                      Reload = Features.Enforcement.EnforcementConfig.Reload };
+            yield return new Entry { Area = "global",      ConfigType = typeof(Features.Global.GlobalConfig),
+                                     Reload = Features.Global.GlobalConfig.Reload,
+                                     Note = "listing settings; the next heartbeat carries them" };
 
-            // Features and Discord do more than drop a cache, so they keep their own handlers in KmhServerCommands.
-            yield return new Entry { Area = "features", ConfigType = typeof(Features.FeaturesConfig),        Reload = null,
-                                     ExemptReason = "handled separately - it also re-sends the hello to every client" };
-            yield return new Entry { Area = "discord",  ConfigType = typeof(Features.Discord.DiscordConfig), Reload = null,
-                                     ExemptReason = "handled separately - it restarts the bot rather than re-reading a file" };
+            // Listed even though they do more than drop a cache: a null entry tells the editor to demand a restart.
+            yield return new Entry { Area = "features", ConfigType = typeof(Features.FeaturesConfig),
+                                     Reload = () => Features.Comms.CommsStartup.ApplyFeatures(push: true),
+                                     Note = "gates pushed to connected clients" };
+            yield return new Entry { Area = "discord",  ConfigType = typeof(Features.Discord.DiscordConfig),
+                                     Reload = Features.Discord.DiscordBridge.Reload,
+                                     Note = "the Discord bridge restarts with it" };
 
             yield return new Entry
             {
-                Area = "transport", ConfigType = typeof(Features.Transport.TransportConfig), Reload = null,
-                ExemptReason = "the API listener is already bound to its port - a new port needs a restart",
+                Area = "transport", ConfigType = typeof(Features.Transport.TransportConfig),
+                // Only the port needs a restart; the log flag applies live so debug spam can be stopped without one.
+                Reload = () =>
+                {
+                    Features.Transport.TransportConfig.Reload();
+                    Diagnostics.ServerLog.DebugEnabled = Features.Transport.TransportConfig.Current.Advanced.DebugLogging;
+                },
+                Note = "debug logging applied now",
+                RestartOnly = "the port and bind address",
             };
         }
 
@@ -92,10 +109,11 @@ namespace KMHServerAddon.AdminCommands
             why = "";
             Entry e = Find(area);
             if (e == null) { why = $"No config area '{area}'."; return false; }
-            if (e.Reload == null) { why = $"'{e.Area}' cannot be reloaded - {e.ExemptReason}."; return false; }
+            if (e.Reload == null) { why = $"'{e.Area}' only takes effect after a server restart."; return false; }
 
             e.Reload();
-            reply($"{e.Area}: reloaded{(string.IsNullOrEmpty(e.Note) ? "" : " (" + e.Note + ")")}.");
+            reply($"{e.Area}: reloaded{(string.IsNullOrEmpty(e.Note) ? "" : " (" + e.Note + ")")}."
+                + (string.IsNullOrEmpty(e.RestartOnly) ? "" : $" Still needs a restart: {e.RestartOnly}."));
             return true;
         }
     }

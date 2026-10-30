@@ -17,11 +17,33 @@ namespace KMHServerAddon.Features.Delivery
             else Diagnostics.ServerLog.Verbose($"Delivery: ignored an ack for '{id}' from {username} (unknown, not theirs, or already settled).");
         }
 
-        // Re-sent on every join: the client's durable receipt decides, so replaying a settled delivery costs a message, not duplicated goods.
+        // Owed deliveries wait for the first colony report: it resets a new save's economy, and replaying any earlier
+        // would land the old save's withdrawals in the new one.
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<ServerClient, object> _saveKnown =
+            new System.Runtime.CompilerServices.ConditionalWeakTable<ServerClient, object>();
+        private static readonly object Known = new object();
+
+        internal static bool SaveKnownOn(ServerClient client) => client != null && _saveKnown.TryGetValue(client, out _);
+
+        // True only the first time, so exactly one caller replays.
+        internal static bool MarkSaveKnown(ServerClient client)
+        {
+            if (client == null) return false;
+            lock (_saveKnown)
+            {
+                if (_saveKnown.TryGetValue(client, out _)) return false;
+                _saveKnown.Add(client, Known);
+                return true;
+            }
+        }
+
+        // Re-sent every join: the client's durable receipt decides, so a replay costs a message, not duplicated goods.
         public static void ReplayOwed(ServerClient client)
         {
             string username = client?.GetData<UserFile>()?.Username;
             if (string.IsNullOrEmpty(username)) return;
+            // Owed to the save a reset is destroying; a stalled reset purges them when it lands.
+            if (Economy.KmhEconomyReset.Resetting(username)) return;
             List<OutboundDelivery> owed = DeliveryStore.OwedFor(username);
             if (owed.Count == 0) return;
             Diagnostics.ServerLog.Info($"Delivery: replaying {owed.Count} unacknowledged delivery(ies) to {username}.");

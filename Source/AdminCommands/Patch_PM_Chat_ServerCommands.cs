@@ -32,12 +32,12 @@ namespace KMHServerAddon.AdminCommands
                 bool   isAdmin   = client?.GetData<UserFile>()?.IsAdmin == true;
                 string actorName = client?.GetData<UserFile>()?.Username ?? "(unknown)";
                 KmhServerCommands.Dispatch(args, isAdmin, actorName,
-                    line => PM_Chat.SendConsoleMessage(client, $"[KMH] {line}"));
+                    line => PM_Chat.SendConsoleMessage(client, $"[Colony Nexus] {line}"));
             }
             catch (Exception ex)
             {
                 ServerLog.Error("/kmh server command handler threw", ex);
-                try { PM_Chat.SendConsoleMessage(client, "[KMH] /kmh server command failed unexpectedly."); }
+                try { PM_Chat.SendConsoleMessage(client, "[Colony Nexus] /kmh server command failed unexpectedly."); }
                 catch { }
             }
             return false; // handled

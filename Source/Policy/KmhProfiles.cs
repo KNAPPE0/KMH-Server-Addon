@@ -69,7 +69,7 @@ namespace KMHServerAddon.Policy
                     o[K.MaxPerTransaction] = 5000L;
                     o[K.BlockedDuringRaid] = true;
                     if (system == K.System.PersonalTreasury || system == K.System.GuildTreasury)
-                        o[K.AllowRemote] = false;   // must be at a settlement/hall to move goods
+                        o[K.AllowRemote] = false;
                     break;
 
                 case Legacy:
@@ -88,7 +88,7 @@ namespace KMHServerAddon.Policy
         {
             foreach (string p in All)
                 if (string.Equals(p, profile, System.StringComparison.OrdinalIgnoreCase)) return p;
-            return Balanced;   // unknown profile name falls back to the shipped default
+            return Balanced;
         }
     }
 }

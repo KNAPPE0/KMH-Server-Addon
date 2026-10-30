@@ -22,7 +22,7 @@ namespace KMHServerAddon.Features.Discord
         {
             if (FromEnvironment) return $"environment ({EnvVar})";
             return string.IsNullOrWhiteSpace(configured) && string.IsNullOrWhiteSpace(TokenFromConfig())
-                ? "not set" : "Discord.json";
+                ? "not set" : "Config/Discord/DiscordConfig.json";
         }
 
         private static string TokenFromConfig()

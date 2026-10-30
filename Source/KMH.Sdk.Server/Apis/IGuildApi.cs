@@ -3,10 +3,8 @@ using KMH.Sdk.Server.Records;
 
 namespace KMH.Sdk.Server.Apis
 {
-    /// <summary>
-    /// Read and mutate the guild registry. Mutations are system-level: they are not gated by an acting
-    /// member's in-guild rank, so an extension can do what no player could.
-    /// </summary>
+    /// <summary>Reads and mutates the guild registry.</summary>
+    /// <remarks>Mutations are system-level, not gated by any member's rank, so an extension can do what no player could.</remarks>
     public interface IGuildApi
     {
         /// <summary>Guild name → member count + treasury silver, for every guild on the server.</summary>
@@ -21,7 +19,8 @@ namespace KMH.Sdk.Server.Apis
         /// <summary>Create an empty guild. Returns false if the name is blank or already taken.</summary>
         bool CreateGuild(string name);
 
-        /// <summary>Add a player at the given rank ("member"/"officer"/"moderator"/"admin"). False if the guild is missing or the player is already in one.</summary>
+        /// <summary>Adds a player at <paramref name="rank"/>: "member", "officer", "moderator" or "admin".</summary>
+        /// <returns>False if the guild is missing or the player is already in one.</returns>
         bool AddMember(string username, string guildName, string rank = "member");
 
         /// <summary>Set a guild's MOTD. Returns false if the guild doesn't exist.</summary>
@@ -30,10 +29,10 @@ namespace KMH.Sdk.Server.Apis
         /// <summary>Current silver in a guild's vault. 0 if the guild has no vault yet.</summary>
         long GetGuildSilver(string guildName);
 
-        /// <summary>Add silver to a guild's vault. The contributor name is recorded in the vault's transaction log. Returns false on invalid input.</summary>
+        /// <summary>Adds silver to a guild's vault, logging the contributor; false on invalid input.</summary>
         bool DepositGuildSilver(string guildName, int amount, string contributor, string note = "");
 
-        /// <summary>Take silver from a guild's vault. Returns false if the vault can't cover it (never goes negative).</summary>
+        /// <summary>Takes silver from a guild's vault; false if it cannot cover the amount (never goes negative).</summary>
         bool WithdrawGuildSilver(string guildName, int amount, string actor, string note = "");
     }
 }

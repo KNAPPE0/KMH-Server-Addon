@@ -24,8 +24,8 @@ namespace KMHServerAddon.Maintenance
         public static bool NeedsRecovery(KmhMigrationJournal found)
             => found != null && found.Status != KmhMigrationStatus.Committed;
 
-        // Opens a journal for a migration about to run, recording which backup to roll back to if it never commits.
-        public static KmhMigrationJournal Begin(string backupDirName)
+        // Null means the journal is not on disk, and a migration that runs without one has no crash barrier at all.
+        public static KmhMigrationJournal Begin(string backupDirName, out string error)
         {
             var j = new KmhMigrationJournal
             {
@@ -36,25 +36,37 @@ namespace KMHServerAddon.Maintenance
                 BackupDirName = backupDirName ?? "",
                 Status = KmhMigrationStatus.Started,
             };
-            j.Save();
+            if (!j.Save(out error)) return null;
+
+            // Read back: a write that returned true but left nothing readable is the case recovery cannot survive.
+            KmhMigrationJournal back = Read();
+            if (back == null || !string.Equals(back.Id, j.Id, StringComparison.Ordinal))
+            {
+                error = "the journal did not read back as written";
+                return null;
+            }
             return j;
         }
 
-        public void Commit()
+        public bool Commit(out string error)
         {
             Status = KmhMigrationStatus.Committed;
             UpdatedUtc = DateTime.UtcNow.ToString("o");
-            Save();
+            return Save(out error);
         }
 
-        private void Save()
+        private bool Save(out string error)
         {
+            error = null;
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(File));
-                JsonFileStore.Save(File, this);
+                if (JsonFileStore.Save(File, this)) return true;
+                error = "the persistence layer refused the write";
             }
-            catch (Exception ex) { ServerLog.Warn($"Migration journal: could not write ({ex.Message})."); }
+            catch (Exception ex) { error = ex.Message; }
+            ServerLog.Warn($"Migration journal: could not write ({error}).");
+            return false;
         }
 
         public static KmhMigrationJournal Read()

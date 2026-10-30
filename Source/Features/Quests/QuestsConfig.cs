@@ -14,8 +14,11 @@ namespace KMHServerAddon.Features.Quests
 
         // The verify report is client-tracked, so a claim younger than this cannot complete and macros gain nothing.
         public int AutoVerifyMinClaimSeconds { get; set; } = 120;
-        // Routes an auto-verified quest to the poster for sign-off instead of paying out immediately.
         public bool AutoVerifyRequiresPosterReview { get; set; } = false;
+        // The verify report is the claimer's word, so only a silver-only bounty up to this pays on it.
+        public int AutoVerifyMaxBountySilver { get; set; } = 250;
+        // An unreviewed submission reopens unpaid after this, so escrow is never held for ever; 0 = wait indefinitely.
+        public int ReviewTimeoutHours { get; set; } = 72;
 
         private static QuestsConfig _current;
         public static QuestsConfig Current => _current ?? (_current = LoadOrDefault());
@@ -34,6 +37,8 @@ namespace KMHServerAddon.Features.Quests
             cfg.MaxDescriptionLength = Clamp(cfg.MaxDescriptionLength, 16, 8000);
             cfg.MaxBountyItems      = Clamp(cfg.MaxBountyItems, 1, 200);
             cfg.AutoVerifyMinClaimSeconds = Clamp(cfg.AutoVerifyMinClaimSeconds, 0, 3600);
+            cfg.AutoVerifyMaxBountySilver = Clamp(cfg.AutoVerifyMaxBountySilver, 0, 10_000_000);
+            cfg.ReviewTimeoutHours        = Clamp(cfg.ReviewTimeoutHours, 0, 24 * 90);
             return cfg;
         }
 

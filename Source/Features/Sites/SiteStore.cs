@@ -7,15 +7,30 @@ using KMHServerAddon.SubProtocol;
 
 namespace KMHServerAddon.Features.Sites
 {
-    // Server-authoritative custom-site ledger keyed by world tile.
     internal static class SiteStore
     {
         public const double XpPerCycle = 250.0;
 
         private static readonly object _lock = new object();
+        // Below _lock on purpose: it captures it, so payouts save in the same write as what produced them.
+        private static readonly Transactions.KmhOwedPayouts _owed = new Transactions.KmhOwedPayouts("Sites", _lock, SaveToDisk);
         private static readonly Dictionary<int, SiteEntry> _byTile = new Dictionary<int, SiteEntry>();
         private static readonly Dictionary<string, long> _lastBuildUtc =
-            new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);   // owner -> last build ticks (cooldown)
+            new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+
+        // Bound to the guild incarnation, never the reusable name; written under _lock, read without it.
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, string> _guildOwner
+            = new System.Collections.Concurrent.ConcurrentDictionary<int, string>();
+
+        // Never equal to a live incarnation, so a site migrated with no guild left stays ownerless if the name returns.
+        internal const string OrphanBindingPrefix = "orphan:";
+
+        internal static string GuildBindingOf(int tile) => _guildOwner.TryGetValue(tile, out string id) ? id : null;
+
+        // An unbound guild site is nobody's: only a binding to the guild's live incarnation counts.
+        internal static bool GuildBindingIsLive(SiteEntry s)
+            => s != null && !string.IsNullOrEmpty(s.ControllingGuild)
+               && _guildOwner.TryGetValue(s.Tile, out string id) && Guilds.GuildIdentity.IsLive(s.ControllingGuild, id);
 
         private static int CountOwnedLocked(string owner)
         {
@@ -36,7 +51,25 @@ namespace KMHServerAddon.Features.Sites
         {
             int n = 0;
             foreach (SiteEntry s in _byTile.Values)
-                if (s.Workers.Contains(user, StringComparer.OrdinalIgnoreCase)) n++;
+                if (WorksLocked(s, user)) n++;
+            return n;
+        }
+
+        // One site counts once however many of that player's colonists are on it.
+        internal static bool WorksLocked(SiteEntry s, string user)
+        {
+            if (s?.Workers == null || string.IsNullOrEmpty(user)) return false;
+            foreach (string w in s.Workers)
+                if (SiteWorkerKey.IsOwnedBy(w, user)) return true;
+            return false;
+        }
+
+        // Blocked and legacy rows included, or parking a worker as "away" sidesteps the per-site cap.
+        internal static int MineCount(SiteEntry s, string user)
+        {
+            if (s?.Workers == null || string.IsNullOrEmpty(user)) return 0;
+            int n = 0;
+            foreach (string w in s.Workers) if (SiteWorkerKey.IsOwnedBy(w, user)) n++;
             return n;
         }
 
@@ -53,7 +86,6 @@ namespace KMHServerAddon.Features.Sites
         private static bool Producing(SiteEntry s)
             => s != null && SiteOwnership.IsPlayerControlled(s) && WorkerCount(s) > 0;
 
-        // A worker count -> raw speed factor (more workers = faster cycles). 0 workers = paused.
         private static double RawSpeed(int workerCount)
         {
             if (workerCount <= 0) return 0;
@@ -84,10 +116,12 @@ namespace KMHServerAddon.Features.Sites
         {
             if (!Producing(s)) return 0;
             double cap = s.TierMaxOutputMultiplier > 0 ? s.TierMaxOutputMultiplier : 2.0;
-            double raw = 1.0 + AvgSkillLevel(s) / 20.0;   // +0..+100% over skill 0..20
+            double raw = 1.0 + AvgSkillLevel(s) / 20.0;
             double skill = Math.Min(cap, Math.Max(1.0, raw));
-            // Outside the tier cap on purpose, so damage and buildings both still change the result at any tier.
-            return skill * (1.0 + SiteBuildings.ProductionBonus(s)) * SiteStability.OutputFactor(s.Stability);
+            // Outside the tier cap on purpose, so damage, buildings and perks count at any tier; federation is local only.
+            return skill * (1.0 + SiteBuildings.ProductionBonus(s)) * SiteStability.OutputFactor(s.Stability)
+                 * SiteArchetypeRegistry.ProductionPerk(s.Archetype)
+                 * Global.Federation.FederationBenefits.SiteOutputFactor(OwnerCurrentGuild(s));
         }
 
         private static double EffectiveCycleMs(SiteEntry s)
@@ -101,7 +135,7 @@ namespace KMHServerAddon.Features.Sites
         // Paced by client value and by amount (which the client can't fake).
         public static double CycleTimeMsForValue(float marketValue, int amount)
         {
-            double perUnit = SitesConfig.Current.CycleMinutesPerRewardUnit;
+            double perUnit = SitesConfig.Current.Output.CycleMinutesPerRewardUnit;
             double minutes = 30.0 + marketValue / 5.0 + Math.Max(0, amount) * perUnit;
             minutes = Math.Min(240.0, Math.Max(30.0, minutes));
             return minutes * 60.0 * 1000.0;
@@ -109,11 +143,11 @@ namespace KMHServerAddon.Features.Sites
 
         public static int BuildCost(string ownerUsername, float marketValue, int amount, double tierCostMult = 1.0)
         {
-            double mult = SitesConfig.Current.CustomSitePriceMultiplier;
+            double mult = SitesConfig.Current.Costs.PriceMultiplier;
             // Saturating, because an overflowing double->int cast would price a huge order at the floor.
             int raw = ToCost(marketValue * (double)amount * mult);
             // A client can under-report value but not amount, so amount sets a floor of its own.
-            int throughputFloor = ToCost(Math.Max(0, amount) * (double)SitesConfig.Current.MinBuildCostPerUnit);
+            int throughputFloor = ToCost(Math.Max(0, amount) * (double)SitesConfig.Current.Costs.MinPerUnit);
             int cost = Math.Max(500, Math.Max(raw, throughputFloor));
             if (tierCostMult > 0) cost = ToCost(cost * tierCostMult);
             string guild = Guilds.GuildStore.CurrentGuildOf(ownerUsername);
@@ -154,6 +188,49 @@ namespace KMHServerAddon.Features.Sites
             return (true, $"Tile {tile} stability is now {now} ({SiteStability.Describe(now)}).");
         }
 
+        // Server-only, saved with the sites: the ledger rows whose charge paid for a change this file holds. Boot finds
+        // the row's change here (the silver is spent) or refunds the row; settled ones are pruned after a week.
+        private static readonly Dictionary<string, long> _purchaseTx = new Dictionary<string, long>(StringComparer.Ordinal);
+        private static readonly long PurchaseEvidenceTtl = TimeSpan.FromDays(7).Ticks;
+
+        internal static bool HoldsPurchase(string txId) { lock (_lock) return !string.IsNullOrEmpty(txId) && _purchaseTx.ContainsKey(txId); }
+
+        // Row before debit, debit carrying its take marker: a crash before the change saves is refunded at boot, one
+        // after keeps it paid for - never both. True with a null row means it was free.
+        private static bool ChargeForSite(string user, int tile, int cost, string summary, out Transactions.KmhTransaction tx, out string refusal)
+        {
+            tx = null; refusal = null;
+            if (cost <= 0) return true;
+            tx = Transactions.KmhTransactionRepository.OpenTake(user, Transactions.KmhTxType.Purchase, summary, tile, cost, null, null,
+                     destination: "site", targetKind: Transactions.KmhTransactionRepository.TargetSitePurchase);
+            if (tx == null) { refusal = "The server couldn't record that charge - nothing was taken. Try again shortly."; return false; }
+            if (Treasury.TreasuryStore.WithdrawBundleForTxn(user, cost, new List<KeyValuePair<string, int>>(), tx.TakeMarker, summary)) return true;
+            Transactions.KmhTransactionRepository.Abort(tx);
+            tx = null;
+            return false;
+        }
+
+        // Caller holds _lock, inside the change it records, and saves next.
+        private static void NamePurchaseLocked(Transactions.KmhTransaction tx) { if (tx != null) _purchaseTx[tx.Id] = DateTime.UtcNow.Ticks; }
+
+        private static void SettlePurchase(Transactions.KmhTransaction tx)
+        {
+            if (tx == null) return;
+            Transactions.KmhTransactionRepository.Settle(tx);
+            lock (_lock) _purchaseTx.Remove(tx.Id);
+        }
+
+        // On the row's own refund marker, so this and boot recovery return the charge once between them.
+        private static void RefundPurchase(Transactions.KmhTransaction tx)
+        {
+            if (tx == null) return;
+            lock (_lock) _purchaseTx.Remove(tx.Id);
+            if (!Transactions.KmhTransactionRepository.Compensate(tx))
+                Diagnostics.ServerLog.Error($"Sites: charge {tx.Id} could not be refunded yet - the row stays open and the next boot refunds it.");
+        }
+
+        internal static Action<string> AtPurchasePhaseForTest;
+
         // Charged outside the lock, then re-checked inside it so two repairs cannot both pay for the same damage.
         public static (bool ok, string reason) RepairSite(string user, int tile)
         {
@@ -167,11 +244,13 @@ namespace KMHServerAddon.Features.Sites
             }
             if (before >= SiteStability.Healthy) return (false, "That site is already in full repair.");
 
-            int cost = SiteStability.RepairCost(before, SitesConfig.Current.SiteRepairCostPerPoint);
-            if (cost > 0 && !Treasury.TreasuryStore.WithdrawSilver(user, cost, note: $"site repair (tile {tile})"))
-                return (false, $"Repairs cost {Util.SilverFmt.Format(cost)} - your treasury is short.");
+            int cost = SiteStability.RepairCost(before, SitesConfig.Current.Costs.RepairPerPoint);
+            if (!ChargeForSite(user, tile, cost, $"site repair (tile {tile})", out Transactions.KmhTransaction tx, out string refusal))
+                return (false, refusal ?? $"Repairs cost {Util.SilverFmt.Format(cost)} - your treasury is short.");
+            AtPurchasePhaseForTest?.Invoke("charged");
 
-            bool repaired = false;
+            // The change and the row that paid for it are one save, so boot tells a paid repair from a refundable charge.
+            bool repaired = false, saved = false;
             lock (_lock)
             {
                 if (_byTile.TryGetValue(tile, out SiteEntry s) && s != null
@@ -179,25 +258,24 @@ namespace KMHServerAddon.Features.Sites
                     && SiteStability.Clamp(s.Stability) == before)
                 {
                     s.Stability = SiteStability.Healthy;
+                    NamePurchaseLocked(tx);
                     repaired = true;
+                    saved = SaveToDisk();
+                    if (!saved) { s.Stability = before; if (tx != null) _purchaseTx.Remove(tx.Id); }
                 }
             }
             if (!repaired)
             {
-                if (cost > 0) Items.KmhPayloadEscrow.DeliverSilver(user, cost, $"site repair refunded - condition changed (tile {tile})", "site repair refund could not be credited");
+                RefundPurchase(tx);
                 return (false, "The site's condition changed - nothing was charged.");
             }
-
-            // The charge has already left the treasury, so a repair the disk never took is refunded, not kept.
-            if (!SaveToDisk())
+            if (!saved)
             {
-                lock (_lock)
-                {
-                    if (_byTile.TryGetValue(tile, out SiteEntry s2) && s2 != null) s2.Stability = before;
-                }
-                if (cost > 0) Items.KmhPayloadEscrow.DeliverSilver(user, cost, "site repair could not be saved", "site repair refund could not be credited");
+                RefundPurchase(tx);
                 return (false, "The server couldn't save that repair - your silver was returned. Try again shortly.");
             }
+            AtPurchasePhaseForTest?.Invoke("saved");
+            SettlePurchase(tx);
             RaiseSite(tile, user, "stability_changed");
             return (true, $"Site repaired to full for {Util.SilverFmt.Format(cost)}.");
         }
@@ -248,7 +326,7 @@ namespace KMHServerAddon.Features.Sites
             long now = DateTime.UtcNow.Ticks;
             string display;
 
-            // Resolved before our lock, since WorldStore holds its own.
+            // Resolved before _lock, since WorldStore takes its own.
             string winner = "";
             if (SiteOutposts.NormalizeState(to) == SiteEntry.OutpostClaimable && operationId > 0
                 && World.WorldStore.TryGetContributions(operationId, out var wq, out var wf))
@@ -366,7 +444,7 @@ namespace KMHServerAddon.Features.Sites
             return moved;
         }
 
-        // Stamped when it became claimable; the operation lookup is only a pre-1.3.0 fallback that dies on pruning.
+        // Stamped when it became claimable; the operation lookup is only a fallback for older rows and dies on pruning.
         public static string EligibleClaimantFor(SiteEntry s)
         {
             if (s == null || SiteOutposts.NormalizeState(s.OutpostState) != SiteEntry.OutpostClaimable) return "";
@@ -380,7 +458,7 @@ namespace KMHServerAddon.Features.Sites
         {
             if (string.IsNullOrEmpty(user)) return (false, "No caller.");
 
-            // Eligibility first, outside our lock.
+            // Eligibility first, outside _lock.
             SiteEntry probe;
             lock (_lock) { if (!_byTile.TryGetValue(tile, out probe) || probe == null) return (false, "No site on that tile."); }
             string eligible = EligibleClaimantFor(probe);
@@ -395,7 +473,7 @@ namespace KMHServerAddon.Features.Sites
             {
                 int owned;
                 lock (_lock) owned = CountOwnedLocked(user);
-                string capWhy = Frontier.FrontierCapture.CapRefusalFor(owned, ccfg.MaxSitesPerPlayer, false);
+                string capWhy = Frontier.FrontierCapture.CapRefusalFor(owned, ccfg.Limits.PerPlayer, false);
                 if (capWhy != null) return (false, capWhy);
             }
 
@@ -406,13 +484,17 @@ namespace KMHServerAddon.Features.Sites
                 guild = Guilds.GuildStore.CurrentGuildOf(user) ?? "";
                 if (string.IsNullOrEmpty(guild)) return (false, "You are not in a guild.");
                 string rank = Guilds.GuildStore.RankOf(user) ?? "";
-                if (rank != Guilds.Dto.GuildMemberDto.RankOfficer && rank != Guilds.Dto.GuildMemberDto.RankOwner)
-                    return (false, "Only a guild officer or owner can claim for the guild.");
+                if (!Guilds.GuildPermissions.Can(rank, Guilds.GuildCapability.ManageSites))
+                    return (false, "Only a guild officer or above can claim for the guild.");
                 int gOwned;
                 lock (_lock) gOwned = CountGuildOwnedLocked(guild);
-                string gCapWhy = Frontier.FrontierCapture.CapRefusalFor(gOwned, ccfg.MaxSitesPerGuild, true);
+                string gCapWhy = Frontier.FrontierCapture.CapRefusalFor(gOwned, ccfg.Limits.PerGuild, true);
                 if (gCapWhy != null) return (false, gCapWhy);
             }
+
+            // Read once here: a guild that disbands after this leaves the site bound to an incarnation nobody holds.
+            string identity = forGuild ? Guilds.GuildIdentity.Of(guild) : null;
+            if (forGuild && identity == null) return (false, "Your guild no longer exists.");
 
             string previous, display;
             lock (_lock)
@@ -429,13 +511,14 @@ namespace KMHServerAddon.Features.Sites
                 string wasState = s.OutpostState, wasKind = s.OwnerKind, wasOwner = s.OwnerUsername,
                        wasGuild = s.ControllingGuild, wasFaction = s.ControllerFaction, wasCapturedBy = s.CapturedBy;
                 long wasWindow = s.ClaimWindowEndsUtcTicks;
+                string wasBinding = GuildBindingOf(tile);
 
                 s.OutpostState = SiteEntry.OutpostCaptured;
                 s.ClaimWindowEndsUtcTicks = 0;
                 s.CapturedBy = forGuild ? guild : user;
 
-                if (forGuild) { s.OwnerKind = SiteEntry.OwnerGuildKind; s.ControllingGuild = guild; s.OwnerUsername = ""; }
-                else          { s.OwnerKind = SiteEntry.OwnerPlayer;    s.OwnerUsername = user;     s.ControllingGuild = ""; }
+                if (forGuild) { s.OwnerKind = SiteEntry.OwnerGuildKind; s.ControllingGuild = guild; s.OwnerUsername = ""; _guildOwner[tile] = identity; }
+                else          { s.OwnerKind = SiteEntry.OwnerPlayer;    s.OwnerUsername = user;     s.ControllingGuild = ""; _guildOwner.TryRemove(tile, out _); }
 
                 // System-only authority must not survive onto a player-owned site.
                 s.ControllerFaction = "";
@@ -448,6 +531,7 @@ namespace KMHServerAddon.Features.Sites
                     s.OutpostState = wasState; s.OwnerKind = wasKind; s.OwnerUsername = wasOwner;
                     s.ControllingGuild = wasGuild; s.ControllerFaction = wasFaction; s.CapturedBy = wasCapturedBy;
                     s.ClaimWindowEndsUtcTicks = wasWindow;
+                    if (wasBinding != null) _guildOwner[tile] = wasBinding; else _guildOwner.TryRemove(tile, out _);
                     return (false, why);
                 }
             }
@@ -460,6 +544,7 @@ namespace KMHServerAddon.Features.Sites
             });
             // Credited to the player even for a guild claim, since a guild cannot earn a capture on its own.
             PlayerStats.PlayerStatsStore.BumpFrontierCaptures(user);
+            Global.Federation.FederationService.RecordGuildWork("frontier", user);
             Diagnostics.ServerLog.Info($"Frontier: {display} on tile {tile} captured by {(forGuild ? "guild " + guild : user)} (was {previous}).");
             return (true, $"{display} is now yours. It keeps its buildings, condition and history.");
         }
@@ -477,39 +562,39 @@ namespace KMHServerAddon.Features.Sites
                 if (!SiteBuildings.CanAdd(pre, k, pre.OutputTier, out string why)) return (false, why);
             }
 
-            int cost = Math.Max(0, SitesConfig.Current.SiteBuildingCostSilver);
-            if (cost > 0 && !Treasury.TreasuryStore.WithdrawSilver(user, cost, note: $"site building ({k}, tile {tile})"))
-                return (false, $"That building costs {Util.SilverFmt.Format(cost)} - your treasury is short.");
+            int cost = Math.Max(0, SitesConfig.Current.Costs.BuildingSilver);
+            if (!ChargeForSite(user, tile, cost, $"site building ({k}, tile {tile})", out Transactions.KmhTransaction tx, out string refusal))
+                return (false, refusal ?? $"That building costs {Util.SilverFmt.Format(cost)} - your treasury is short.");
+            AtPurchasePhaseForTest?.Invoke("charged");
 
-            bool added = false;
+            bool added = false, saved = false;
             lock (_lock)
             {
                 if (_byTile.TryGetValue(tile, out SiteEntry s) && s != null
                     && SiteOwnership.CanManage(s, user)
                     && SiteBuildings.CanAdd(s, k, s.OutputTier, out _))
                 {
-                    s.Buildings.Add(new SiteBuilding { Kind = k, Level = 1, State = SiteBuilding.StateOperational });
+                    var building = new SiteBuilding { Kind = k, Level = 1, State = SiteBuilding.StateOperational };
+                    s.Buildings.Add(building);
+                    NamePurchaseLocked(tx);
                     added = true;
+                    saved = SaveToDisk();
+                    if (!saved) { s.Buildings.Remove(building); if (tx != null) _purchaseTx.Remove(tx.Id); }
                 }
             }
             if (!added)
             {
-                // Lost the race, so hand the silver straight back rather than keeping it for nothing.
-                if (cost > 0) Items.KmhPayloadEscrow.DeliverSilver(user, cost, $"site building refunded - slot was taken (tile {tile})", "site building refund could not be credited");
+                // Lost the race, so the silver goes straight back rather than being kept for nothing.
+                RefundPurchase(tx);
                 return (false, "That slot was just taken - nothing was charged.");
             }
-
-            // The charge has already left the treasury, so a building the disk never took is refunded, not kept.
-            if (!SaveToDisk())
+            if (!saved)
             {
-                lock (_lock)
-                {
-                    if (_byTile.TryGetValue(tile, out SiteEntry s3) && s3?.Buildings != null && s3.Buildings.Count > 0)
-                        s3.Buildings.RemoveAt(s3.Buildings.Count - 1);
-                }
-                if (cost > 0) Items.KmhPayloadEscrow.DeliverSilver(user, cost, "site building could not be saved", "site building refund could not be credited");
+                RefundPurchase(tx);
                 return (false, "The server couldn't save that building - your silver was returned. Try again shortly.");
             }
+            AtPurchasePhaseForTest?.Invoke("saved");
+            SettlePurchase(tx);
             RaiseSite(tile, user, "building_added");
             return (true, $"Built a {k} building for {Util.SilverFmt.Format(cost)}.");
         }
@@ -522,7 +607,7 @@ namespace KMHServerAddon.Features.Sites
             lock (_lock)
             {
                 if (!_byTile.TryGetValue(tile, out SiteEntry s) || s == null) return (false, "No site on that tile.");
-                if (!SiteOwnership.CanManage(s, user)) return (false, "That isn't your site.");
+                if (!SiteOwnership.CanAdminister(s, user)) return (false, SiteOwnership.CanManage(s, user) ? OfficerOnly : "That isn't your site.");
                 if (s.Buildings == null || index < 0 || index >= s.Buildings.Count) return (false, "No such building.");
 
                 SiteBuilding target = s.Buildings[index];
@@ -547,7 +632,7 @@ namespace KMHServerAddon.Features.Sites
             return true;
         }
 
-        // Order is fixed: a preset's skill, then the classified family's, then the legacy guess for an uncatalogued server.
+        // Fixed order: a preset's skill, then the classified family's, then the legacy guess for an uncatalogued server.
         internal static string SkillFor(string archetype, string family, string legacySkill)
         {
             string preset = SiteArchetypes.DefaultSkillFor(SiteArchetypes.Normalize(archetype));
@@ -588,15 +673,15 @@ namespace KMHServerAddon.Features.Sites
             lock (_lock)
             {
                 if (_byTile.ContainsKey(tile)) return (false, "A site already exists on that tile.");
-                if (cfg.MaxSitesServerWide > 0 && _byTile.Count >= cfg.MaxSitesServerWide)
+                if (cfg.Limits.ServerWide > 0 && _byTile.Count >= cfg.Limits.ServerWide)
                     return (false, "The server has reached its site limit.");
-                if (cfg.MaxSitesPerPlayer > 0 && CountOwnedLocked(owner) >= cfg.MaxSitesPerPlayer)
-                    return (false, $"You already own the maximum of {cfg.MaxSitesPerPlayer} site(s).");
-                if (cfg.MaxSitesPerGuild > 0 && !string.IsNullOrEmpty(ownerGuild) && CountGuildOwnedLocked(ownerGuild) >= cfg.MaxSitesPerGuild)
-                    return (false, $"Your guild has reached its {cfg.MaxSitesPerGuild}-site limit.");
-                if (cfg.BuildCooldownMinutes > 0 && _lastBuildUtc.TryGetValue(owner, out long last)
-                    && DateTime.UtcNow.Ticks - last < TimeSpan.FromMinutes(cfg.BuildCooldownMinutes).Ticks)
-                    return (false, $"Build cooldown - wait a bit before building another site (every {cfg.BuildCooldownMinutes} min).");
+                if (cfg.Limits.PerPlayer > 0 && CountOwnedLocked(owner) >= cfg.Limits.PerPlayer)
+                    return (false, $"You already own the maximum of {cfg.Limits.PerPlayer} site(s).");
+                if (cfg.Limits.PerGuild > 0 && !string.IsNullOrEmpty(ownerGuild) && CountGuildOwnedLocked(ownerGuild) >= cfg.Limits.PerGuild)
+                    return (false, $"Your guild has reached its {cfg.Limits.PerGuild}-site limit.");
+                if (cfg.Limits.BuildCooldownMinutes > 0 && _lastBuildUtc.TryGetValue(owner, out long last)
+                    && DateTime.UtcNow.Ticks - last < TimeSpan.FromMinutes(cfg.Limits.BuildCooldownMinutes).Ticks)
+                    return (false, $"Build cooldown - wait a bit before building another site (every {cfg.Limits.BuildCooldownMinutes} min).");
             }
             return BuildValidated(owner, tile, itemDefName, amountPerCycle, marketValuePerUnit, accessMode,
                                   ownerTaxPercent, ownerDestination, marketplaceUnitPrice, plan, ownerGuild);
@@ -623,7 +708,7 @@ namespace KMHServerAddon.Features.Sites
             q.Cost         = BuildCost(user, plan.MarketValuePerUnit, amountPerCycle, q.CostMultiplier);
             q.CycleMinutes = (int)Math.Round(CycleTimeMsForValue(plan.MarketValuePerUnit, amountPerCycle)
                                              * plan.Cls.CycleMultiplier / 60000.0);
-            q.MaxAmount    = Math.Max(1, Math.Min(SitesConfig.Current.CustomSiteMaxRewardAmount, plan.Cls.MaxAmount));
+            q.MaxAmount    = Math.Max(1, Math.Min(SitesConfig.Current.Output.CustomMaxRewardAmount, plan.Cls.MaxAmount));
             q.Balance      = Treasury.TreasuryStore.GetPersonalSilver(user);
             q.Affordable   = q.Balance >= q.Cost;
             return q;
@@ -646,11 +731,13 @@ namespace KMHServerAddon.Features.Sites
         {
             plan = null; why = null;
             SitesConfig cfg = SitesConfig.Current;
+            // Shown on the world map to every player, so it must be an item name and nothing that renders.
+            if (!Util.KmhSafe.IsItemKey(itemDefName)) { why = "That isn't an item name."; return false; }
 
             // Unknown, rare and tech items land in a disabled tier, so a site cannot print gear.
             SiteOutputClass cls;
             int tierMaxAmount;
-            if (cfg.UseSiteOutputTiers)
+            if (cfg.Output.UseTiers)
             {
                 // Resolve the human label server-side so owners can allow/block by exact label, not just raw defName.
                 string label = Features.ItemLabels.ItemLabelCache.LabelFor(itemDefName);
@@ -660,21 +747,21 @@ namespace KMHServerAddon.Features.Sites
                     if (!quiet) Diagnostics.ServerLog.Info($"Sites: {owner} output '{itemDefName}' ('{label}') rejected - {cls.BlockReason} (tier {cls.TierNumber} {cls.TierName}).");
                     why = cls.BlockReason; return false;
                 }
-                tierMaxAmount = Math.Min(cfg.CustomSiteMaxRewardAmount, cls.MaxAmount);
+                tierMaxAmount = Math.Min(cfg.Output.CustomMaxRewardAmount, cls.MaxAmount);
             }
             else
             {
                 // Turning tiers off must not silently reopen all-def output, so the safety gate stays on by default.
-                if (!cfg.AllowUnsafeLegacySiteOutputs
+                if (!cfg.Output.AllowUnsafeLegacy
                     && !Items.KmhItemSafety.IsAllowedSiteOutput(itemDefName, out string outReason))
                 { why = outReason; return false; }
                 cls = new SiteOutputClass
                 {
                     IsAllowed = true, TierNumber = 1, TierName = "Basic", RelevantSkill = DetermineRelevantSkill(itemDefName),
-                    MaxAmount = cfg.CustomSiteMaxRewardAmount, CostMultiplier = 1.0, CycleMultiplier = 1.0,
+                    MaxAmount = cfg.Output.CustomMaxRewardAmount, CostMultiplier = 1.0, CycleMultiplier = 1.0,
                     MaxSpeedMultiplier = 3.0, MaxOutputMultiplier = 2.0,
                 };
-                tierMaxAmount = cfg.CustomSiteMaxRewardAmount;
+                tierMaxAmount = cfg.Output.CustomMaxRewardAmount;
             }
 
             // Rejected rather than clamped, so a typed value beating the UI cap cannot quietly succeed at a lower amount.
@@ -689,9 +776,9 @@ namespace KMHServerAddon.Features.Sites
             string archId = SiteArchetypes.Normalize(archetype);
             string family = SiteOutputFamilies.Unknown;
             double archCostMult = 1.0;
-            if (cfg.ArchetypesEnabled && SiteCatalogStore.HasCatalog)
+            if (cfg.Archetypes.Enabled && SiteCatalogStore.HasCatalog)
             {
-                if (archId == SiteArchetypes.Custom && !cfg.AllowCustomArchetype)
+                if (archId == SiteArchetypes.Custom && !cfg.Archetypes.AllowCustom)
                 { why = "Custom sites are disabled on this server - pick one of the site types."; return false; }
 
                 Dto.SiteOutputMetadata meta = SiteCatalogStore.Lookup(itemDefName);
@@ -700,7 +787,7 @@ namespace KMHServerAddon.Features.Sites
                 {
                     SiteArchetypeDef def = SiteArchetypeRegistry.Get(archId);
                     why = family == SiteOutputFamilies.Unknown
-                        ? $"KMH has not classified '{itemDefName}' yet, so no site type can be built on it."
+                        ? $"Colony Nexus has not classified '{itemDefName}' yet, so no site type can be built on it."
                         : $"A {def.DisplayName} cannot produce {SiteOutputFamilies.DisplayName(family).ToLowerInvariant()} items.";
                     if (!quiet) Diagnostics.ServerLog.Info($"Sites: {owner} output '{itemDefName}' rejected - archetype '{archId}' does not accept family '{family}'.");
                     return false;
@@ -708,13 +795,13 @@ namespace KMHServerAddon.Features.Sites
                 archCostMult = SiteArchetypeRegistry.Get(archId).CostMultiplier;
             }
 
-            // Refused outright without a trusted value: the client's own figure under-reported bought a cheaper, faster, richer site.
+            // Refused without a trusted value: an under-reported client figure would buy a cheaper, faster, richer site.
             marketValuePerUnit = Items.KmhItemSafety.TrustedMarketValueOrZero(itemDefName, marketValuePerUnit, out bool valueSuspicious);
             if (valueSuspicious && !quiet)
                 Diagnostics.ServerLog.Warn($"Sites: {owner} reported an off market value for {itemDefName} (tile {tile}) - using the trusted catalog value.");
             if (marketValuePerUnit <= 0f)
             {
-                why = $"KMH has no trusted market value for '{itemDefName}' yet, so it cannot price a site on it. "
+                why = $"Colony Nexus has no trusted market value for '{itemDefName}' yet, so it cannot price a site on it. "
                     + "An admin can set one with 'kmh catalog <def> <value>', or it appears once the item catalog has been received.";
                 if (!quiet) Diagnostics.ServerLog.Info($"Sites: {owner} build on '{itemDefName}' (tile {tile}) refused - no trusted market value.");
                 return false;
@@ -732,15 +819,15 @@ namespace KMHServerAddon.Features.Sites
         private static string CommitRefusalLocked(string owner, int tile, SitesConfig cfg, string ownerGuild)
         {
             if (_byTile.ContainsKey(tile)) return "Another site was just built on that tile";
-            if (cfg.MaxSitesServerWide > 0 && _byTile.Count >= cfg.MaxSitesServerWide)
+            if (cfg.Limits.ServerWide > 0 && _byTile.Count >= cfg.Limits.ServerWide)
                 return "The server reached its site limit";
-            if (cfg.MaxSitesPerPlayer > 0 && CountOwnedLocked(owner) >= cfg.MaxSitesPerPlayer)
-                return $"You already own the maximum of {cfg.MaxSitesPerPlayer} site(s)";
-            if (cfg.MaxSitesPerGuild > 0 && !string.IsNullOrEmpty(ownerGuild)
-                && CountGuildOwnedLocked(ownerGuild) >= cfg.MaxSitesPerGuild)
-                return $"Your guild reached its {cfg.MaxSitesPerGuild}-site limit";
-            if (cfg.BuildCooldownMinutes > 0 && _lastBuildUtc.TryGetValue(owner, out long last)
-                && DateTime.UtcNow.Ticks - last < TimeSpan.FromMinutes(cfg.BuildCooldownMinutes).Ticks)
+            if (cfg.Limits.PerPlayer > 0 && CountOwnedLocked(owner) >= cfg.Limits.PerPlayer)
+                return $"You already own the maximum of {cfg.Limits.PerPlayer} site(s)";
+            if (cfg.Limits.PerGuild > 0 && !string.IsNullOrEmpty(ownerGuild)
+                && CountGuildOwnedLocked(ownerGuild) >= cfg.Limits.PerGuild)
+                return $"Your guild reached its {cfg.Limits.PerGuild}-site limit";
+            if (cfg.Limits.BuildCooldownMinutes > 0 && _lastBuildUtc.TryGetValue(owner, out long last)
+                && DateTime.UtcNow.Ticks - last < TimeSpan.FromMinutes(cfg.Limits.BuildCooldownMinutes).Ticks)
                 return "Build cooldown";
             return null;
         }
@@ -760,7 +847,7 @@ namespace KMHServerAddon.Features.Sites
                 if (!SiteOutposts.IsOutpost(pre)) return (false, "That site is not a Frontier outpost.");
                 if (SiteOutposts.NormalizeState(pre.OutpostState) != SiteEntry.OutpostCaptured)
                     return (false, "Only a captured outpost can be set up.");
-                if (!SiteOwnership.CanManage(pre, user)) return (false, "That isn't your site.");
+                if (!SiteOwnership.CanAdminister(pre, user)) return (false, SiteOwnership.CanManage(pre, user) ? OfficerOnly : "That isn't your site.");
                 // One-time: after this it is an ordinary Site, changed through the ordinary Site controls.
                 if (!string.IsNullOrEmpty(pre.ItemDefName))
                     return (false, "That outpost is already set up.");
@@ -770,7 +857,7 @@ namespace KMHServerAddon.Features.Sites
                 return (false, why);
 
             // Re-asked because classification above released the lock, and membership can change in that window.
-            if (!CanManageTile(tile, user)) return (false, "That isn't your site.");
+            if (!CanAdministerTile(tile, user)) return (false, "That isn't your site.");
 
             string display;
             lock (_lock)
@@ -803,7 +890,6 @@ namespace KMHServerAddon.Features.Sites
             return (true, $"{display} is now producing {amountPerCycle}x {itemDefName} per cycle.");
         }
 
-        // The half of Build that commits, once every rule has already passed.
         private static (bool ok, string reason) BuildValidated(string owner, int tile, string itemDefName,
             int amountPerCycle, float marketValuePerUnit, string accessMode, int ownerTaxPercent,
             string ownerDestination, int marketplaceUnitPrice, OutputPlan plan, string ownerGuild)
@@ -815,8 +901,9 @@ namespace KMHServerAddon.Features.Sites
 
             // Folded into the tier multiplier so BuildCost's floor and rounding see the real number.
             int cost = BuildCost(owner, marketValuePerUnit, amountPerCycle, cls.CostMultiplier * archCostMult);
-            if (!Treasury.TreasuryStore.WithdrawSilver(owner, cost, note: $"custom site build (tile {tile})"))
-                return (false, $"Build costs {Util.SilverFmt.Format(cost)} - your treasury is short.");
+            if (!ChargeForSite(owner, tile, cost, $"site build (tile {tile})", out Transactions.KmhTransaction tx, out string chargeRefusal))
+                return (false, chargeRefusal ?? $"Build costs {Util.SilverFmt.Format(cost)} - your treasury is short.");
+            AtPurchasePhaseForTest?.Invoke("charged");
 
             SiteEntry site = new SiteEntry
             {
@@ -839,36 +926,50 @@ namespace KMHServerAddon.Features.Sites
                 TierMaxOutputMultiplier= cls.MaxOutputMultiplier,
                 LastRewardUtcTicks = DateTime.UtcNow.Ticks,
             };
-            if (cfg.AutoAddOwnerAsSiteWorker)
+            if (cfg.Workers.AutoAddOwner)
             {
                 site.Workers.Add(owner);
                 site.WorkerProgress[owner] = new WorkerProgressDto { JoinedUtcTicks = DateTime.UtcNow.Ticks, Destination = SiteEntry.DestTreasury };
             }
             // Re-checked in the same lock that inserts, or two builds on different tiles could both pass one cap.
             string refusal;
+            bool saved = false;
             lock (_lock)
             {
                 refusal = CommitRefusalLocked(owner, tile, cfg, ownerGuild);
-                if (refusal == null) { _byTile[tile] = site; _lastBuildUtc[owner] = DateTime.UtcNow.Ticks; }
+                if (refusal == null)
+                {
+                    _byTile[tile] = site; _lastBuildUtc[owner] = DateTime.UtcNow.Ticks;
+                    NamePurchaseLocked(tx);
+                    saved = SaveToDisk();
+                    if (!saved) { _byTile.Remove(tile); _lastBuildUtc.Remove(owner); if (tx != null) _purchaseTx.Remove(tx.Id); }
+                }
             }
             if (refusal != null)
             {
-                Items.KmhPayloadEscrow.DeliverSilver(owner, cost, $"custom site build refund (tile {tile}: {refusal})", "site build refund could not be credited");
+                RefundPurchase(tx);
                 return (false, refusal + " - your build cost was refunded.");
             }
             // The build cost has already left the treasury, so a site the disk never took is refunded, not kept.
-            if (!SaveToDisk())
+            if (!saved)
             {
-                lock (_lock) { _byTile.Remove(tile); _lastBuildUtc.Remove(owner); }
-                Items.KmhPayloadEscrow.DeliverSilver(owner, cost, "site build could not be saved", "site build refund could not be credited");
+                RefundPurchase(tx);
                 return (false, "The server couldn't save that site - your build cost was refunded. Try again shortly.");
             }
+            AtPurchasePhaseForTest?.Invoke("saved");
+            SettlePurchase(tx);
             RaiseSite(tile, owner, "built");
             PlayerStats.PlayerStatsStore.BumpSitesBuilt(owner);
-            return (true, $"Built a {itemDefName} site (cost {Util.SilverFmt.Format(cost)}).");
+            // Named by its type, not the item's internal def name, and saying what starts it.
+            string kind = SiteArchetypeRegistry.Get(plan.ArchId)?.DisplayName;
+            return (true, $"Built your {(string.IsNullOrEmpty(kind) ? "new" : kind)} site for {Util.SilverFmt.Format(cost)}. "
+                        + "Send a caravan there and assign a colonist to start it.");
         }
 
         public const string BlockedPawnAway = "pawn away from site";
+
+        // Client-named and shown to everyone viewing the site, so made inert like quest titles.
+        internal static string WorkerName(string raw) => Util.KmhSafe.Cap((raw ?? "").Replace('<', '(').Replace('>', ')'), 48);
 
         // present=false keeps the worker assigned but stops production; changed=false is a silent re-validation.
         public static (bool ok, string reason, bool changed) JoinWorker(string username, int tile, int baseSkillLevel,
@@ -876,11 +977,11 @@ namespace KMHServerAddon.Features.Sites
         {
             if (string.IsNullOrEmpty(username)) return (false, "No user.", false);
             // A headless server cannot verify the reported pawn, so skill and name stay advisory.
-            if (SitesConfig.Current.RequirePawnSiteWorkers && pawnLoadId <= 0)
+            if (SitesConfig.Current.Workers.RequirePawns && pawnLoadId <= 0)
                 return (false, "This site needs a real colonist. Send a caravan to the site tile, then assign a pawn.", false);
             baseSkillLevel = Items.KmhItemSafety.ValidateClientSkill(baseSkillLevel, out _);
-            pawnName = Util.KmhSafe.Cap(pawnName ?? "", 48);
-            int workerCap = SitesConfig.Current.MaxWorkerSitesPerPlayer;
+            pawnName = WorkerName(pawnName);
+            int workerCap = SitesConfig.Current.Limits.WorkerSitesPerPlayer;
             string owner; bool refreshed = false, changed = true;
             lock (_lock)
             {
@@ -888,7 +989,9 @@ namespace KMHServerAddon.Features.Sites
                 bool isOwner = SiteOwnership.CanManage(s, username);
                 if (!isOwner && !CanAccess(s, username)) return (false, "This site isn't open to you.", false);
 
-                if (s.WorkerProgress.TryGetValue(username, out WorkerProgressDto existing) && existing != null)
+                // Keyed on the PAWN, or a second colonist overwrites the first instead of filling the next slot.
+                string key = SiteWorkerKey.For(username, pawnLoadId);
+                if (s.WorkerProgress.TryGetValue(key, out WorkerProgressDto existing) && existing != null)
                 {
                     string newBlocked = present ? "" : BlockedPawnAway;
                     changed = existing.PawnLoadId != pawnLoadId
@@ -901,20 +1004,41 @@ namespace KMHServerAddon.Features.Sites
                     existing.LastValidatedUtc = DateTime.UtcNow.Ticks;
                     existing.Legacy           = false;   // a real pawn now works it
                     existing.BlockedReason    = newBlocked;
+                    existing.Username         = username;   // backfills a migrated row
                     refreshed = true;
                     owner = s.OwnerUsername;
                 }
                 else
                 {
+                    // A pawn already working here for another account is a collision or a claim; both lose.
+                    if (pawnLoadId > 0)
+                        foreach (KeyValuePair<string, WorkerProgressDto> kv in s.WorkerProgress)
+                            if (kv.Value != null && kv.Value.PawnLoadId == pawnLoadId && !SiteWorkerKey.IsOwnedBy(kv.Key, username))
+                                return (false, "That colonist is already working this site for another player.", false);
+
+                    int perPlayer = SitesConfig.Current.Limits.WorkersPerPlayerPerSite;
+                    if (perPlayer > 0 && MineCount(s, username) >= perPlayer)
+                        return (false, $"You already have {perPlayer} colonist(s) on this site.", false);
+
                     int maxWorkers = MaxWorkersLive(s);
-                if (WorkerCount(s) >= maxWorkers) return (false, $"This site is full ({maxWorkers} workers).", false);
-                    if (workerCap > 0 && CountWorkedLocked(username) >= workerCap) return (false, $"You're at your {workerCap}-site work limit.", false);
-                    s.Workers.Add(username);
-                    s.WorkerProgress[username] = new WorkerProgressDto
+                    if (WorkerCount(s) >= maxWorkers) return (false, $"This site is full ({maxWorkers} workers).", false);
+                    // Counts sites, not colonists: three on one site still cost one site-work slot.
+                    if (workerCap > 0 && !WorksLocked(s, username) && CountWorkedLocked(username) >= workerCap)
+                        return (false, $"You're at your {workerCap}-site work limit.", false);
+                    // The same worker finally naming a colonist; keeping both would double their slot.
+                    string legacy = SiteWorkerKey.For(username, -1);
+                    if (SiteWorkerKey.IsPerPawn(key) && s.WorkerProgress.TryGetValue(legacy, out WorkerProgressDto old) && old != null && old.Legacy)
+                    {
+                        s.Workers.RemoveAll(w => string.Equals(w, legacy, StringComparison.OrdinalIgnoreCase));
+                        s.WorkerProgress.Remove(legacy);
+                    }
+                    s.Workers.Add(key);
+                    s.WorkerProgress[key] = new WorkerProgressDto
                     {
                         JoinedUtcTicks   = DateTime.UtcNow.Ticks,
                         BaseSkillLevel   = baseSkillLevel,
                         Destination      = SiteEntry.DestTreasury,
+                        Username         = username,
                         PawnName         = pawnName,
                         PawnLoadId       = pawnLoadId,
                         LastValidatedUtc = DateTime.UtcNow.Ticks,
@@ -936,21 +1060,34 @@ namespace KMHServerAddon.Features.Sites
             return (true, msg, changed);
         }
 
-        public static (bool ok, string reason) LeaveWorker(string username, int tile)
+        // pawnLoadId <= 0 pulls every colonist this player has here; naming one removes only that colonist.
+        public static (bool ok, string reason) LeaveWorker(string username, int tile, int pawnLoadId = -1)
         {
             if (string.IsNullOrEmpty(username)) return (false, "No user.");
-            string owner;
+            string owner; int removed; string left;
             lock (_lock)
             {
                 if (!_byTile.TryGetValue(tile, out SiteEntry s)) return (false, "No site on that tile.");
-                int removed = s.Workers.RemoveAll(w => string.Equals(w, username, StringComparison.OrdinalIgnoreCase));
-                if (removed == 0) return (false, "You don't work here.");
-                s.WorkerProgress.Remove(username);
+
+                bool One(string w) => pawnLoadId > 0
+                    ? string.Equals(w, SiteWorkerKey.For(username, pawnLoadId), StringComparison.OrdinalIgnoreCase)
+                    : SiteWorkerKey.IsOwnedBy(w, username);
+
+                var going = new List<string>();
+                foreach (string w in s.Workers) if (One(w)) going.Add(w);
+                if (going.Count == 0)
+                    return (false, pawnLoadId > 0 ? "That colonist doesn't work here." : "You don't work here.");
+
+                left = pawnLoadId > 0 && s.WorkerProgress.TryGetValue(going[0], out WorkerProgressDto lwp) && lwp != null
+                       && !string.IsNullOrEmpty(lwp.PawnName) ? lwp.PawnName : "";
+                foreach (string w in going) s.WorkerProgress.Remove(w);
+                removed = s.Workers.RemoveAll(One);
                 owner = s.OwnerUsername;
             }
             SaveToDisk();
             RaiseSite(tile, owner, "worker_left");
-            return (true, "Left the site.");
+            return (true, !string.IsNullOrEmpty(left) ? $"{left} left the site."
+                        : removed > 1 ? $"Pulled {removed} colonists off the site." : "Left the site.");
         }
 
         public const string ScopeMine = "mine";   // the caller's own worker share
@@ -992,19 +1129,22 @@ namespace KMHServerAddon.Features.Sites
             if (string.IsNullOrEmpty(username)) return (false, "No user.");
             string dest = NormalizeDest(destination);
             scope = (scope ?? "").Trim().ToLowerInvariant();
-            // Resolved before our lock: CanManage reads GuildStore, which holds its own.
+            // Resolved before _lock: CanManage reads GuildStore, which takes its own.
             bool mayManage = CanManageTile(tile, username);
             string what;
             lock (_lock)
             {
                 if (!_byTile.TryGetValue(tile, out SiteEntry s)) return (false, "No site on that tile.");
-                bool isWorker = s.WorkerProgress.TryGetValue(username, out WorkerProgressDto wp) && wp != null;
+                // All of theirs: shares pay once per account, so one row pointed elsewhere would depend on read order.
+                var mine = new List<WorkerProgressDto>();
+                foreach (KeyValuePair<string, WorkerProgressDto> kv in s.WorkerProgress)
+                    if (kv.Value != null && SiteWorkerKey.IsOwnedBy(kv.Key, username)) mine.Add(kv.Value);
 
-                DestTarget target = ResolveDestTarget(scope, isWorker, SiteOwnership.IsOwnedBy(s, username),
+                DestTarget target = ResolveDestTarget(scope, mine.Count > 0, SiteOwnership.IsOwnedBy(s, username),
                                                       SiteOwnership.IsGuildOwned(s), mayManage, dest, out string refusal);
                 if (target == DestTarget.None) return (false, refusal);
 
-                if (target == DestTarget.WorkerShare) { wp.Destination = dest; what = "Your share"; }
+                if (target == DestTarget.WorkerShare) { foreach (WorkerProgressDto w in mine) w.Destination = dest; what = "Your share"; }
                 else                                  { s.OwnerRewardDestination = dest; what = "This site's output"; }
             }
             SaveToDisk();
@@ -1017,7 +1157,10 @@ namespace KMHServerAddon.Features.Sites
             lock (_lock)
             {
                 if (!_byTile.TryGetValue(tile, out SiteEntry s)) return (false, "No site on that tile.");
-                if (!SiteOwnership.CanManage(s, owner)) return (false, "You can't manage this site.");
+                if (!SiteOwnership.CanAdminister(s, owner)) return (false, SiteOwnership.CanManage(s, owner) ? OfficerOnly : "You can't manage this site.");
+                // Removing the site would destroy what it holds.
+                if (s.StoredItems != null && s.StoredItems.Values.Any(q => q > 0))
+                    return (false, "Collect this site's stored goods first.");
                 _byTile.Remove(tile);
             }
             SaveToDisk();
@@ -1051,22 +1194,17 @@ namespace KMHServerAddon.Features.Sites
                 if (!wp.IsActivePawnWorker) continue;
                 crew += RoadworkBaseWorkPerWorker + wp.EarnedLevel * RoadworkWorkPerSkillLevel;
             }
-            return crew <= 0 ? 0 : crew * SiteStability.OutputFactor(s.Stability);
+            return crew <= 0 ? 0 : crew * SiteStability.OutputFactor(s.Stability) * SiteArchetypeRegistry.RoadworksPerk(s.Archetype)
+                                 * Global.Federation.FederationBenefits.RoadworksFactor(OwnerCurrentGuild(s));
         }
 
-        // Runs outside the site lock because RoadworksStore takes its own.
-        private static int ApplyRoadwork(List<(int Tile, double Work)> roadWork)
+        // Caller holds _lock.
+        private static string WorkerDestinationFor(SiteEntry s, string account)
         {
-            int completed = 0;
-            foreach ((int tile, double work) in roadWork)
-            {
-                List<long> ids = Roadworks.RoadworksStore.ActiveProjectIdsForSite(tile);
-                if (ids.Count == 0) continue;              // finished or cancelled between planning and here
-                double each = work / ids.Count;
-                if (each <= 0) continue;
-                foreach (long id in ids) completed += Roadworks.RoadworksStore.AdvanceProject(id, each);
-            }
-            return completed;
+            if (s?.WorkerProgress == null) return SiteEntry.DestTreasury;
+            foreach (KeyValuePair<string, WorkerProgressDto> kv in s.WorkerProgress)
+                if (kv.Value != null && SiteWorkerKey.IsOwnedBy(kv.Key, account)) return kv.Value.Destination;
+            return SiteEntry.DestTreasury;
         }
 
         // Returns the usernames whose treasury changed, so the sweeper can push them.
@@ -1074,19 +1212,23 @@ namespace KMHServerAddon.Features.Sites
         {
             HashSet<string> touched = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             long now = DateTime.UtcNow.Ticks;
-            double xpMult = SitesConfig.Current.WorkerXpMultiplier * World.WorldStore.WorkerXpMultiplier();
+            double xpMult = SitesConfig.Current.Workers.XpMultiplier * World.WorldStore.WorkerXpMultiplier();
 
             // Planned under the lock so a concurrent join cannot mutate workers mid-enumeration.
             List<Delivery> plan = new List<Delivery>();
             // What a failed write has to undo: the timer that gates the next payout, and the XP that rode with it.
             List<(SiteEntry Site, long PrevTicks, double XpDelta)> advanced = new List<(SiteEntry, long, double)>();
             List<(int Tile, double Work)> roadWork = new List<(int, double)>();
+            // Cycles completed per guild, reported to its federation once the timers are on disk.
+            Dictionary<string, int> cyclesByGuild = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             HashSet<int> roadProjectTiles = Roadworks.RoadworksStore.TilesWithActiveProjects();
             lock (_lock)
             {
                 foreach (SiteEntry s in _byTile.Values)
                 {
                     if (s.BlockedOutput) continue;
+                    // Its guild disbanded or the name now belongs to another: paused, timer untouched, nobody paid.
+                    if (SiteOwnership.IsGuildOwned(s) && !GuildBindingIsLive(s)) continue;
                     double cycleMs = EffectiveCycleMs(s);
                     if (!IsFinitePositive(cycleMs)) continue;   // paused, so leave the timer alone
                     double elapsedMs = (now - s.LastRewardUtcTicks) / (double)TimeSpan.TicksPerMillisecond;
@@ -1117,22 +1259,29 @@ namespace KMHServerAddon.Features.Sites
                     string ownerAcct   = SiteOwnership.ProductionAccount(s);
                     bool hasOwner      = !string.IsNullOrEmpty(ownerAcct);
 
+                    // Shares split per ACCOUNT, speed and skill per PAWN, so one player is never several claimants.
                     List<string> workers = new List<string>();
                     HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                     if (!guildOwned && hasOwner) seen.Add(ownerAcct);   // an owner working their own site takes one slot
                     foreach (string w in s.Workers)
-                        if (s.WorkerProgress.TryGetValue(w, out WorkerProgressDto awp) && awp != null && awp.IsActivePawnWorker && seen.Add(w))
-                            workers.Add(w);
+                        if (s.WorkerProgress.TryGetValue(w, out WorkerProgressDto awp) && awp != null && awp.IsActivePawnWorker
+                            && seen.Add(SiteWorkerKey.AccountOf(w)))
+                            workers.Add(SiteWorkerKey.AccountOf(w));
 
-                    PlanShares(SitesConfig.Current.SiteRewardDistributionMode, totalProduced, hasOwner, workers,
+                    PlanShares(SitesConfig.Current.Output.RewardDistributionMode, totalProduced, hasOwner, workers,
                                s.AccessMode == SiteEntry.AccessPublic, s.OwnerTaxPercent,
                                out int ownerShare, out Dictionary<string, int> workerShares);
-                    if (ownerShare <= 0 && workerShares.Count == 0) continue;   // nobody to pay
+                    if (ownerShare <= 0 && workerShares.Count == 0) continue;
+
+                    string siteGuild = OwnerCurrentGuild(s);
+                    if (!string.IsNullOrEmpty(siteGuild))
+                        cyclesByGuild[siteGuild] = (cyclesByGuild.TryGetValue(siteGuild, out int c) ? c : 0) + 1;
 
                     if (ownerShare > 0 && hasOwner)
                         plan.Add(new Delivery
                         {
                             Tile = s.Tile, Recipient = guildOwned ? "" : ownerAcct, Guild = guildOwned ? ownerAcct : "",
+                            GuildIdentity = guildOwned ? GuildBindingOf(s.Tile) : null,
                             Dest = OwnerDestinationFor(s, guildOwned), ItemDefName = s.ItemDefName,
                             Amount = ownerShare, MarketplaceUnitPrice = s.MarketplaceUnitPrice,
                         });
@@ -1140,19 +1289,44 @@ namespace KMHServerAddon.Features.Sites
                     foreach (KeyValuePair<string, int> kv in workerShares)
                     {
                         if (kv.Value <= 0) continue;
-                        string dest = s.WorkerProgress.TryGetValue(kv.Key, out WorkerProgressDto rwp) ? rwp.Destination : SiteEntry.DestTreasury;
-                        plan.Add(new Delivery { Tile = s.Tile, Recipient = kv.Key, Dest = dest, ItemDefName = s.ItemDefName, Amount = kv.Value, MarketplaceUnitPrice = s.MarketplaceUnitPrice });
+                        // kv.Key is an account; SetDestination keeps every row of theirs on one destination.
+                        plan.Add(new Delivery { Tile = s.Tile, Recipient = kv.Key, Dest = WorkerDestinationFor(s, kv.Key),
+                                                ItemDefName = s.ItemDefName, Amount = kv.Value, MarketplaceUnitPrice = s.MarketplaceUnitPrice });
                     }
                 }
             }
-            int roadSegments = ApplyRoadwork(roadWork);
-            if (roadSegments > 0) Roadworks.RoadworksHandler.BroadcastSnapshot();
-            if (plan.Count == 0) return touched;
+            if (plan.Count == 0 && roadWork.Count == 0) return touched;
 
-            // Timers persist before delivery so a crash loses a cycle rather than doubling one; a failed write must roll them back too.
-            if (!SaveToDisk())
+            // Guild tax splits off outside _lock (GuildStore takes its own), taken only in the record that pays the guild.
+            var taxes = new Dictionary<int, (string Guild, string Identity, int Tax)>();
+            for (int i = 0; i < plan.Count; i++)
             {
-                lock (_lock)
+                var guildTax = GuildTaxFor(plan[i]);
+                if (guildTax.Tax > 0) taxes[i] = guildTax;
+            }
+
+            // The cycle's payouts are written down in the SAME save as the timers that produced them: a crash after it
+            // pays them at boot, a crash before it loses the cycle - never both, never twice.
+            string stamp = NextCycleStamp();
+            var owed = new List<OwedDelivery>();
+            var stored = new List<(int Tile, string Def, int Qty)>();
+            lock (_lock)
+            {
+                for (int i = 0; i < plan.Count; i++)
+                    owed.AddRange(OweDeliveryLocked(plan[i], stamp, i, taxes.TryGetValue(i, out var t) ? t : default, stored));
+                // Road work is owed the same way, on its marker after this save, so a crash neither skips nor doubles it.
+                foreach ((int tile, double work) in roadWork)
+                {
+                    string m = _owed.RecordLocked(new Transactions.KmhOwedPayout
+                    {
+                        Marker = $"site:{tile}:{stamp}:road", Route = RouteRoad, Tile = tile, Work = work, Note = $"site#{tile} road work",
+                    });
+                    if (m != null) owed.Add(new OwedDelivery { Marker = m, Tile = tile });
+                }
+                if (!SaveToDisk())
+                {
+                    foreach (OwedDelivery o in owed) _owed.ForgetLocked(o.Marker);
+                    foreach ((int tile, string def, int qty) in stored) UnstoreLocked(tile, def, qty);
                     foreach ((SiteEntry site, long prevTicks, double xpDelta) in advanced)
                     {
                         site.LastRewardUtcTicks = prevTicks;
@@ -1160,31 +1334,46 @@ namespace KMHServerAddon.Features.Sites
                             if (site.WorkerProgress.TryGetValue(w, out WorkerProgressDto wp) && wp != null && wp.IsActivePawnWorker)
                             { wp.Xp -= xpDelta; wp.CyclesCompleted -= 1; }
                     }
-                Diagnostics.ServerLog.Warn($"Sites: could not save the reward timers for {advanced.Count} site(s) - the cycle was skipped rather than paid twice.");
-                return touched;
+                    Diagnostics.ServerLog.Warn($"Sites: could not save the reward timers for {advanced.Count} site(s) - the cycle was skipped rather than paid twice.");
+                    return touched;
+                }
             }
+            AtCyclePhaseForTest?.Invoke("recorded");
+
+            foreach (KeyValuePair<string, int> g in cyclesByGuild)
+                Global.Federation.FederationService.Record("site", g.Key, "", g.Value);
 
             Dictionary<int, double> silverByTile = new Dictionary<int, double>();
-            foreach (Delivery d in plan)
+            long roadRevision = Roadworks.RoadworksStore.Revision;
+            foreach (OwedDelivery o in owed)
             {
-                int net = DeliverPlanned(d);
-                if (net > 0)
-                {
-                    touched.Add(d.Recipient);
-                    if (string.Equals(d.ItemDefName, "Silver", StringComparison.OrdinalIgnoreCase))
-                        silverByTile[d.Tile] = (silverByTile.TryGetValue(d.Tile, out double v) ? v : 0) + net;
-                }
-                // Not retried, so it is surfaced instead of lost quietly.
-                else if (d.Amount > 0)
-                    Diagnostics.ServerLog.Warn($"Sites: reward for {d.Recipient} (x{d.Amount} {d.ItemDefName}, tile {d.Tile}) delivered nothing - skipped this cycle (review; not auto-retried).");
+                Transactions.KmhPayResult res = _owed.Settle(o.Marker, p => PaySite(p, live: true), HoldRefusedLocked);
+                if (res == Transactions.KmhPayResult.Failed) continue;   // kept, and paid by the next sweep or boot
+                if (!string.IsNullOrEmpty(o.Recipient)) touched.Add(o.Recipient);
+                if (o.Silver > 0) silverByTile[o.Tile] = (silverByTile.TryGetValue(o.Tile, out double v) ? v : 0) + o.Silver;
             }
+            if (Roadworks.RoadworksStore.Revision != roadRevision) Roadworks.RoadworksHandler.BroadcastSnapshot();
             if (silverByTile.Count > 0)
+            {
                 lock (_lock)
                     foreach (KeyValuePair<int, double> kv in silverByTile)
                         if (_byTile.TryGetValue(kv.Key, out SiteEntry s)) s.TotalSilverGenerated += kv.Value;
-
-            SaveToDisk();
+                SaveToDisk();
+            }
             return touched;
+        }
+
+        internal static Action<string> AtCyclePhaseForTest;
+
+        private static long _cycleSeq;
+        // Unique per cycle across restarts: the clock does not repeat, and the counter separates two cycles in one tick.
+        private static string NextCycleStamp() => DateTime.UtcNow.Ticks + "." + System.Threading.Interlocked.Increment(ref _cycleSeq);
+
+        private struct OwedDelivery
+        {
+            public string Marker, Recipient;
+            public int Tile;
+            public long Silver;
         }
 
         // Pure, so value conservation can be proved per mode rather than argued.
@@ -1218,7 +1407,6 @@ namespace KMHServerAddon.Features.Sites
                 return;
             }
 
-            // SplitTotal
             int slots = workers.Count + (hasOwner ? 1 : 0);
             if (slots <= 0) return;
             int per = totalProduced / slots;
@@ -1230,7 +1418,7 @@ namespace KMHServerAddon.Features.Sites
                 {
                     int tax = (int)(per * (ownerTaxPercent / 100.0));
                     wShare = Math.Max(per > 0 ? 1 : 0, per - tax);
-                    ownerBonus += per - wShare;             // owner tax
+                    ownerBonus += per - wShare;
                 }
                 workerShares[w] = wShare;
             }
@@ -1244,77 +1432,195 @@ namespace KMHServerAddon.Features.Sites
             public int    Tile;
             public string Recipient;
             public string Guild;
+            // The incarnation the site is bound to, so a vault re-created under the same name is never paid.
+            public string GuildIdentity;
             public string Dest;
             public string ItemDefName;
             public int    Amount;
             public int    MarketplaceUnitPrice;
         }
 
-        // Returns the net amount delivered, where 0 means nothing landed.
-        private static int DeliverPlanned(Delivery d)
-        {
-            if (d.Amount <= 0) return 0;
-            if (!string.IsNullOrEmpty(d.Guild)) return DeliverGuildOwned(d);
-            if (string.IsNullOrEmpty(d.Recipient)) return 0;
+        private const string RouteCaravan = "caravan", RouteMarket = "marketplace", RouteRoad = "roadwork";
 
-            if (string.Equals(d.ItemDefName, "Silver", StringComparison.OrdinalIgnoreCase))
+        // Owed in the caller's lock and save; storage fills in that same save, and each marker is unique per cycle.
+        private static List<OwedDelivery> OweDeliveryLocked(Delivery d, string stamp, int index,
+                                                            (string Guild, string Identity, int Tax) tax,
+                                                            List<(int Tile, string Def, int Qty)> stored)
+        {
+            var outp = new List<OwedDelivery>();
+            if (d.Amount <= 0) return outp;
+            string baseMarker = $"site:{d.Tile}:{stamp}:{index}";
+            bool silver = IsSilver(d.ItemDefName);
+
+            void Owe(Transactions.KmhOwedPayout p, string recipient, long silverUnits)
             {
-                int net = Guilds.GuildStore.ApplyGuildSiteRewardTax(d.Recipient, d.Amount);
-                if (net <= 0) return 0;
-                Items.KmhPayloadEscrow.DeliverSilver(d.Recipient, net, $"site#{d.Tile} reward", "site reward silver could not be credited");
-                return net;
+                if (_owed.RecordLocked(p) != null)
+                    outp.Add(new OwedDelivery { Marker = p.Marker, Recipient = recipient, Tile = d.Tile, Silver = silverUnits });
+            }
+            Dictionary<string, int> Units(int qty) => new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase) { [d.ItemDefName] = qty };
+
+            if (!string.IsNullOrEmpty(d.Guild))
+            {
+                // No marketplace or colony here, or guild goods would land with whichever member configured them.
+                int kept = d.Dest == SiteEntry.DestStorage ? TryStore(d.Tile, d.Guild, d.ItemDefName, d.Amount) : 0;
+                if (kept > 0) stored.Add((d.Tile, d.ItemDefName, kept));
+                int rest = d.Amount - kept;
+                if (rest > 0)
+                    Owe(new Transactions.KmhOwedPayout
+                    {
+                        Marker = baseMarker + ":guild", Guild = d.Guild, GuildIdentity = d.GuildIdentity ?? "",
+                        Silver = silver ? rest : 0, Items = silver ? new Dictionary<string, int>() : Units(rest),
+                        Tile = d.Tile, Note = $"site#{d.Tile} production",
+                    }, d.Guild, silver ? rest : 0);
+                return outp;
+            }
+            if (string.IsNullOrEmpty(d.Recipient)) return outp;
+            string who = d.Recipient.ToLowerInvariant();
+
+            if (silver)
+            {
+                int cut = tax.Tax > 0 && tax.Tax < d.Amount ? tax.Tax : 0;
+                if (cut > 0)
+                    // Back to the player if their guild is gone by the time it is paid: the tax had nobody to go to.
+                    Owe(new Transactions.KmhOwedPayout
+                    {
+                        Marker = baseMarker + ":" + who + ":tax", Guild = tax.Guild, GuildIdentity = tax.Identity, Fallback = d.Recipient,
+                        Silver = cut, Tile = d.Tile, Note = "site reward tax",
+                    }, "", 0);
+                Owe(new Transactions.KmhOwedPayout
+                {
+                    Marker = baseMarker + ":" + who, User = d.Recipient, Silver = d.Amount - cut,
+                    Tile = d.Tile, Note = $"site#{d.Tile} reward",
+                }, d.Recipient, d.Amount - cut);
+                return outp;
             }
 
+            int qty = d.Amount;
+            string route = "", note = $"site#{d.Tile} reward";
             switch (d.Dest)
             {
                 case SiteEntry.DestStorage:
-                {
-                    int stored = TryStore(d.Tile, d.Recipient, d.ItemDefName, d.Amount);
-                    int rest = d.Amount - stored;
                     // Overflow goes to the treasury, so storage is never a way to lose a cycle's output.
-                    if (rest > 0)
-                        Items.KmhPayloadEscrow.DeliverCompact(d.Recipient, d.ItemDefName, rest,
-                            $"site#{d.Tile} reward (storage full)", "site reward delivery failed");
-                    return d.Amount;
-                }
-                case SiteEntry.DestMarketplace:
-                    MarketplaceStore_PostFromSite(d.Recipient, d.ItemDefName, d.Amount, Math.Max(1, d.MarketplaceUnitPrice));
-                    return d.Amount;
-                case SiteEntry.DestCaravan:
-                    if (TryDeliverToColony(d.Recipient, d.ItemDefName, d.Amount)) return d.Amount;
-                    // The sweeper runs this, so an offline recipient is held rather than dropped.
-                    Items.KmhPayloadEscrow.DeliverCompact(d.Recipient, d.ItemDefName, d.Amount,
-                        $"site#{d.Tile} reward (offline -> treasury)", "site reward delivery failed");
-                    return d.Amount;
-                default: // treasury
-                    Items.KmhPayloadEscrow.DeliverCompact(d.Recipient, d.ItemDefName, d.Amount,
-                        $"site#{d.Tile} reward", "site reward delivery failed");
-                    return d.Amount;
+                    int inStore = TryStore(d.Tile, d.Recipient, d.ItemDefName, qty);
+                    if (inStore > 0) stored.Add((d.Tile, d.ItemDefName, inStore));
+                    qty -= inStore;
+                    note = $"site#{d.Tile} reward (storage full)";
+                    break;
+                case SiteEntry.DestMarketplace: route = RouteMarket; break;
+                case SiteEntry.DestCaravan:     route = RouteCaravan; break;
             }
+            if (qty > 0)
+                Owe(new Transactions.KmhOwedPayout
+                {
+                    Marker = baseMarker + ":" + who, User = d.Recipient, Items = Units(qty),
+                    Route = route, Tile = d.Tile, UnitPrice = Math.Max(1, d.MarketplaceUnitPrice), Note = note,
+                }, d.Recipient, 0);
+            return outp;
         }
 
-        // Marketplace and colony are not offered here, or guild goods would land with whichever member configured them.
-        private static int DeliverGuildOwned(Delivery d)
+        // A live settle may send to the colony or list on the market first; a resumed one always pays the vault, so a
+        // colony grant or a listing is never repeated by a replay.
+        private static Transactions.KmhPayResult PaySite(Transactions.KmhOwedPayout p, bool live)
         {
-            if (d.Dest == SiteEntry.DestStorage)
+            if (p == null) return Transactions.KmhPayResult.Paid;
+            // Laid once per record by the roadworks store, which keeps the marker in the save that lays it.
+            if (p.Route == RouteRoad)
+                return Roadworks.RoadworksStore.ApplyWorkOnce(p.Marker, p.Tile, p.Work) ? Transactions.KmhPayResult.Paid : Transactions.KmhPayResult.Failed;
+            if (!string.IsNullOrEmpty(p.Guild) || (p.Route != RouteCaravan && p.Route != RouteMarket) || p.Items == null || p.Items.Count != 1)
+                return Transactions.KmhOwedPayouts.PayToVault(p);
+            string def = ""; int qty = 0;
+            foreach (KeyValuePair<string, int> kv in p.Items) { def = kv.Key; qty = kv.Value; }
+            if (p.Route == RouteCaravan)
             {
-                int stored = TryStore(d.Tile, d.Guild, d.ItemDefName, d.Amount);
-                int rest = d.Amount - stored;
-                if (rest > 0 && !DepositToGuild(d, rest)) return stored;   // full storage must not silently drop the rest
-                return d.Amount;
+                // Already minted for this record: the colony delivery owns it, owed until the colony acks it.
+                if (Features.Delivery.DeliveryStore.IdForSource(p.Marker) != null) return Transactions.KmhPayResult.Paid;
+                if (live && TryOweToColony(p.User, def, qty, p.Marker)) return Transactions.KmhPayResult.Paid;
+                // Offline, or resumed: the vault holds it.
+                return Transactions.KmhOwedPayouts.PayToVault(p);
             }
-            return DepositToGuild(d, d.Amount) ? d.Amount : 0;
+            Transactions.KmhPayResult res = Transactions.KmhOwedPayouts.PayToVault(p);
+            // Deposited first, so a refused listing leaves the goods banked rather than lost.
+            if (res == Transactions.KmhPayResult.Paid && live)
+                Marketplace.MarketplaceStore.Post(p.User, def, qty, Math.Max(1, p.UnitPrice), "public", 0);
+            return res;
         }
 
-        private static bool DepositToGuild(Delivery d, int amount)
+        // Under _lock: a guild payout whose guild is gone (or whose name now belongs to another) is kept in the
+        // site's storage, in the write that clears the record. False keeps the record when the site itself is gone.
+        private static bool HoldRefusedLocked(Transactions.KmhOwedPayout p)
         {
-            bool ok = string.Equals(d.ItemDefName, "Silver", StringComparison.OrdinalIgnoreCase)
-                ? Treasury.TreasuryStore.DepositGuildSilver(d.Guild, amount, d.Guild, note: $"site#{d.Tile} production")
-                : Treasury.TreasuryStore.DepositGuildItem(d.Guild, d.ItemDefName, amount, note: $"site#{d.Tile} production");
-            if (!ok)
-                Diagnostics.ServerLog.Warn($"Sites: guild '{d.Guild}' could not be credited {amount}x {d.ItemDefName} from site#{d.Tile} - production held at the site instead.");
-            return ok;
+            if (p == null || p.Tile < 0) return false;
+            var put = new List<KeyValuePair<string, int>>();
+            if (p.Silver > 0) put.Add(new KeyValuePair<string, int>("Silver", (int)Math.Min(int.MaxValue, p.Silver)));
+            if (p.Items != null) foreach (KeyValuePair<string, int> kv in p.Items) if (kv.Value > 0) put.Add(kv);
+            if (!_byTile.TryGetValue(p.Tile, out SiteEntry s) || s == null)
+            {
+                Diagnostics.ServerLog.Error($"Sites: {p.Note} owed to guild '{p.Guild}', which is gone, and site#{p.Tile} is gone too - kept as {p.Marker} for 'kmh orphans'.");
+                return false;
+            }
+            foreach (KeyValuePair<string, int> kv in put) RestoreStored(p.Tile, kv.Key, kv.Value, logged: false);
+            Diagnostics.ServerLog.Warn($"Sites: guild '{p.Guild}' can no longer be paid {p.Note} - kept in site#{p.Tile}'s storage.");
+            return true;
         }
+
+        // The undo of a TryStore whose save failed. Caller holds _lock.
+        private static void UnstoreLocked(int tile, string def, int qty)
+        {
+            if (!_byTile.TryGetValue(tile, out SiteEntry s) || s?.StoredItems == null || !s.StoredItems.TryGetValue(def, out int have)) return;
+            if (have - qty <= 0) s.StoredItems.Remove(def); else s.StoredItems[def] = have - qty;
+        }
+
+        // A member's silver share only, and none when the guild has no live identity to pay.
+        private static (string Guild, string Identity, int Tax) GuildTaxFor(Delivery d)
+        {
+            if (!string.IsNullOrEmpty(d.Guild) || string.IsNullOrEmpty(d.Recipient) || !IsSilver(d.ItemDefName)) return default;
+            (string guild, int tax) = Guilds.GuildStore.SiteRewardTaxFor(d.Recipient, d.Amount);
+            string gid = Guilds.GuildIdentity.Of(guild);
+            return tax > 0 && gid != null ? (guild, gid, tax) : default;
+        }
+
+        private static int DeliverNow(Delivery d)
+        {
+            var tax = GuildTaxFor(d);
+            var owed = new List<OwedDelivery>();
+            var stored = new List<(int Tile, string Def, int Qty)>();
+            lock (_lock)
+            {
+                owed = OweDeliveryLocked(d, NextCycleStamp(), 0, tax, stored);
+                if (!SaveToDisk())
+                {
+                    foreach (OwedDelivery o in owed) _owed.ForgetLocked(o.Marker);
+                    foreach ((int tile, string def, int qty) in stored) UnstoreLocked(tile, def, qty);
+                    return 0;
+                }
+            }
+            foreach (OwedDelivery o in owed) _owed.Settle(o.Marker, p => PaySite(p, live: true), HoldRefusedLocked);
+            return d.Amount;
+        }
+
+        internal static int DeliverForTest(string recipient, int tile, string itemDefName, int amount)
+            => DeliverNow(new Delivery { Recipient = recipient, Tile = tile, ItemDefName = itemDefName, Amount = amount, Dest = SiteEntry.DestCaravan });
+
+        private static bool IsSilver(string def) => string.Equals(def, "Silver", StringComparison.OrdinalIgnoreCase);
+
+        internal static int DeliverGuildOwnedForTest(int tile, string guild, string def, int amount, string dest)
+            => DeliverNow(new Delivery { Tile = tile, Guild = guild, GuildIdentity = GuildBindingOf(tile), ItemDefName = def, Amount = amount, Dest = dest });
+
+        public static void RecoverOnBoot()
+        {
+            (int paid, int left) = _owed.Resume(p => PaySite(p, live: false), HoldRefusedLocked);
+            if (paid > 0 || left > 0) Diagnostics.ServerLog.Warn($"Sites: recovery paid {paid} interrupted payout(s), {left} still owed.");
+        }
+
+        public static int RetryOwed() => _owed.Count == 0 ? 0 : _owed.Resume(p => PaySite(p, live: false), HoldRefusedLocked, quiet: true).paid;
+        internal static int OwedCount => _owed.Count;
+
+        // The caller saves: a reset writes this down as one of its steps.
+        internal static int DropOwedFor(string user) { lock (_lock) return _owed.DropForLocked(user); }
+
+        internal static int OwedCountForTest => _owed.Count;
+        internal static (long Silver, int Units) UnpaidOwedForTest(string user) => _owed.UnpaidTotals(user);
+        internal static Action<string> AtPayoutPhaseForTest { set => _owed.AtPhaseForTest = value; }
 
         private static string OwnerDestinationFor(SiteEntry s, bool guildOwned)
         {
@@ -1349,13 +1655,15 @@ namespace KMHServerAddon.Features.Sites
             }
         }
 
-        // Goods go to the owning account, not the member who pressed the button.
+        // Goods go to the owning account. The storage debit and what it owes are ONE save under _lock, so a failed save
+        // leaves storage as it was; a guild's goods are one record per kind, so each lands - or goes back - whole.
         public static (bool ok, string reason) CollectStorage(string user, int tile)
         {
             if (string.IsNullOrEmpty(user)) return (false, "No caller.");
-            var taken = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            var markers = new List<string>();
             bool guildOwned;
             string ownerAcct;
+            int units = 0;
             lock (_lock)
             {
                 if (!_byTile.TryGetValue(tile, out SiteEntry s) || s == null) return (false, "No site on that tile.");
@@ -1364,45 +1672,72 @@ namespace KMHServerAddon.Features.Sites
                 guildOwned = SiteOwnership.IsGuildOwned(s);
                 ownerAcct  = SiteOwnership.ProductionAccount(s);
                 if (string.IsNullOrEmpty(ownerAcct)) return (false, "This site has no owner to collect for.");
+                var taken = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
                 foreach (KeyValuePair<string, int> kv in s.StoredItems) if (kv.Value > 0) taken[kv.Key] = kv.Value;
-                s.StoredItems.Clear();
-            }
+                if (taken.Count == 0) return (false, "Nothing is stored here.");
 
-            int units = 0;
-            foreach (KeyValuePair<string, int> kv in taken)
-            {
-                units += kv.Value;
+                string baseMarker = $"site:{tile}:collect:{NextCycleStamp()}";
                 if (guildOwned)
                 {
-                    // Put it back rather than lose it if the vault refuses.
-                    if (!Treasury.TreasuryStore.DepositGuildItem(ownerAcct, kv.Key, kv.Value, $"site#{tile} storage collected"))
-                        RestoreStored(tile, kv.Key, kv.Value);
+                    string identity = GuildBindingOf(tile) ?? "";
+                    foreach (KeyValuePair<string, int> kv in taken)
+                        markers.Add(_owed.RecordLocked(new Transactions.KmhOwedPayout
+                        {
+                            Marker = baseMarker + ":" + kv.Key.ToLowerInvariant(), Guild = ownerAcct, GuildIdentity = identity,
+                            Silver = IsSilver(kv.Key) ? kv.Value : 0,
+                            Items = IsSilver(kv.Key) ? new Dictionary<string, int>()
+                                                     : new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase) { [kv.Key] = kv.Value },
+                            Tile = tile, Note = $"site#{tile} storage collected",
+                        }));
                 }
                 else
                 {
-                    Items.KmhPayloadEscrow.DeliverCompact(ownerAcct, kv.Key, kv.Value,
-                        $"site#{tile} storage collected", "site storage collection failed");
+                    var items = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                    long silver = 0;
+                    foreach (KeyValuePair<string, int> kv in taken) { if (IsSilver(kv.Key)) silver += kv.Value; else items[kv.Key] = kv.Value; }
+                    markers.Add(_owed.RecordLocked(new Transactions.KmhOwedPayout
+                    {
+                        Marker = baseMarker, User = ownerAcct, Silver = silver, Items = items,
+                        Tile = tile, Note = $"site#{tile} storage collected",
+                    }));
+                }
+                markers.RemoveAll(m => m == null);
+                foreach (int q in taken.Values) units += q;
+
+                var before = new Dictionary<string, int>(s.StoredItems, StringComparer.OrdinalIgnoreCase);
+                s.StoredItems.Clear();
+                if (!SaveToDisk())
+                {
+                    foreach (string m in markers) _owed.ForgetLocked(m);
+                    s.StoredItems = before;
+                    return (false, "The server couldn't save that - nothing was collected. Try again shortly.");
                 }
             }
-            SaveToDisk();
+            AtCollectPhaseForTest?.Invoke("recorded");
+            foreach (string m in markers) _owed.Settle(m, p => PaySite(p, live: true), HoldRefusedLocked);
             RaiseSite(tile, user, "storage_collected");
             return (true, guildOwned
                 ? $"Collected {units} item(s) from site storage into the {ownerAcct} vault."
                 : $"Collected {units} item(s) from site storage.");
         }
 
-        private static void RestoreStored(int tile, string defName, int qty)
+        internal static Action<string> AtCollectPhaseForTest;
+
+        private static bool RestoreStored(int tile, string defName, int qty, bool logged = true)
         {
             lock (_lock)
             {
-                if (!_byTile.TryGetValue(tile, out SiteEntry s) || s == null || s.StoredItems == null) return;
+                if (!_byTile.TryGetValue(tile, out SiteEntry s) || s == null) return false;
+                if (s.StoredItems == null) s.StoredItems = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
                 s.StoredItems.TryGetValue(defName, out int have);
                 s.StoredItems[defName] = Util.KmhSafe.AddSaturating(have, qty);
             }
-            Diagnostics.ServerLog.Warn($"Sites: site#{tile} storage collection could not be credited - {qty}x {defName} returned to storage.");
+            if (logged)
+                Diagnostics.ServerLog.Warn($"Sites: site#{tile} storage collection could not be credited - {qty}x {defName} returned to storage.");
+            return true;
         }
 
-        // Off-map wealth a button press from the player, so it must not dodge raid scaling.
+        // Off-map wealth one button press from the player, so it must not dodge raid scaling.
         public static long StoredValueFor(string username)
         {
             if (string.IsNullOrEmpty(username)) return 0;
@@ -1418,43 +1753,58 @@ namespace KMHServerAddon.Features.Sites
             return total;
         }
 
-        // False when the recipient is offline, so the caller can fall back to the treasury.
-        private static bool TryDeliverToColony(string username, string defName, int amount)
+        internal static Func<string, ServerClient> OnlineClientForTest;
+
+        private static ServerClient OnlineClient(string username)
+        {
+            if (OnlineClientForTest != null) return OnlineClientForTest(username);
+            foreach (ServerClient c in Network.ServerClients.Keys)
+                if (c?.IsVerified == true && c.Listener != null
+                    && string.Equals(c.GetData<UserFile>()?.Username, username, StringComparison.OrdinalIgnoreCase)) return c;
+            return null;
+        }
+
+        // Owed until the colony acks it, like a withdrawal: sent bare, a dropped link or failed drop would lose it.
+        private static bool TryOweToColony(string username, string defName, int amount, string sourceMarker)
         {
             if (string.IsNullOrEmpty(username) || amount <= 0) return false;
-            foreach (ServerClient c in Network.ServerClients.Keys)
-            {
-                if (c?.IsVerified != true || c.Listener == null) continue;
-                if (!string.Equals(c.GetData<UserFile>()?.Username, username, StringComparison.OrdinalIgnoreCase)) continue;
-                return KmhRouter.SendTo(c, KmhProtocol.Kind.TreasuryGrant,
-                    new { kind = "item", def_name = defName, amount });
-            }
-            return false;
+            ServerClient c = OnlineClient(username);
+            if (c == null) return false;
+            // Minted once per owed record: a replay finds the delivery it already made instead of making another.
+            Features.Delivery.OutboundDelivery owed = Features.Delivery.DeliveryStore.OweItemsOnce(username,
+                new Dictionary<string, int> { { defName, amount } }, sourceMarker);
+            if (owed == null) return false;   // could not be written down, so the treasury takes it instead
+            Features.Delivery.DeliveryHandler.Send(c, owed);
+            return true;
         }
 
-        private static void MarketplaceStore_PostFromSite(string seller, string defName, int qty, int unitPrice)
-        {
-            // Deposited first so a refused Post leaves the goods banked rather than lost.
-            Items.KmhPayloadEscrow.DeliverCompact(seller, defName, qty, "site production (to list)", "site production deposit failed");
-            Marketplace.MarketplaceStore.Post(seller, defName, qty, unitPrice, "public", 0);
-        }
+        private const string OfficerOnly = "Only a guild officer or above can do that to a guild site.";
 
-        // CanManage is resolved outside our lock because it reads GuildStore, which holds its own.
-        internal static bool CanManageTile(int tile, string username)
+        internal static bool CanAdministerTile(int tile, string username)
+            => ProbeTile(tile, out SiteEntry probe) && SiteOwnership.CanAdminister(probe, username);
+
+        private static bool ProbeTile(int tile, out SiteEntry probe)
         {
-            if (string.IsNullOrEmpty(username)) return false;
-            SiteEntry probe;
+            probe = null;
             lock (_lock)
             {
                 if (!_byTile.TryGetValue(tile, out SiteEntry s) || s == null) return false;
-                probe = new SiteEntry
-                {
-                    Tile = s.Tile, OwnerKind = s.OwnerKind, OwnerUsername = s.OwnerUsername,
-                    ControllingGuild = s.ControllingGuild,
-                };
+                probe = ProbeOf(s);
             }
-            return SiteOwnership.CanManage(probe, username);
+            return true;
         }
+
+        // Only the fields the ownership rules read, so they can run outside _lock.
+        private static SiteEntry ProbeOf(SiteEntry s) => new SiteEntry
+        {
+            Tile = s.Tile, OwnerKind = s.OwnerKind, OwnerUsername = s.OwnerUsername,
+            ControllingGuild = s.ControllingGuild,
+        };
+
+        // CanManage is resolved outside _lock because it reads GuildStore, which takes its own.
+        internal static bool CanManageTile(int tile, string username)
+            => !string.IsNullOrEmpty(username)
+               && ProbeTile(tile, out SiteEntry probe) && SiteOwnership.CanManage(probe, username);
 
         public static bool TryGetSiteFacts(int tile, string username, out bool canManage,
                                            out string archetype, out int tier)
@@ -1466,11 +1816,7 @@ namespace KMHServerAddon.Features.Sites
                 if (!_byTile.TryGetValue(tile, out SiteEntry s) || s == null) return false;
                 archetype = SiteArchetypes.Normalize(s.Archetype);
                 tier = s.OutputTier;
-                probe = new SiteEntry
-                {
-                    Tile = s.Tile, OwnerKind = s.OwnerKind, OwnerUsername = s.OwnerUsername,
-                    ControllingGuild = s.ControllingGuild,
-                };
+                probe = ProbeOf(s);
             }
             canManage = SiteOwnership.CanManage(probe, username);
             return true;
@@ -1490,7 +1836,7 @@ namespace KMHServerAddon.Features.Sites
                 return _byTile.TryGetValue(tile, out SiteEntry s) && s != null ? NameOf(s) : $"tile {tile}";
         }
 
-        // Every tile KMH already occupies. The Director excludes these so it never has to reason about geography.
+        // The Director excludes these so it never has to reason about geography.
         public static List<int> AllOccupiedTiles()
         {
             var outp = new List<int>();
@@ -1503,11 +1849,11 @@ namespace KMHServerAddon.Features.Sites
             SiteSnapshot snap = new SiteSnapshot
             {
                 AllowCustomSites = SitesConfig.Current.AllowCustomSites,
-                PriceMultiplier  = SitesConfig.Current.CustomSitePriceMultiplier,
-                MaxRewardAmount  = SitesConfig.Current.CustomSiteMaxRewardAmount,
+                PriceMultiplier  = SitesConfig.Current.Costs.PriceMultiplier,
+                MaxRewardAmount  = SitesConfig.Current.Output.CustomMaxRewardAmount,
 
-                BuildingCostSilver  = Math.Max(0, SitesConfig.Current.SiteBuildingCostSilver),
-                RepairCostPerPoint  = Math.Max(0, SitesConfig.Current.SiteRepairCostPerPoint),
+                BuildingCostSilver  = Math.Max(0, SitesConfig.Current.Costs.BuildingSilver),
+                RepairCostPerPoint  = Math.Max(0, SitesConfig.Current.Costs.RepairPerPoint),
                 StoragePerBuilding  = SiteBuildings.UnitsPerStorage,
                 MaxStorageUnits     = SiteBuildings.MaxStorageUnits,
                 WorkersPerHousing   = SiteBuildings.WorkersPerHousing,
@@ -1524,8 +1870,7 @@ namespace KMHServerAddon.Features.Sites
                 snap.Revision = Util.KmhSnapshotRevision.Next();
                 foreach (SiteEntry s in _byTile.Values)
                 {
-                    bool mine = SiteOwnership.CanManage(s, username)
-                                || s.Workers.Contains(username, StringComparer.OrdinalIgnoreCase);
+                    bool mine = SiteOwnership.CanManage(s, username) || WorksLocked(s, username);
                     if (!mine && !CanAccess(s, username, callerGuild)) continue;
                     SiteEntry copy = Copy(s);
                     if (SiteOutposts.NormalizeState(copy.OutpostState) == SiteEntry.OutpostClaimable) claimable.Add(copy);
@@ -1555,19 +1900,19 @@ namespace KMHServerAddon.Features.Sites
             SitesConfig cfg = SitesConfig.Current;
             Dto.SiteCatalogSnapshot snap = new Dto.SiteCatalogSnapshot
             {
-                TiersEnabled    = cfg.UseSiteOutputTiers,
-                MaxAllowedTier  = cfg.MaxAllowedSiteOutputTier,
-                Tier4Enabled    = cfg.OutputTiers != null && cfg.OutputTiers.Length >= 4 && cfg.OutputTiers[3].Enabled,
+                TiersEnabled    = cfg.Output.UseTiers,
+                MaxAllowedTier  = cfg.Output.MaxAllowedTier,
+                Tier4Enabled    = cfg.Output.Tiers != null && cfg.Output.Tiers.Length >= 4 && cfg.Output.Tiers[3].Enabled,
                 IncludesBlocked = includeBlocked,
                 // Without a catalog everything classifies Unknown, so a picker where nothing is eligible reads as broken.
-                ArchetypesReady = cfg.ArchetypesEnabled && SiteCatalogStore.HasCatalog,
-                // What the server actually ADOPTED - a client latching on a successful send believed a catalog a refused push never applied.
+                ArchetypesReady = cfg.Archetypes.Enabled && SiteCatalogStore.HasCatalog,
+                // What the server ADOPTED, not what a client sent: a refused push never applies.
                 CatalogFingerprint = SiteCatalogStore.Fingerprint ?? "",
             };
             if (snap.ArchetypesReady)
                 foreach (SiteArchetypeDef a in SiteArchetypeRegistry.All)
                 {
-                    if (a.IsCustom && !cfg.AllowCustomArchetype) continue;
+                    if (a.IsCustom && !cfg.Archetypes.AllowCustom) continue;
                     snap.Archetypes.Add(new Dto.SiteArchetypeInfo
                     {
                         Id = a.Id, DisplayName = a.DisplayName, Description = a.Description,
@@ -1579,7 +1924,6 @@ namespace KMHServerAddon.Features.Sites
             int blocked = 0;
             System.Collections.Generic.List<(string DefName, string Label, long Value)> source =
                 Features.ItemLabels.ItemLabelCache.AllForCatalog();
-            // The sparse flag lets the client say "still loading" rather than showing an empty picker.
             snap.CatalogSparse = source.Count < 12;
             if (snap.CatalogSparse)
             {
@@ -1604,7 +1948,7 @@ namespace KMHServerAddon.Features.Sites
                     });
                     continue;
                 }
-                int maxAmount   = Math.Max(1, Math.Min(cfg.CustomSiteMaxRewardAmount, cls.MaxAmount));
+                int maxAmount   = Math.Max(1, Math.Min(cfg.Output.CustomMaxRewardAmount, cls.MaxAmount));
                 int estCost     = BuildCost(username, value, maxAmount, cls.CostMultiplier);
                 int estCycleMin = (int)Math.Round(CycleTimeMsForValue(value, maxAmount) * cls.CycleMultiplier / 60000.0);
                 // Shipped per item so the client filters on it: a client-side family test would disagree with Roadworks.
@@ -1623,7 +1967,6 @@ namespace KMHServerAddon.Features.Sites
             return snap;
         }
 
-        // Read-only copies for the SDK ISitesApi (production fields filled).
         public static List<SiteEntry> AllForApi()
         {
             lock (_lock)
@@ -1668,7 +2011,6 @@ namespace KMHServerAddon.Features.Sites
             return c;
         }
 
-
         private static bool CanAccess(SiteEntry s, string username)
             => CanAccess(s, username, Guilds.GuildStore.CurrentGuildOf(username) ?? "");
 
@@ -1709,7 +2051,6 @@ namespace KMHServerAddon.Features.Sites
             }
         }
 
-        // Rough item->skill mapping so the skill shown to players matches the item.
         public static string DetermineRelevantSkill(string itemDefName)
         {
             if (string.IsNullOrEmpty(itemDefName)) return "Crafting";
@@ -1759,9 +2100,14 @@ namespace KMHServerAddon.Features.Sites
             if (JsonFileStore.TryLoad(KmhDataPaths.SitesFile, out PersistedState state) && state?.Sites != null)
             {
                 int blocked = 0, legacyWorkers = 0, reskilled = 0;
+                int legacy;
                 lock (_lock)
                 {
                     _byTile.Clear();
+                    _guildOwner.Clear();
+                    _owed.LoadLocked(state.Owed);
+                    _purchaseTx.Clear();
+                    if (state.PurchaseTx != null) foreach (KeyValuePair<string, long> kv in state.PurchaseTx) _purchaseTx[kv.Key] = kv.Value;
                     foreach (SiteEntry s in state.Sites)
                     {
                         if (s == null || s.Tile < 0) continue;
@@ -1777,7 +2123,7 @@ namespace KMHServerAddon.Features.Sites
                             if (string.IsNullOrEmpty(s.RelevantSkillDef)) s.RelevantSkillDef = cls.RelevantSkill;
                         }
 
-                        // Migration corrects the work skill only, since a site training the wrong one is invisible to its owner.
+                        // Only the work skill is migrated: a site training the wrong one is invisible to its owner.
                         string classified = SiteCatalogStore.SkillOf(s.ItemDefName);
                         if (!string.IsNullOrEmpty(classified))
                         {
@@ -1790,7 +2136,7 @@ namespace KMHServerAddon.Features.Sites
                             }
                         }
                         // Paused rather than left producing a now-illegal output; an unconfigured outpost is not blocked.
-                        if (!cls.IsAllowed && SitesConfig.Current.UseSiteOutputTiers && !IsUnconfiguredOutpost(s))
+                        if (!cls.IsAllowed && SitesConfig.Current.Output.UseTiers && !IsUnconfiguredOutpost(s))
                         {
                             s.BlockedOutput = true; blocked++;
                             Diagnostics.ServerLog.Warn($"Sites: PAUSED legacy site tile {s.Tile} ({s.OwnerUsername}) - output '{s.ItemDefName}' ('{label}') is now blocked ({cls.BlockReason}). Admin review needed.");
@@ -1798,7 +2144,7 @@ namespace KMHServerAddon.Features.Sites
                         else s.BlockedOutput = false;
 
                         // Kept rather than deleted, so an old account-worker can be replaced by a real pawn.
-                        if (SitesConfig.Current.RequirePawnSiteWorkers)
+                        if (SitesConfig.Current.Workers.RequirePawns)
                             foreach (WorkerProgressDto wp in s.WorkerProgress.Values)
                                 if (wp != null && wp.PawnLoadId <= 0 && !wp.Legacy)
                                 {
@@ -1808,13 +2154,24 @@ namespace KMHServerAddon.Features.Sites
                                 }
                         _byTile[s.Tile] = s;
                     }
+                    // Guilds load first, so their identities are published before any site is judged against them.
+                    legacy = MarkLegacyGuildSitesLocked(state.GuildOwners);
                 }
+                // Written now, or a guild re-created under the orphaned name could claim the site next boot.
+                if (legacy > 0 && !SaveToDisk())
+                    Diagnostics.ServerLog.Error($"Sites: {legacy} paused legacy guild site(s) could not be saved - they are re-derived on the next boot.");
                 LegacyBlockedSiteCount = blocked;
                 LegacyWorkerCount = legacyWorkers;
-                Diagnostics.ServerLog.Info($"Sites: loaded {state.Sites.Count} site(s) from disk{(blocked > 0 ? $" ({blocked} paused - output now blocked)" : "")}{(legacyWorkers > 0 ? $" ({legacyWorkers} legacy account-worker(s) disabled - reassign real pawns)" : "")}{(reskilled > 0 ? $" ({reskilled} re-skilled from the classified catalog)" : "")}");
+                Diagnostics.ServerLog.Diag($"Sites: loaded {state.Sites.Count} site(s) from disk{(blocked > 0 ? $" ({blocked} paused - output now blocked)" : "")}{(legacyWorkers > 0 ? $" ({legacyWorkers} legacy account-worker(s) disabled - reassign real pawns)" : "")}{(reskilled > 0 ? $" ({reskilled} re-skilled from the classified catalog)" : "")}");
+                if (MigratedWorkerKeys > 0)
+                    Diagnostics.ServerLog.Info($"Sites: re-keyed {MigratedWorkerKeys} site worker(s) from account to colonist - each keeps its XP, cycles and destination, and players can now assign more than one colonist per site.");
+                if (UnmigratedLegacyWorkers > 0)
+                    Diagnostics.ServerLog.Info($"Sites: {UnmigratedLegacyWorkers} worker row(s) named no colonist and stayed account-keyed - they re-key themselves when that player assigns a real pawn.");
             }
         }
 
+        internal static int MigratedWorkerKeys { get; private set; }
+        internal static int UnmigratedLegacyWorkers { get; private set; }
         // Deserialization can lose the comparer, and a site whose workers stop matching quietly pauses.
         internal static void NormalizeKeys(SiteEntry s)
         {
@@ -1829,8 +2186,48 @@ namespace KMHServerAddon.Features.Sites
                     wp[kv.Key] = kv.Value;
                 }
             s.WorkerProgress = wp;
+            MigrateWorkerKeys(s);
 
-            if (s.StoredItems == null) return;
+            if (s.StoredItems != null) NormalizeStored(s);
+        }
+
+        // Re-keys an account-keyed row onto its own pawn, keeping its progress. A row naming no pawn keeps the
+        // account key: an invented id could collide with a real colonist and hand someone else's work away.
+        internal static void MigrateWorkerKeys(SiteEntry s)
+        {
+            if (s?.WorkerProgress == null) return;
+            var moved = new Dictionary<string, WorkerProgressDto>(StringComparer.OrdinalIgnoreCase);
+            var rename = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (KeyValuePair<string, WorkerProgressDto> kv in s.WorkerProgress)
+            {
+                WorkerProgressDto w = kv.Value;
+                if (string.IsNullOrEmpty(w.Username)) w.Username = SiteWorkerKey.AccountOf(kv.Key);
+
+                string want = SiteWorkerKey.IsPerPawn(kv.Key) ? kv.Key : SiteWorkerKey.For(w.Username, w.PawnLoadId);
+                if (!string.Equals(want, kv.Key, StringComparison.OrdinalIgnoreCase))
+                {
+                    // A clash means a corrupt file; keep the row rather than overwrite a stranger's progress.
+                    if (moved.ContainsKey(want) || s.WorkerProgress.ContainsKey(want))
+                    { UnmigratedLegacyWorkers++; moved[kv.Key] = w; continue; }
+                    rename[kv.Key] = want;
+                    MigratedWorkerKeys++;
+                    moved[want] = w;
+                    continue;
+                }
+                if (!SiteWorkerKey.IsPerPawn(want) && w.PawnLoadId <= 0) UnmigratedLegacyWorkers++;
+                moved[kv.Key] = w;
+            }
+
+            if (rename.Count == 0) { s.WorkerProgress = moved; return; }
+            s.WorkerProgress = moved;
+            if (s.Workers == null) return;
+            for (int i = 0; i < s.Workers.Count; i++)
+                if (rename.TryGetValue(s.Workers[i] ?? "", out string to)) s.Workers[i] = to;
+        }
+
+        private static void NormalizeStored(SiteEntry s)
+        {
             var stored = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             foreach (KeyValuePair<string, int> kv in s.StoredItems)
             {
@@ -1841,9 +2238,69 @@ namespace KMHServerAddon.Features.Sites
             s.StoredItems = stored;
         }
 
+        // Skips Build so a worker test does not measure the build cost path instead.
+        internal static int InsertSiteForTest(int tile, string owner, int maxWorkers)
+            => InsertSiteForTest(tile, owner, maxWorkers, SiteArchetypes.Quarry, 1);
+
+        // Roadworks reads archetype and tier through TryGetSiteFacts, so a roadworks test sets both directly.
+        internal static int InsertSiteForTest(int tile, string owner, int maxWorkers, string archetype, int tier)
+        {
+            SiteEntry site = new SiteEntry
+            {
+                Tile = tile,
+                OwnerUsername = owner,
+                ItemDefName = "Steel",
+                BaseAmountPerCycle = 1,
+                MarketValuePerUnit = 1f,
+                BaseCycleTimeMs = 60000,
+                AccessMode = SiteEntry.AccessPublic,
+                MaxWorkers = maxWorkers,
+                Archetype = SiteArchetypes.Normalize(archetype),
+                OutputTier = tier,
+                LastRewardUtcTicks = DateTime.UtcNow.Ticks,
+            };
+            lock (_lock) _byTile[tile] = site;
+            return tile;
+        }
+
+        internal static void RemoveSiteForTest(int tile)
+        {
+            lock (_lock) _byTile.Remove(tile);
+        }
+
+        internal static SiteEntry SiteForTest(int tile)
+        {
+            lock (_lock) return _byTile.TryGetValue(tile, out SiteEntry s) ? s : null;
+        }
+
+        internal static List<string> WorkerKeysForTest(int tile)
+        {
+            lock (_lock)
+                return _byTile.TryGetValue(tile, out SiteEntry s) ? new List<string>(s.Workers) : new List<string>();
+        }
+
+        // Writes the shape a pre-migration save left behind: a worker keyed on the account with no pawn.
+        internal static void InsertLegacyWorkerForTest(int tile, string username)
+        {
+            lock (_lock)
+            {
+                if (!_byTile.TryGetValue(tile, out SiteEntry s)) return;
+                string key = SiteWorkerKey.For(username, -1);
+                if (!s.Workers.Contains(key)) s.Workers.Add(key);
+                s.WorkerProgress[key] = new WorkerProgressDto
+                {
+                    JoinedUtcTicks = DateTime.UtcNow.Ticks,
+                    Destination = SiteEntry.DestTreasury,
+                    Username = username,
+                    Legacy = true,
+                };
+            }
+        }
+
         public static void ClearForNewSeason()
         {
-            lock (_lock) { _byTile.Clear(); }
+            // A season wipe empties every vault these would pay into, so they go with it.
+            lock (_lock) { _byTile.Clear(); _owed.ClearLocked(); _purchaseTx.Clear(); }
             SaveToDisk();
         }
 
@@ -1876,29 +2333,169 @@ namespace KMHServerAddon.Features.Sites
             lock (_lock)
                 foreach (SiteEntry s in _byTile.Values)
                 {
-                    bool here = (s.Workers != null && s.Workers.Any(w => string.Equals(w, user, StringComparison.OrdinalIgnoreCase)))
-                             || (s.WorkerProgress != null && s.WorkerProgress.ContainsKey(user));
+                    // All of theirs: after a save reset none of those pawns exist, so a leftover row fakes staffing.
+                    bool here = (s.Workers != null && s.Workers.Any(w => SiteWorkerKey.IsOwnedBy(w, user)))
+                             || (s.WorkerProgress != null && s.WorkerProgress.Keys.Any(k => SiteWorkerKey.IsOwnedBy(k, user)));
                     if (!here) continue;
                     removed++;
                     if (dryRun) continue;
-                    s.Workers?.RemoveAll(w => string.Equals(w, user, StringComparison.OrdinalIgnoreCase));
-                    s.WorkerProgress?.Remove(user);
+                    s.Workers?.RemoveAll(w => SiteWorkerKey.IsOwnedBy(w, user));
+                    if (s.WorkerProgress != null)
+                        foreach (string k in s.WorkerProgress.Keys.Where(k => SiteWorkerKey.IsOwnedBy(k, user)).ToList())
+                            s.WorkerProgress.Remove(k);
                 }
             if (removed > 0 && !dryRun) SaveToDisk();
             return removed;
         }
 
-        // False means in-memory only; reward timers live here, so a cycle the disk never took is paid again from the restored timers.
+        // False means in-memory only; reward timers live here, so a cycle the disk never took is paid again on restore.
         public static bool SaveToDisk()
         {
             PersistedState state = new PersistedState();
-            lock (_lock) { state.Sites = new List<SiteEntry>(_byTile.Values); }
-            return JsonFileStore.Save(KmhDataPaths.SitesFile, state);
+            long seq;
+            lock (_lock)
+            {
+                state.Sites = KmhDeepCopy.OfList(_byTile.Values);
+                // Only bindings of sites that are still guild-owned, so a removed site's binding never outlives it.
+                foreach (KeyValuePair<int, string> kv in _guildOwner)
+                {
+                    if (_byTile.TryGetValue(kv.Key, out SiteEntry s) && SiteOwnership.IsGuildOwned(s)) state.GuildOwners[kv.Key] = kv.Value;
+                    else _guildOwner.TryRemove(kv.Key, out _);
+                }
+                state.Owed = _owed.SnapshotLocked();
+                // Every row settles or refunds by the first boot after it, so a week covers it many times over.
+                long cutoff = DateTime.UtcNow.Ticks - PurchaseEvidenceTtl;
+                foreach (string stale in _purchaseTx.Where(kv => kv.Value < cutoff).Select(kv => kv.Key).ToList()) _purchaseTx.Remove(stale);
+                state.PurchaseTx = new Dictionary<string, long>(_purchaseTx, StringComparer.Ordinal);
+                seq = JsonFileStore.NextSequence();
+            }
+            return JsonFileStore.Save(KmhDataPaths.SitesFile, state, seq);
         }
 
         private sealed class PersistedState
         {
             public List<SiteEntry> Sites { get; set; } = new List<SiteEntry>();
+            // Absent in a file written before guild sites were bound; the load binds those once, from evidence.
+            public Dictionary<int, string> GuildOwners { get; set; } = new Dictionary<int, string>();
+            // Absent in older files, which simply had nothing in flight.
+            public List<Transactions.KmhOwedPayout> Owed { get; set; } = new List<Transactions.KmhOwedPayout>();
+            public Dictionary<string, long> PurchaseTx { get; set; } = new Dictionary<string, long>();
+        }
+
+        // A pre-binding site naming a live guild; only an explicit, audited 'kmh orphans' rebind binds it.
+        internal const string UnprovenBindingPrefix = OrphanBindingPrefix + "unproven:";
+
+        // Neither a matching name nor a guild's age proves it took the site, so nothing is bound here: each is paused
+        // and logged ("unproven" if the name exists, orphaned if not) until an explicit, audited admin rebind.
+        private static int MarkLegacyGuildSitesLocked(Dictionary<int, string> persisted)
+        {
+            int paused = 0;
+            long now = DateTime.UtcNow.Ticks;
+            foreach (SiteEntry s in _byTile.Values)
+            {
+                if (!SiteOwnership.IsGuildOwned(s)) continue;
+                if (persisted != null && persisted.TryGetValue(s.Tile, out string id) && !string.IsNullOrEmpty(id)) { _guildOwner[s.Tile] = id; continue; }
+                paused++;
+                if (Guilds.GuildIdentity.Of(s.ControllingGuild) != null)
+                {
+                    _guildOwner[s.Tile] = UnprovenBindingPrefix + now;
+                    Diagnostics.ServerLog.Warn($"Sites: tile {s.Tile} names guild '{s.ControllingGuild}', but nothing on record proves today's guild of that name took it - paused, stored goods kept, until an admin decides ('kmh orphans').");
+                }
+                else
+                {
+                    _guildOwner[s.Tile] = OrphanBindingPrefix + now;
+                    Diagnostics.ServerLog.Warn($"Sites: tile {s.Tile} names guild '{s.ControllingGuild}', which no longer exists - paused as orphaned, its stored goods kept ('kmh orphans').");
+                }
+            }
+            return paused;
+        }
+
+        // Admin-only and explicit: every pre-binding site paused as unproven is bound to the live guild it names.
+        public static List<(int Tile, string Guild)> RebindUnprovenLegacy(bool commit, string actor, out string message)
+        {
+            var candidates = new List<(int Tile, string Guild, string Identity)>();
+            lock (_lock)
+                foreach (SiteEntry s in _byTile.Values)
+                    if (SiteOwnership.IsGuildOwned(s) && (GuildBindingOf(s.Tile) ?? "").StartsWith(UnprovenBindingPrefix, StringComparison.Ordinal))
+                    {
+                        string live = Guilds.GuildIdentity.Of(s.ControllingGuild);
+                        if (live != null) candidates.Add((s.Tile, s.ControllingGuild, live));
+                    }
+            var listed = candidates.ConvertAll(c => (c.Tile, c.Guild));
+            if (!commit || candidates.Count == 0) { message = $"{candidates.Count} unproven legacy site(s) would be bound to the guild they name."; return listed; }
+            lock (_lock)
+            {
+                var was = new List<(int Tile, string Binding)>();
+                foreach (var c in candidates)
+                    if (_byTile.ContainsKey(c.Tile) && (GuildBindingOf(c.Tile) ?? "").StartsWith(UnprovenBindingPrefix, StringComparison.Ordinal))
+                    { was.Add((c.Tile, GuildBindingOf(c.Tile))); _guildOwner[c.Tile] = c.Identity; }
+                if (!SaveToDisk())
+                {
+                    foreach (var w in was) _guildOwner[w.Tile] = w.Binding;
+                    message = "The server could not save that - nothing was bound.";
+                    return new List<(int, string)>();
+                }
+                message = $"Bound {was.Count} unproven legacy site(s) to the guild each names - by {actor}.";
+                foreach (var w in was)
+                    if (_byTile.TryGetValue(w.Tile, out SiteEntry s))
+                        Diagnostics.ServerLog.Info($"Sites: tile {w.Tile} bound to guild '{s.ControllingGuild}' by {actor} (legacy rebind, was {w.Binding}).");
+            }
+            Diagnostics.ServerLog.Info("Sites: " + message);
+            return listed;
+        }
+
+        public static int CountGuildSites(string guild)
+        {
+            if (string.IsNullOrEmpty(guild)) return 0;
+            int n = 0;
+            lock (_lock)
+                foreach (SiteEntry s in _byTile.Values)
+                    if (SiteOwnership.IsGuildOwned(s) && string.Equals(s.ControllingGuild, guild, StringComparison.OrdinalIgnoreCase)) n++;
+            return n;
+        }
+
+        // Guild sites no live guild holds: disbanded, or the name now belongs to someone else.
+        public static List<(int Tile, string Name, string Guild, int StoredUnits)> OrphanedGuildSites()
+        {
+            var outp = new List<(int, string, string, int)>();
+            lock (_lock)
+                foreach (SiteEntry s in _byTile.Values)
+                    if (SiteOwnership.IsGuildOwned(s) && !GuildBindingIsLive(s))
+                        outp.Add((s.Tile, NameOf(s), s.ControllingGuild ?? "", s.StoredItems?.Values.Sum() ?? 0));
+            return outp;
+        }
+
+        // Admin-only and explicit: hands an orphaned guild site, with what it stores, to a guild that exists now.
+        public static bool RebindOrphanedSite(int tile, string guild, string actor, out string message)
+        {
+            string identity = Guilds.GuildIdentity.Of(guild);
+            if (identity == null) { message = $"There is no guild named '{guild}'."; return false; }
+            string canonical = guild;
+            lock (_lock)
+            {
+                if (!_byTile.TryGetValue(tile, out SiteEntry s) || s == null) { message = "No site on that tile."; return false; }
+                if (!SiteOwnership.IsGuildOwned(s)) { message = "That site is not guild-owned."; return false; }
+                if (GuildBindingIsLive(s)) { message = $"That site still belongs to the live guild '{s.ControllingGuild}'."; return false; }
+                string wasGuild = s.ControllingGuild, wasBinding = GuildBindingOf(tile);
+                s.ControllingGuild = canonical;
+                _guildOwner[tile] = identity;
+                if (!SaveToDisk())
+                {
+                    s.ControllingGuild = wasGuild;
+                    if (wasBinding != null) _guildOwner[tile] = wasBinding; else _guildOwner.TryRemove(tile, out _);
+                    message = "The server could not save that - nothing changed.";
+                    return false;
+                }
+                message = $"Site on tile {tile} ({NameOf(s)}) now belongs to guild '{canonical}' (was '{wasGuild}') - by {actor}.";
+            }
+            Diagnostics.ServerLog.Info("Sites: " + message);
+            RaiseSite(tile, canonical, "rebound");
+            return true;
+        }
+
+        internal static void BindGuildForTest(int tile, string identity)
+        {
+            lock (_lock) { if (identity == null) _guildOwner.TryRemove(tile, out _); else _guildOwner[tile] = identity; }
         }
     }
 }

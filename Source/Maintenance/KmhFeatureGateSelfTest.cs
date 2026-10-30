@@ -16,7 +16,11 @@ namespace KMHServerAddon.Maintenance
             "kmh.item_labels", "kmh.item_values", "kmh.condition_defs",         // catalog intake
             "kmh.colony.report", "kmh.debug",                                   // telemetry
             "kmh.enforcement",                                                  // admin config, must always work
+            // Owner-gated, not toggle-gated: the toggles live in the files it edits, so one could switch off its own way back.
+            "kmh.config",
             "kmh.link", "kmh.linked_accounts",                                  // Discord linking
+            // Identity, not a feature: a toggle here would stop the server learning who is banned from it.
+            "kmh.player.ticket", "kmh.player.verified",
             "kmh.reputation", "kmh.site",                                       // no owner toggle exists for these
             // Both toggle in the store rather than the router, so turning one off still allows a cancel and a fetch.
             "kmh.roadworks",

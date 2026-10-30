@@ -8,6 +8,10 @@ namespace KMHServerAddon.Features.Guilds
         public const string Public    = "public";
         public const string GuildOnly = "guild_only";
 
+        // Stored as one of the two known values: anything else already read as public, and a free string is persisted.
+        public static string Normalize(string visibility)
+            => string.Equals((visibility ?? "").Trim(), GuildOnly, StringComparison.OrdinalIgnoreCase) ? GuildOnly : Public;
+
         // Null means build alone, and every uncertain case returns it, because sharing wrongly leaks a guild-only post.
         public static string SnapshotShareKey(string caller, System.Collections.Generic.HashSet<string> ownersOfNonPublic)
         {
@@ -15,8 +19,6 @@ namespace KMHServerAddon.Features.Guilds
             if (ownersOfNonPublic != null && ownersOfNonPublic.Contains(caller)) return null;
             return "g:" + (GuildStore.CurrentGuildOf(caller) ?? "");
         }
-
-        private const string PersonalKeyPrefix = "_personal:";
 
         // Resolves the caller's guild per call, so a snapshot builder should use the overload below instead.
         public static bool IsVisibleTo(string posterTreasuryKey, string visibility, string callerUsername)
@@ -34,7 +36,7 @@ namespace KMHServerAddon.Features.Guilds
 
             // A guild-only post from a personal vault has no guild to reach, so it reaches nobody.
             if (string.IsNullOrEmpty(posterTreasuryKey)) return false;
-            if (posterTreasuryKey.StartsWith(PersonalKeyPrefix, StringComparison.OrdinalIgnoreCase))
+            if (posterTreasuryKey.StartsWith(Treasury.TreasuryStore.PersonalPrefix, StringComparison.OrdinalIgnoreCase))
                 return false;
 
             // For a guild post the treasury key is the guild name, which is what the comparisons below rely on.

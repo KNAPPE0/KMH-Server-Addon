@@ -20,7 +20,7 @@ namespace KMHServerAddon.Policy
         {
             var lines = new List<string>
             {
-                $"KMH policies (profile: {(KmhProfiles.IsKnown(profile) ? profile : KmhProfiles.Balanced + " [fallback]")})",
+                $"Colony Nexus policies (profile: {(KmhProfiles.IsKnown(profile) ? profile : KmhProfiles.Balanced + " [fallback]")})",
                 "  NOTE: recorded preferences only - no feature reads these yet. The live economy is governed by",
                 "  Config/Economy.json (see 'kmh config economy').",
             };
@@ -29,7 +29,7 @@ namespace KMHServerAddon.Policy
             {
                 IDictionary<string, object> owner = null;
                 ownerOverrides?.TryGetValue(system, out owner);
-                owner = owner ?? KmhPolicyStore.Overrides(system);   // persisted owner edits show as [Owner]
+                owner = owner ?? KmhPolicyStore.Overrides(system);
 
                 ResolvedPolicy p = KmhPolicyBook.Resolve(system, profile, owner);
                 lines.Add($"  {system}:");

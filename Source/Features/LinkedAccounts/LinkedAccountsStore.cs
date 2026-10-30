@@ -25,13 +25,16 @@ namespace KMHServerAddon.Features.LinkedAccounts
             }
         }
 
-        // One snowflake, one username - two would let dictionary order decide which KMH account acts. A 0 id is a legacy caller.
+        // One snowflake, one username, or dictionary order decides which account acts. A 0 id is a legacy caller.
         public static bool SetLink(string username, string discordName, ulong discordId, out string refusal)
         {
             refusal = "";
             if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(discordName))
             { refusal = "No username or Discord name."; return false; }
 
+            bool hadName, hadId;
+            string oldName;
+            ulong oldId;
             lock (_lock)
             {
                 if (discordId != 0)
@@ -43,6 +46,8 @@ namespace KMHServerAddon.Features.LinkedAccounts
                             return false;
                         }
 
+                hadName = _links.TryGetValue(username, out oldName);
+                hadId = _ids.TryGetValue(username, out oldId);
                 _links[username] = discordName;
                 if (discordId != 0) _ids[username] = discordId;
                 else                _ids.Remove(username);
@@ -51,7 +56,12 @@ namespace KMHServerAddon.Features.LinkedAccounts
             // A link nobody wrote down is a link the next restart does not have, so the caller is told.
             if (!SaveToDisk())
             {
-                lock (_lock) { _links.Remove(username); _ids.Remove(username); }
+                // Back to what disk still holds: a failed re-link must not drop the existing link.
+                lock (_lock)
+                {
+                    if (hadName) _links[username] = oldName; else _links.Remove(username);
+                    if (hadId) _ids[username] = oldId; else _ids.Remove(username);
+                }
                 refusal = "The server could not record that link - nothing was changed. Try again shortly.";
                 return false;
             }
@@ -59,9 +69,11 @@ namespace KMHServerAddon.Features.LinkedAccounts
             return true;
         }
 
-        public static void Unlink(string username)
+        // An unlink takes effect at once even if it could not be written: the periodic flush retries, and false
+        // tells the caller to say a restart before then would bring the link back.
+        public static bool Unlink(string username)
         {
-            if (string.IsNullOrEmpty(username)) return;
+            if (string.IsNullOrEmpty(username)) return true;
             string previousDisplay = null;
             ulong  previousId      = 0;
             lock (_lock)
@@ -71,9 +83,15 @@ namespace KMHServerAddon.Features.LinkedAccounts
                 _links.Remove(username);
                 _ids.Remove(username);
             }
-            SaveToDisk();
+            bool saved = SaveToDisk();
+            if (!saved)
+                Diagnostics.ServerLog.Warn($"LinkedAccounts: unlinked '{username}' but LinkedAccounts.json could not be written; the next flush retries.");
             Extensibility.KmhEventBus.Instance.RaisePlayerUnlinked(new KMH.Sdk.Server.Events.PlayerUnlinkedEvent { Username = username, PreviousDiscordDisplay = previousDisplay ?? "", DiscordId = previousId });
+            return saved;
         }
+
+        internal const string UnlinkNotSavedNote =
+            " It could not be saved yet. Colony Nexus keeps retrying, but a restart before that succeeds would bring the link back.";
 
         // Legacy links carry no snowflake, and there is no Discord member to reconcile one against.
         public static List<KeyValuePair<string, ulong>> AllLinked()
@@ -100,7 +118,7 @@ namespace KMHServerAddon.Features.LinkedAccounts
             lock (_lock) { return _links.TryGetValue(username, out display); }
         }
 
-        // Snowflake only: display names are attacker-settable. A duplicate refuses rather than letting enumeration order pick.
+        // Snowflake only, as display names are attacker-settable; a duplicate refuses instead of letting order pick.
         public static string FindUsernameByDiscordId(ulong discordId)
         {
             if (discordId == 0) return null;
@@ -138,7 +156,7 @@ namespace KMHServerAddon.Features.LinkedAccounts
                         ? new Dictionary<string, ulong>(state.DiscordIds, StringComparer.OrdinalIgnoreCase)
                         : new Dictionary<string, ulong>(StringComparer.OrdinalIgnoreCase);
                 }
-                Diagnostics.ServerLog.Info(
+                Diagnostics.ServerLog.Diag(
                     $"LinkedAccounts: loaded {state.Links.Count} link(s) from disk " +
                     $"({_ids.Count} with snowflake id)");
                 ReportDuplicateIds();

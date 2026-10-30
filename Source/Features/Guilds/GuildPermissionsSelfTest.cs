@@ -25,11 +25,11 @@ namespace KMHServerAddon.Features.Guilds
                           && !GuildPermissions.Can(R.RankAdmin, GuildCapability.TransferOwner);
             r.Add(("Guild: disband/transfer owner-only", ownerOnly, "owner yes, admin no"));
 
-            bool actOn = GuildPermissions.CanActOnMember(R.RankAdmin, R.RankMember)      // admin kicks member
-                      && GuildPermissions.CanActOnMember(R.RankModerator, R.RankOfficer) // mod kicks officer
-                      && !GuildPermissions.CanActOnMember(R.RankAdmin, R.RankAdmin)       // not an equal
-                      && !GuildPermissions.CanActOnMember(R.RankAdmin, R.RankOwner)       // never the owner
-                      && !GuildPermissions.CanActOnMember(R.RankOfficer, R.RankMember);   // officer lacks the capability
+            bool actOn = GuildPermissions.CanActOnMember(R.RankAdmin, R.RankMember)
+                      && GuildPermissions.CanActOnMember(R.RankModerator, R.RankOfficer)
+                      && !GuildPermissions.CanActOnMember(R.RankAdmin, R.RankAdmin)
+                      && !GuildPermissions.CanActOnMember(R.RankAdmin, R.RankOwner)
+                      && !GuildPermissions.CanActOnMember(R.RankOfficer, R.RankMember);   // outranks, but lacks the capability
             r.Add(("Guild: manage-member outranks target", actOn, "outrank required, no equals, never owner"));
 
             bool unknown = !GuildPermissions.Can("bogus", GuildCapability.Invite)

@@ -24,13 +24,12 @@ namespace KMHServerAddon.Features.Discord
             if (username.StartsWith(DiscordTagPrefix, StringComparison.Ordinal))           return;
             if (message.Length > 1500) message = message.Substring(0, 1497) + "…";
 
-            // Only mentions are defused; markdown stays so links and emphasis still read naturally.
-            string safe = message.Replace("@", "@​");
-
-            DiscordBridge.PostToChannel(
-                DiscordBridge.Config.ChatBridgeChannelId,
-                $"**{username}**: {safe}");
+            DiscordBridge.PostToChannel(DiscordBridge.Config.ChatBridgeChannelId, RelayLine(username, message));
         }
+
+        // One line and no mentions, or a pasted newline forges a second message under someone else's name.
+        internal static string RelayLine(string username, string message)
+            => $"**{DiscordText.SafeName(username)}**: {DiscordText.SafeRelayBody(message)}";
 
         public static void RelayDiscordToInGame(string displayName, string message)
         {

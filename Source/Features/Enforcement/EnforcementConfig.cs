@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -90,19 +90,25 @@ namespace KMHServerAddon.Features.Enforcement
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(path));
-                File.WriteAllText(path, DefaultJson);
+                JsonFileStore.Save(path, BuildDefaultFile());
             }
             catch (Exception ex) { ServerLog.Warn($"Could not generate Enforcement.json: {ex.Message}"); }
         }
 
-        private const string DefaultJson =
-@"{
-  ""_readme"": ""Config enforcement for KMH-Patch clients. Set Enabled to true to lock players' Mod Options to your server profile. AdminBypass lets connected admins still edit. PreservePersonalFields keeps enforced mods editable but merges each config so your gameplay settings win while players keep window position / colours / audio. SafeMods lists mods players may freely change (by packageId or the display name shown in Mods); everything else is locked. Manage live with: /kmh server enforce on|off|status and /kmh server enforce safe add|remove|list <mod>."",
-  ""Enabled"": false,
-  ""AdminBypass"": true,
-  ""PreservePersonalFields"": false,
-  ""SafeMods"": []
-}
-";
+        // Built from the type, so a fresh install's default can never silently fall behind the model.
+        internal static Newtonsoft.Json.Linq.JObject BuildDefaultFile()
+        {
+            var file = Newtonsoft.Json.Linq.JObject.FromObject(new EnforcementConfig());
+            file.AddFirst(new Newtonsoft.Json.Linq.JProperty("_readme", Readme));
+            return file;
+        }
+
+        private const string Readme =
+            "Config enforcement for Colony Nexus clients. Set Enabled to true to lock players' Mod Options to your "
+          + "server profile. AdminBypass lets connected admins still edit. PreservePersonalFields keeps enforced "
+          + "mods editable but merges each config so your gameplay settings win while players keep window position "
+          + "/ colours / audio. SafeMods lists mods players may freely change (by packageId or the display name "
+          + "shown in Mods); everything else is locked. Manage live with: /kmh server enforce on|off|status and "
+          + "/kmh server enforce safe add|remove|list <mod>.";
     }
 }

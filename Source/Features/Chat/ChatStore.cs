@@ -32,11 +32,11 @@ namespace KMHServerAddon.Features.Chat
         }
 
         // Read through Current on every access, so an edited config takes effect without a restart.
-        public static int MaxMessageLength    => ChatConfig.Current.MaxMessageLength;
-        public static int MaxRecentPerChannel => ChatConfig.Current.MaxRecentPerChannel;
-        public static int MaxSendsPerWindow   => ChatConfig.Current.MaxSendsPerWindow;
-        public static int SendWindowSeconds   => ChatConfig.Current.SendWindowSeconds;
-        public static int RetentionHours      => ChatConfig.Current.RetentionHours;
+        public static int MaxMessageLength    => ChatConfig.Current.Limits.MaxMessageLength;
+        public static int MaxRecentPerChannel => ChatConfig.Current.Limits.MaxRecentPerChannel;
+        public static int MaxSendsPerWindow   => ChatConfig.Current.Limits.MaxSendsPerWindow;
+        public static int SendWindowSeconds   => ChatConfig.Current.Limits.SendWindowSeconds;
+        public static int RetentionHours      => ChatConfig.Current.Limits.RetentionHours;
 
         public static ChatMessage Post(string from, string channel, string bodyIn, string token, string origin, out string reason, bool senderVerified = true,
                                        string imageUrl = null, string mediaRef = null)
@@ -81,12 +81,31 @@ namespace KMHServerAddon.Features.Chat
             }
         }
 
+        // Retention is applied here too: a ring is only trimmed when posted to, so a quiet one would serve old lines.
         public static List<ChatMessage> Recent(string channel)
         {
             List<ChatMessage> outList = new List<ChatMessage>();
             if (!ChatChannels.IsWellFormed(channel)) return outList;
-            lock (_lock) if (_byChannel.TryGetValue(channel, out List<ChatMessage> ring)) outList.AddRange(ring);
+            long cutoff = RetentionHours > 0 ? DateTime.UtcNow.Ticks - TimeSpan.FromHours(RetentionHours).Ticks : long.MinValue;
+            lock (_lock)
+                if (_byChannel.TryGetValue(channel, out List<ChatMessage> ring))
+                    foreach (ChatMessage m in ring) if (m.SentUtcTicks >= cutoff) outList.Add(m);
             return outList;
+        }
+
+        // A guild's history, in any casing of its name, goes with the guild: a new one under that name is a stranger.
+        public static int ClearGuildChannel(string guildName)
+        {
+            if (string.IsNullOrEmpty(guildName)) return 0;
+            int removed = 0;
+            lock (_lock)
+            {
+                foreach (string key in new List<string>(_byChannel.Keys))
+                    if (ChatChannels.TryParseGuild(key, out string g) && string.Equals(g, guildName, StringComparison.OrdinalIgnoreCase))
+                    { _byChannel.Remove(key); removed++; }
+                if (removed > 0) _dirty = true;
+            }
+            return removed;
         }
 
         // Answers only for references a live message carries, so a client cannot name a channel of its own choosing.
@@ -106,7 +125,7 @@ namespace KMHServerAddon.Features.Chat
         internal static string ResolverIdFor(ChatConfig cfg, string vettedMedia, bool isVideo)
         {
             if (isVideo || string.IsNullOrEmpty(vettedMedia)) return "";
-            if (!Media.MediaConfig.Current.ServerMediaResolverEnabled) return "";
+            if (!Media.MediaConfig.Current.Images.ResolverEnabled) return "";
             if (!ChatMediaUrl.NeedsResolver(cfg, vettedMedia)) return "";
 
             string fetchFrom = ChatMediaUrl.ResolverSourceFor(cfg, vettedMedia);
@@ -127,7 +146,7 @@ namespace KMHServerAddon.Features.Chat
                     m.ImageUrl = vettedUrl;
                     // Decided by the same policy as a message's own media, or the client feeds a video to an image decoder.
                     m.IsVideo  = isVideo;
-                    // Discord attaches an embed AFTER the message, and skipping this left every late gif a flattened still.
+                    // Discord attaches an embed AFTER the message; skipping this leaves every late gif a flattened still.
                     m.MediaId  = ResolverIdFor(ChatConfig.Current, vettedUrl, isVideo);
                     _dirty = true;
                     return true;
@@ -196,7 +215,7 @@ namespace KMHServerAddon.Features.Chat
 
         public static void LoadFromDisk()
         {
-            if (!ChatConfig.Current.PersistHistory) return;
+            if (!ChatConfig.Current.Limits.PersistHistory) return;
             if (!JsonFileStore.TryLoad(KmhDataPaths.ChatFile, out PersistedState s) || s?.Channels == null) return;
             ApplyLoaded(s, DateTime.UtcNow.Ticks);
         }
@@ -243,7 +262,7 @@ namespace KMHServerAddon.Features.Chat
         {
             if (s?.Channels == null) return 0;
             ChatConfig cfg = ChatConfig.Current;
-            if (cfg == null || !Media.MediaConfig.Current.ServerMediaResolverEnabled) return 0;
+            if (cfg == null || !Media.MediaConfig.Current.Images.ResolverEnabled) return 0;
 
             int rebuilt = 0;
             foreach (KeyValuePair<string, List<ChatMessage>> kv in s.Channels)
@@ -263,7 +282,7 @@ namespace KMHServerAddon.Features.Chat
 
         public static void SaveToDisk()
         {
-            if (!ChatConfig.Current.PersistHistory) return;
+            if (!ChatConfig.Current.Limits.PersistHistory) return;
             long seq;
             PersistedState s;
             lock (_lock)
@@ -282,7 +301,7 @@ namespace KMHServerAddon.Features.Chat
 
         public static void SaveIfDirty()
         {
-            if (!ChatConfig.Current.PersistHistory) return;
+            if (!ChatConfig.Current.Limits.PersistHistory) return;
             lock (_lock) { if (!_dirty) return; }
             SaveToDisk();
         }
@@ -293,7 +312,7 @@ namespace KMHServerAddon.Features.Chat
             foreach (KeyValuePair<string, List<ChatMessage>> kv in _byChannel)
             {
                 if (kv.Value == null || kv.Value.Count == 0) continue;
-                List<ChatMessage> ring = new List<ChatMessage>(kv.Value);
+                List<ChatMessage> ring = KmhDeepCopy.OfList(kv.Value);
                 TrimRing(ring, now);
                 if (ring.Count > 0) s.Channels[kv.Key] = ring;
             }

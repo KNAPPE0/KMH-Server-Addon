@@ -4,7 +4,7 @@ using KMHServerAddon.Diagnostics;
 
 namespace KMHServerAddon.AdminCommands
 {
-    // KMH commands are intercepted on PM_Chat.Receive and never reach dispatch, so they would otherwise be absent from /help.
+    // KMH commands are intercepted on PM_Chat.Receive before dispatch, so without this they are missing from /help.
     internal static class KmhHelpCommand
     {
         private static bool _registered;
@@ -17,25 +17,25 @@ namespace KMHServerAddon.AdminCommands
             {
                 // A fallback only, since the root intercept below normally answers "/kmh" and "/kmh help" first.
                 CMD_Base.ChatCommands.Add(new KmhChatCommand(
-                    "/kmh", "KMH commands - guild / link / server (type /kmh help)",
+                    "/kmh", "Colony Nexus commands - guild / link / server (type /kmh help)",
                     () => SendHelp(PM_Chat.TargetClient)));
 
                 CMD_Base.Commands.Add(new KmhServerConsoleCommand());
-                ServerLog.Info("Registered KMH commands into /help + server console");
+                ServerLog.Info("Registered Colony Nexus commands into /help + server console");
             }
-            catch (Exception ex) { ServerLog.Warn($"Could not register KMH commands into /help: {ex.Message}"); }
+            catch (Exception ex) { ServerLog.Warn($"Could not register Colony Nexus commands into /help: {ex.Message}"); }
         }
 
         public static void SendHelp(ServerClient client)
         {
             if (client == null) return;
-            PM_Chat.SendConsoleMessage(client, "KMH commands:");
+            PM_Chat.SendConsoleMessage(client, "Colony Nexus commands:");
             PM_Chat.SendConsoleMessage(client, "  /kmh guild help    - guilds: create / join / invite / deposit / perks / ...");
             PM_Chat.SendConsoleMessage(client, "  /kmh link [status] - link your Discord account (get a code from the bot)");
             PM_Chat.SendConsoleMessage(client, "  /kmh unlink        - unlink your Discord account");
             PM_Chat.SendConsoleMessage(client, "  /kmh server help   - server status / admin");
-            PM_Chat.SendConsoleMessage(client, "  Chat, guild chat, DMs and player mail live in the KMH tab -> Communications.");
-            PM_Chat.SendConsoleMessage(client, "  Most KMH features live in the in-game KMH tab.");
+            PM_Chat.SendConsoleMessage(client, "  Chat, guild chat, DMs and player mail live in the Colony Nexus tab -> Communications.");
+            PM_Chat.SendConsoleMessage(client, "  Most features live in the in-game Colony Nexus tab.");
         }
     }
 

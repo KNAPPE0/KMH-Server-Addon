@@ -129,7 +129,7 @@ namespace KMHServerAddon.Maintenance
                 bool restamped = ChatStore.Recent(ChatChannels.Server).Count == 1 && ChatStore.Recent(Guild).Count == 0;
                 r.Add(("Chat persistence: a mismatched channel field is re-stamped from its key", restamped, ""));
 
-                // Discord attaches an embed by EDITING the message, and that path skipped the resolver entirely.
+                // Discord attaches an embed by EDITING the message, so that path must run the resolver too.
                 ChatStore.ResetForTest();
                 // Already vetted, because what is under test is SetImage's own resolver call, not the host allow-list.
                 const string wrapped = "https://images-ext-1.discordapp.net/external/h/https/"
@@ -186,7 +186,7 @@ namespace KMHServerAddon.Maintenance
             finally
             {
                 ChatStore.ResetForTest();
-                ChatStore.ApplyLoaded(live, now);   // hand the server its real chat back
+                ChatStore.ApplyLoaded(live, now);
             }
 
             return r;

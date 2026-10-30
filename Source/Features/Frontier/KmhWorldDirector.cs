@@ -198,6 +198,7 @@ namespace KMHServerAddon.Features.Frontier
             {
                 PlacementToken token = _state.PendingPlacement;
                 if (token == null) { why = "no open placement question"; return false; }
+                if (layer < 0 || layer > FrontierPlacement.MaxLayer) { why = "that layer is not a planet layer"; return false; }
                 if (!FrontierPlacement.ProposalFits(token, user, tokenId, tile, fingerprint, now, out why)) return false;
 
                 token.Proposals.Add(new PlacementProposal
@@ -217,7 +218,7 @@ namespace KMHServerAddon.Features.Frontier
             lock (_lock) token = _state.PendingPlacement?.CloneForRead();
             if (token == null) { why = "no placement question"; return false; }
 
-            bool ok = FrontierPlacement.TryAccept(token, FrontierConfig.Current.AllowSingleProposer, out tile, out why);
+            bool ok = FrontierPlacement.TryAccept(token, FrontierConfig.Current.AllowSingleProposer, _lastAskedClients, out tile, out why);
             lock (_lock)
             {
                 if (_state.PendingPlacement != null) _state.PendingPlacement.Consumed = true;
@@ -289,8 +290,10 @@ namespace KMHServerAddon.Features.Frontier
             switch (NextStep(snapshot, cfg, now))
             {
                 case Step.ResumeResolution:
-                    foreach (ResolutionRecord rec in UnfinishedResolutions())
-                        KmhOperationConsequence.Resume(rec);
+                    // One send for the whole batch: every resume here broadcasts the same site list.
+                    using (SubProtocol.KmhBroadcastBatch.Open())
+                        foreach (ResolutionRecord rec in UnfinishedResolutions())
+                            KmhOperationConsequence.Resume(rec);
                     return;
 
                 case Step.ResolvePlacement:
@@ -345,7 +348,9 @@ namespace KMHServerAddon.Features.Frontier
         private static long   _blockerLoggedUtc;
         private static int    _lastAskedClients = -1;
 
-        // The same blocker every minute is noise, so it is logged once and then only every quarter hour it persists.
+        // Throttled per reason, or a director cycling between two blockers resets the window on every pass.
+        private static readonly Dictionary<string, long> _blockerLogged = new Dictionary<string, long>(StringComparer.Ordinal);
+
         private static void NoteBlocker(string reason, long nowTicks)
         {
             bool say;
@@ -353,13 +358,16 @@ namespace KMHServerAddon.Features.Frontier
             {
                 if (!string.Equals(_blocker, reason, StringComparison.Ordinal))
                 {
-                    _blocker = reason; _blockerSinceUtc = nowTicks; _blockerLoggedUtc = nowTicks;
-                    say = true;
+                    _blocker = reason; _blockerSinceUtc = nowTicks;
                 }
-                else
+                say = !_blockerLogged.TryGetValue(reason, out long last)
+                      || nowTicks - last >= TimeSpan.FromMinutes(15).Ticks;
+                if (say)
                 {
-                    say = nowTicks - _blockerLoggedUtc >= TimeSpan.FromMinutes(15).Ticks;
-                    if (say) _blockerLoggedUtc = nowTicks;
+                    // The reasons are a small fixed vocabulary; a runaway map would mean one is being interpolated.
+                    if (_blockerLogged.Count > 32) _blockerLogged.Clear();
+                    _blockerLogged[reason] = nowTicks;
+                    _blockerLoggedUtc = nowTicks;
                 }
             }
             if (say) Diagnostics.ServerLog.Info($"Frontier: {reason}.");
@@ -564,12 +572,13 @@ namespace KMHServerAddon.Features.Frontier
                     + $"{tilesFixed} outpost tile(s) and {opsFixed} operation id(s) corrected.");
             }
 
-            // The director refuses every other step while one of these exists.
-            foreach (ResolutionRecord rec in UnfinishedResolutions())
-            {
-                Diagnostics.ServerLog.Info($"Frontier: resuming operation #{rec.OperationId} left at '{rec.Phase}' by an unclean shutdown.");
-                KmhOperationConsequence.Resume(rec);
-            }
+            // Boot recovery can hold several, each broadcasting the same site list, so they collapse into one send.
+            using (SubProtocol.KmhBroadcastBatch.Open())
+                foreach (ResolutionRecord rec in UnfinishedResolutions())
+                {
+                    Diagnostics.ServerLog.Info($"Frontier: resuming operation #{rec.OperationId} left at '{rec.Phase}' by an unclean shutdown.");
+                    KmhOperationConsequence.Resume(rec);
+                }
 
             // Last, because a resume above can put a location back into a live state.
             ReleaseOrphanedLocations();
@@ -592,12 +601,23 @@ namespace KMHServerAddon.Features.Frontier
         public static void LoadFromDisk()
         {
             if (!JsonFileStore.TryLoad(KmhDataPaths.FrontierDirectorFile, out DirectorState st) || st == null) return;
+            Normalize(st);
             int dropped = PruneExpiredCooldowns(st.TargetCooldowns, DateTime.UtcNow.Ticks);
             lock (_lock) _state = st;
             if (dropped > 0) Diagnostics.ServerLog.Debug($"Frontier: dropped {dropped} expired target cooldown(s) on load.");
             int unfinished = UnfinishedResolutions().Count;
-            Diagnostics.ServerLog.Info($"Frontier: director loaded - {st.OutpostTiles.Count} outpost(s), "
+            Diagnostics.ServerLog.Diag($"Frontier: director loaded - {st.OutpostTiles.Count} outpost(s), "
                 + $"{st.ActiveOperationIds.Count} active operation(s), {unfinished} resolution(s) to resume.");
+        }
+
+        // A hand-edited file can say null for any list, and one null would throw on every tick and save.
+        internal static DirectorState Normalize(DirectorState st)
+        {
+            st.TargetCooldowns    ??= new Dictionary<string, long>(StringComparer.Ordinal);
+            st.ActiveOperationIds ??= new List<long>();
+            st.OutpostTiles       ??= new List<int>();
+            st.Resolutions        ??= new List<ResolutionRecord>();
+            return st;
         }
 
         public static bool SaveToDisk()

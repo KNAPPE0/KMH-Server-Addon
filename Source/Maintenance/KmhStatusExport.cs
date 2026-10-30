@@ -13,7 +13,7 @@ namespace KMHServerAddon.Maintenance
             public int    SchemaVersion { get; set; } = 1;
             public string ServerName    { get; set; } = "";
             public string ServerId      { get; set; } = "";
-            public int    ApiPort       { get; set; }   // KMH API transport port; 0 when the API transport is off
+            public int    ApiPort       { get; set; }   // 0 when the API transport is off
             public string Build         { get; set; } = "";
             public int    WireVersion   { get; set; }
             public string GeneratedUtc  { get; set; } = "";
@@ -34,11 +34,15 @@ namespace KMHServerAddon.Maintenance
             public int ActiveGlobalQuests { get; set; }
             public int MailMessages       { get; set; }
             public int ChatMessages       { get; set; }
+            public int ConnectedPending   { get; set; }
+            public int FederatedGuilds    { get; set; }
+            public int GuildsNeedingReproof { get; set; }
+            public int ReportsHeld        { get; set; }
+            public int ReportsAwaitingForward { get; set; }
 
             public long HousePoolSilver { get; set; }
             public long ReportedWealth  { get; set; }
 
-            // Value outside any treasury: unclaimed mail attachments, and goods parked by a failed delivery.
             public long MailUnclaimedEscrowSilver { get; set; }
             public int  RecoveryHeldRecords       { get; set; }
 
@@ -48,7 +52,6 @@ namespace KMHServerAddon.Maintenance
             public List<KmhStatusBackup> Backups { get; set; } = new List<KmhStatusBackup>();
         }
 
-        // Current-season leaderboard toppers (player, colony, trade, guild, treasury, ...) for external dashboards.
         internal sealed class KmhStatusLeader
         {
             public string Category { get; set; } = "";
@@ -97,6 +100,11 @@ namespace KMHServerAddon.Maintenance
             Try(() => s.ActiveGlobalQuests = Features.World.WorldStore.ActiveQuests().Count);
             Try(() => s.MailMessages       = Features.Mail.MailStore.TotalCount);
             Try(() => s.ChatMessages       = Features.Chat.ChatStore.TotalMessageCount);
+            Try(() => s.ConnectedPending   = Features.Global.Treasury.ConnectedTreasuryStore.OpenCount);
+            Try(() => s.FederatedGuilds    = Features.Global.Guilds.FederatedGuildStore.LinkedCount);
+            Try(() => s.GuildsNeedingReproof = Features.Global.Guilds.FederatedGuildStore.ReproofRequiredCount);
+            Try(() => s.ReportsHeld = Features.Reports.ReportStore.Count);
+            Try(() => s.ReportsAwaitingForward = Features.Reports.ReportStore.PendingCount);
             Try(() => s.MailUnclaimedEscrowSilver = Features.Mail.MailStore.UnclaimedEscrowSilver);
             Try(() => s.RecoveryHeldRecords       = Features.Recovery.RecoveryStore.HeldCount);
             Try(() => s.HousePoolSilver = Features.Marketplace.MarketplaceStore.HousePoolBalance());

@@ -21,7 +21,7 @@ namespace KMHServerAddon.Features.Discord.Patches
             if (pkt.IsCommand) return;
             if (string.IsNullOrEmpty(pkt.Message)) return;
 
-            // Redundant today, but a Harmony ordering change would otherwise leak JSON envelopes into Discord.
+            // Redundant with KmhIntercept, but a Harmony ordering change would leak JSON envelopes into Discord.
             if (pkt.Username == KmhProtocol.ClientUsername) return;
             if (pkt.Username == KmhProtocol.SystemUsername) return;
 

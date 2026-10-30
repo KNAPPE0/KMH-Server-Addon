@@ -48,5 +48,9 @@ namespace KMHServerAddon.Features.Roadworks.Dto
         [JsonProperty("current_progress")] public double CurrentProgress { get; set; } = 0;
         [JsonProperty("escrow_silver")]    public long   EscrowSilver  { get; set; } = 0;
         [JsonProperty("escrow_unspent")]   public long   EscrowUnspent { get; set; } = 0;
+
+        // The planned route, so the owner's client can draw what is still to be built; an older client ignores it.
+        [JsonProperty("route_tiles")]      public List<int> RouteTiles  { get; set; } = new List<int>();
+        [JsonProperty("route_layers")]     public List<int> RouteLayers { get; set; } = new List<int>();
     }
 }

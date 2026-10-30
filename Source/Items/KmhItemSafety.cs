@@ -6,7 +6,7 @@ using KMHServerAddon.Features.ItemLabels;
 
 namespace KMHServerAddon.Items
 {
-    // The server is headless with no RimWorld def DB, so item facts come from heuristics and the contributed catalog, never one client's word.
+    // Headless, with no RimWorld def DB: item facts come from heuristics and the contributed catalog, never one client.
     internal static class KmhItemSafety
     {
         // Compact-storage safety only, not a site allowlist - SiteOutputRules tiers decide that.
@@ -41,7 +41,7 @@ namespace KMHServerAddon.Items
             if (string.IsNullOrWhiteSpace(defName)) return false;
             if (LooksComplex(defName)) return false;
             if (SimpleResources.Contains(defName)) return true;
-            foreach (string extra in Features.Sites.SitesConfig.Current.ExtraSimpleResourceDefs ?? Array.Empty<string>())
+            foreach (string extra in Features.Sites.SitesConfig.Current.Output.ExtraSimpleResourceDefs ?? Array.Empty<string>())
                 if (string.Equals(extra, defName, StringComparison.OrdinalIgnoreCase)) return true;
             // Naming-convention families so modded resources pass without a config entry; still gated by LooksComplex above.
             foreach (string fam in SafeResourceFamilies)
@@ -50,6 +50,13 @@ namespace KMHServerAddon.Items
         }
 
         private static readonly string[] SafeResourceFamilies = { "Meat_", "Leather_", "Wool", "Raw", "Blocks", "Meal" };
+
+        // As an item, silver would skip the silver deposit's fee and the treasury's silver cap.
+        public static bool IsSilverDef(string defName)
+            => string.Equals((defName ?? "").Split('|')[0].Trim(), "Silver", StringComparison.OrdinalIgnoreCase);
+
+        public const string SilverAsItemRefusal =
+            "Silver goes into the treasury as silver, not as an item - use the silver deposit (it applies the deposit fee and your treasury cap).";
 
         // Backstop for the compact def+count path: a modified client must not smuggle a stateful item in as a plain key.
         public static bool IsCompactDepositSafe(string defName, out string reason)
@@ -60,7 +67,7 @@ namespace KMHServerAddon.Items
             return true;
         }
 
-        // Sites are restricted to simple resources so they can never mint weapons, apparel, relics or comp-heavy modded items.
+        // Simple resources only, so a site can never mint weapons, apparel, relics or comp-heavy modded items.
         public static bool IsAllowedSiteOutput(string defName, out string reason)
         {
             reason = null;
@@ -84,7 +91,7 @@ namespace KMHServerAddon.Items
 
         public static long GetTrustedMarketValue(string defName) => ItemLabelCache.BaseValue(defName);
 
-        // Never the client's figure - it sets site build cost, so an under-report buys a cheap fast site. Mutators must refuse on 0.
+        // Never the client's figure: it sets site build cost, so an under-report buys a cheap site. Mutators must refuse 0.
         public static float TrustedMarketValueOrZero(string defName, float reported, out bool suspicious)
         {
             long trusted = GetTrustedMarketValue(defName);
@@ -112,7 +119,7 @@ namespace KMHServerAddon.Items
             return Hash(basis).Substring(0, 16);
         }
 
-        // Everything the fingerprint uses except the blob, so byte-different copies of one item are shown as a single row.
+        // Everything the fingerprint uses, recomputed rather than read from the stored one: one row is one exact state.
         public static string DisplayKey(KmhThingPayload p)
         {
             if (p == null) return "";
@@ -120,10 +127,19 @@ namespace KMHServerAddon.Items
             {
                 p.DefName ?? "", p.StuffDefName ?? "", p.Quality.ToString(),
                 p.HitPoints.ToString(), p.MaxHitPoints.ToString(), p.Tainted ? "1" : "0",
-                // Bucketed rather than hashed: two stateful stacks group together, but never with a plain one.
-                string.IsNullOrEmpty(p.ScribeXml) ? "plain" : "stateful",
+                // The whole blob (genes, crate contents, biocodes live there) minus thing ids, or identical swords split.
+                string.IsNullOrEmpty(p.ScribeXml) ? "plain" : BlobHashes.GetValue(p.ScribeXml, x => Hash(WithoutThingIds(x))),
             });
         }
+
+        private static readonly System.Text.RegularExpressions.Regex ThingIdElement =
+            new System.Text.RegularExpressions.Regex(@"<id>[^<]*</id>", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+        internal static string WithoutThingIds(string xml) => string.IsNullOrEmpty(xml) ? "" : ThingIdElement.Replace(xml, "<id/>");
+
+        // Per blob instance, since strings never change and every snapshot re-keys every stack in the vault.
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<string, string> BlobHashes
+            = new System.Runtime.CompilerServices.ConditionalWeakTable<string, string>();
 
         // Mirrors RimWorld's own stacking rule; a scribe blob marks a unique instance that can never stack.
         public static bool CanSafelyMerge(KmhThingPayload a, KmhThingPayload b)
@@ -157,6 +173,7 @@ namespace KMHServerAddon.Items
             target.HitPoints        = WeightedAvg(target.HitPoints, ct, incoming.HitPoints, ci);
             target.RotProgressTicks = WeightedAvg(target.RotProgressTicks, ct, incoming.RotProgressTicks, ci);
             target.StackCount       = (int)Math.Min(int.MaxValue, ct + ci);
+            SyncBlobHealth(target);
         }
 
         // A negative value means unknown and is skipped, so -1 comes back only when both are unknown.
@@ -172,9 +189,92 @@ namespace KMHServerAddon.Items
         private static int WeightedAvg(int a, long ca, int b, long cb)
             => (int)WeightedAvg((long)a, ca, (long)b, cb);
 
+        // The blob is what the recipient loads, so its def, material, quality and condition must match what was judged.
+        internal static bool BlobMatches(KmhThingPayload p, out string why)
+        {
+            why = null;
+            if (p == null || string.IsNullOrEmpty(p.ScribeXml)) return true;
+            System.Xml.Linq.XElement t;
+            try { if (!PlainShape(LoadBlob(p.ScribeXml), out t, out why)) return false; }
+            catch (Exception) { why = "its saved state is not readable"; return false; }
+            // No item node means no deep state to load, the same as an empty blob: the client rebuilds from metadata.
+            if (t == null) return true;
+
+            string def = (string)t.Element("def");
+            if (!string.Equals(def, p.DefName, StringComparison.Ordinal)) { why = $"its saved state is a {def ?? "(nothing)"}, not a {p.DefName}"; return false; }
+            string stuff = (string)t.Element("stuff");
+            if (stuff != null && !string.Equals(stuff, p.StuffDefName ?? "", StringComparison.Ordinal)) { why = "its saved material differs"; return false; }
+            string quality = (string)t.Element("quality");
+            if (quality != null && QualityIndex(quality) != p.Quality) { why = "its saved quality differs"; return false; }
+            if (int.TryParse((string)t.Element("health"), out int hp) && p.HitPoints >= 0 && hp != p.HitPoints
+                && !(p.Mergeable && SyncBlobHealth(p)))
+            { why = "its saved condition differs"; return false; }
+            return true;
+        }
+
+        // RimWorld finds <t> by its bare name, so a namespaced twin would load while the plain one was judged.
+        internal static bool PlainShape(System.Xml.Linq.XDocument doc, out System.Xml.Linq.XElement t, out string why)
+        {
+            t = null; why = null;
+            System.Xml.Linq.XElement root = doc?.Root;
+            if (root == null) { why = "its saved state is empty"; return false; }
+            foreach (System.Xml.Linq.XElement e in root.DescendantsAndSelf())
+            {
+                if (e.Name.Namespace != System.Xml.Linq.XNamespace.None) { why = "its saved state uses an XML namespace"; return false; }
+                foreach (System.Xml.Linq.XAttribute a in e.Attributes())
+                    if (a.IsNamespaceDeclaration || a.Name.Namespace != System.Xml.Linq.XNamespace.None)
+                    { why = "its saved state uses an XML namespace"; return false; }
+            }
+            int items = 0;
+            foreach (System.Xml.Linq.XElement c in root.Elements("t")) { items++; t = c; }
+            if (items > 1) { t = null; why = "its saved state holds more than one item"; return false; }
+            return true;
+        }
+
+        // Folding keeps the first blob but averages wear, so the blob takes the average; refusing it would destroy goods.
+        internal static bool SyncBlobHealth(KmhThingPayload p)
+        {
+            if (p == null || p.HitPoints < 0 || string.IsNullOrEmpty(p.ScribeXml)) return false;
+            try
+            {
+                System.Xml.Linq.XDocument doc = LoadBlob(p.ScribeXml);
+                System.Xml.Linq.XElement health = doc.Root?.Element("t")?.Element("health");
+                if (health == null) return false;
+                string want = p.HitPoints.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                if (health.Value == want) return true;
+                health.Value = want;
+                // The stored fingerprint is left alone: withdrawals find the row by it, and a merge never changed it.
+                p.ScribeXml = doc.ToString(System.Xml.Linq.SaveOptions.DisableFormatting);
+                return true;
+            }
+            catch (Exception) { return false; }
+        }
+
+        private static System.Xml.Linq.XDocument LoadBlob(string xml)
+        {
+            var settings = new System.Xml.XmlReaderSettings
+            {
+                DtdProcessing = System.Xml.DtdProcessing.Prohibit, XmlResolver = null,
+                IgnoreComments = true, MaxCharactersInDocument = 4L * 1024 * 1024,
+            };
+            using (var reader = System.Xml.XmlReader.Create(new System.IO.StringReader(xml), settings))
+                return System.Xml.Linq.XDocument.Load(reader);
+        }
+
+        // RimWorld's QualityCategory names, in order, as the payload's 1..7.
+        private static readonly string[] QualityNames = { "Awful", "Poor", "Normal", "Good", "Excellent", "Masterwork", "Legendary" };
+
+        private static int QualityIndex(string name)
+        {
+            for (int i = 0; i < QualityNames.Length; i++)
+                if (string.Equals(QualityNames[i], (name ?? "").Trim(), StringComparison.OrdinalIgnoreCase)) return i + 1;
+            return -1;
+        }
+
         public static bool ValidatePayload(KmhThingPayload p)
         {
             if (p == null || string.IsNullOrEmpty(p.DefName)) return false;
+            if (!BlobMatches(p, out _)) return false;
             if (p.StackCount < 1) p.StackCount = 1;
             if (string.IsNullOrEmpty(p.Fingerprint)) p.Fingerprint = GetStateFingerprint(p);
             p.Warnings = p.Warnings ?? new List<string>();

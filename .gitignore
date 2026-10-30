@@ -9,9 +9,13 @@ obj/
 # Per-developer csproj override pointing at the local RWT build folder
 # (see Source/Local.props.example).
 Local.props
+# The Six Labors licence key a Release build reads; each builder uses their own.
+*.lic
 
 # Build output of deploy.ps1 — regenerable from sources.
 Deploy/
+# The coordinator's host setup names this network; "Deploy/" covers it only where git ignores case.
+/coordinator/deploy/
 
 # Release zips assembled by deploy.ps1 — large binary artifacts,
 # uploaded to GitHub Releases rather than tracked.
@@ -32,6 +36,7 @@ Releases/
 /kmh-data/
 /Source/Assets/*
 !/Source/Assets/Icons/
+!/Source/Assets/Fonts/
 /Source/Backups/
 /Source/Configs/
 /Source/Logs/

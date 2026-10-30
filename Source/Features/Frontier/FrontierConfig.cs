@@ -4,6 +4,9 @@ namespace KMHServerAddon.Features.Frontier
 {
     internal sealed class FrontierConfig
     {
+        // Every other config carries one; without it a future breaking change here has no migration hook.
+        public int SchemaVersion { get; set; } = 1;
+
         // The activity caps below, not this switch, are what keep the Director from filling the planet.
         public bool Enabled { get; set; } = true;
 
@@ -12,10 +15,10 @@ namespace KMHServerAddon.Features.Frontier
         public int MinMinutesBetweenActions { get; set; } = 90;
         public int TargetCooldownMinutes    { get; set; } = 720;
 
-        public int SpawnBudget          { get; set; } = 2;    // actions available per refill window
+        public int SpawnBudget          { get; set; } = 2;
         public int BudgetRefillHours    { get; set; } = 24;
 
-        public int ResolutionRetention  { get; set; } = 100;  // finished records kept for audit
+        public int ResolutionRetention  { get; set; } = 100;
 
         // On by default because a small server may only ever have one client online to answer.
         public bool AllowSingleProposer { get; set; } = true;
@@ -29,8 +32,8 @@ namespace KMHServerAddon.Features.Frontier
         public int    MinOperationReward     { get; set; } = 100;
 
         // One multiplier on both cost and reward, so a busier server is a bigger contest and not a better deal.
-        public double ReclaimScalePerActivePlayer { get; set; } = 0.15;   // per player online beyond the first
-        public double ReclaimScalePerKnownPlayer  { get; set; } = 0.05;   // per player who has ever joined, beyond the first
+        public double ReclaimScalePerActivePlayer { get; set; } = 0.15;
+        public double ReclaimScalePerKnownPlayer  { get; set; } = 0.05;
         public double ReclaimScaleMax             { get; set; } = 5.0;    // ceiling, so a large roster cannot run away
 
         private static FrontierConfig _current;

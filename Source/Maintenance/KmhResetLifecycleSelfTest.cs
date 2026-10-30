@@ -7,7 +7,7 @@ using KMHServerAddon.Transactions;
 
 namespace KMHServerAddon.Maintenance
 {
-    // A reset destroys authoritative state: who may start one, that a half-finished one finishes, and that nothing pre-reset applies after.
+    // A reset destroys authoritative state, so who starts it, its resume and stale-op refusal are all pinned.
     internal static class KmhResetLifecycleSelfTest
     {
         private static string User() => "selftest_reset_" + Guid.NewGuid().ToString("N").Substring(0, 8);
@@ -32,7 +32,6 @@ namespace KMHServerAddon.Maintenance
                 bool sameSave      = !EconomyResetStore.ShouldReset(who, "save-a", out string r2);
                 bool changed       =  EconomyResetStore.ShouldReset(who, "save-b", out string r3);
 
-                // The server records the reset, and a third claimed save inside the cooldown is refused.
                 EconomyResetStore.ConfirmReset(who, "save-b");
                 bool rateLimited   = !EconomyResetStore.ShouldReset(who, "save-c", out string r4);
 
@@ -54,7 +53,7 @@ namespace KMHServerAddon.Maintenance
                 // Mid-reset the id must still read as the old save, or a restart would decide the work was done.
                 bool stillOld = EconomyResetStore.ShouldReset(who, "save-b", out _) == false
                              && KmhEconomyReset.InProgress;
-                // Every ordinary ingress: Discord, the SDK and scheduler settlement reach the same stores across a half-reset boundary.
+                // Discord, the SDK and scheduler settlement reach the same stores, so every ingress is barred mid-reset.
                 bool barrier = !KmhAdmission.AllowsValueMutation(KmhIngress.ClientApi, out _)
                             && !KmhAdmission.AllowsValueMutation(KmhIngress.ClientChat, out _)
                             && !KmhAdmission.AllowsValueMutation(KmhIngress.Discord, out _)
@@ -125,7 +124,7 @@ namespace KMHServerAddon.Maintenance
                 if (!KmhEconomyReset.Begin(who, "save-b", out string why)) return (false, "begin: " + why);
                 KmhEconomyReset.Run(who, "save-b");
 
-                // The row was authorised against a colony that no longer exists, so compensating it would undo the reset's destruction.
+                // The row was authorised against a colony that no longer exists; compensating it would undo the reset.
                 bool stale1 = KmhTransactionRepository.IsStale(stale);
                 bool refusedUpdate = !KmhTransactionRepository.Update(stale);
                 KmhTransactionRepository.Compensate(stale);
@@ -140,6 +139,67 @@ namespace KMHServerAddon.Maintenance
                 bool ok = stale1 && refusedUpdate && steel == 0;
                 return (ok, ok ? "stale row refused and closed; the reset's destruction stands"
                               : $"detectedStale={stale1}, refusedUpdate={refusedUpdate}, steelBack={steel} (expected 0)");
+            });
+
+            // The vault is not all a save owns: a payout written down but unpaid would otherwise land in the new save.
+            Check("Reset authority: a new save with an empty vault still drops what the old save was owed", () =>
+            {
+                string who = User();
+                EconomyConfig cfg = KmhDeepCopy.Of(EconomyConfig.Current);
+                cfg.ResetEconomyOnNewSave = true;
+                EconomyConfig hadCfg = EconomyConfig.ApplyForTest(cfg);
+                KmhEconomyReset.ResetForTest();
+                EconomyResetStore.Forget(who);
+                try
+                {
+                    EconomyResetStore.ShouldReset(who, "save-a", out _);
+                    Features.Mail.MailStore.PlantPendingPayoutForTest(who, 300);
+                    var c = new ServerClient(null, null, createListener: false);
+                    c.GetData<UserFile>(new UserFile { Username = who });
+                    Features.PlayerStats.PlayerStatsHandler.ColonyReportForTest(c, SubProtocol.KmhEnvelope.ParseForTest(new { save_id = "save-b" }));
+                    Features.Mail.MailStore.RecoverPendingPayouts();
+                    long silver = TreasuryStore.GetPersonalSilver(who);
+                    bool ok = silver == 0 && !KmhEconomyReset.InProgress;
+                    return (ok, ok ? "the owed payout went with the old save" : $"{silver} silver owed to the old save was paid into the new one");
+                }
+                finally
+                {
+                    EconomyConfig.ApplyForTest(hadCfg);
+                    Features.Mail.MailStore.DropPendingPayoutsFor(who);
+                    Features.PlayerStats.PlayerStatsStore.RemoveUser(who);
+                    TreasuryStore.PurgeOwnerForTest(who);
+                    EconomyResetStore.Forget(who);
+                    KmhEconomyReset.ResetForTest();
+                }
+            });
+
+            // A restart reads the save id from disk: an unwritten one is the old save, and the new one would be wiped again.
+            Check("Reset durability: a new save id the disk refused keeps the reset open until it is written", () =>
+            {
+                string who = User();
+                KmhEconomyReset.ResetForTest();
+                EconomyResetStore.Forget(who);
+                try
+                {
+                    EconomyResetStore.ShouldReset(who, "save-a", out _);
+                    if (!KmhEconomyReset.Begin(who, "save-b", out string why)) return (false, "begin: " + why);
+                    using (JsonFileStore.FailWritesForTest(p => p == KmhDataPaths.SaveIdsFile ? "injected: disk full" : null))
+                        KmhEconomyReset.Run(who, "save-b");
+                    bool heldOpen = KmhEconomyReset.Resetting(who) && KmhEconomyReset.StalledForTest
+                                 && !KmhAdmission.AllowsValueMutation(KmhIngress.ClientApi, out _);
+                    KmhEconomyReset.ResumeStalled();
+                    bool closed = !KmhEconomyReset.InProgress;
+                    EconomyResetStore.LoadFromDisk();
+                    bool onDisk = !EconomyResetStore.ShouldReset(who, "save-b", out string after);
+                    bool ok = heldOpen && closed && onDisk;
+                    return (ok, ok ? "held open while the id was unwritten; closed by the retry with the new id on disk"
+                                  : $"heldOpen={heldOpen}, closedByRetry={closed}, newIdOnDisk={onDisk} ({after})");
+                }
+                finally
+                {
+                    EconomyResetStore.Forget(who);
+                    KmhEconomyReset.ResetForTest();
+                }
             });
 
             return r;

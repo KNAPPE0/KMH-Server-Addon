@@ -1,7 +1,8 @@
-KMH icon inventory & notes
-==========================
+Colony Nexus icon inventory & notes
+===================================
 All icons ship from Source/Assets/Icons and are staged into KMH-Data/Icons on build.
-Source/license: Google Noto Emoji (https://github.com/googlefonts/noto-emoji), Apache License 2.0.
+kmh_logo is the Colony Nexus mark, Colony Nexus's own artwork; every other icon is Google Noto Emoji
+(https://github.com/googlefonts/noto-emoji), Apache License 2.0.
 Do not add images from unlicensed/unknown sources.
 
 Which embeds actually carry an icon
@@ -9,8 +10,11 @@ Which embeds actually carry an icon
 Only these post an embed WITH a thumbnail. Everything else posts without one (see below).
 
   kmh_logo.png        "Server online" announcement. Also the fallback whenever a requested
-                      icon has no file. PLACEHOLDER (a castle) - server owners can replace it
-                      by dropping their own kmh_logo.png into KMH-Data/Icons.
+                      icon has no file. This is the Colony Nexus mark (the world, ring and moon
+                      from the Colony Nexus website), rendered together with the mod icon
+                      (KMH-Patch/About/ModIcon.png); the file keeps the name kmh_logo.png.
+                      Server owners can brand their own server by dropping their own
+                      kmh_logo.png into KMH-Data/Icons.
   marketplace.png     "New listing" and "Item sold"
   site_created.png    "New site built"
   site_destroyed.png  "Site removed"
@@ -51,7 +55,7 @@ display RimWorld's .dds / .dds.zstd - those are only for the in-game client icon
 
 In-game world markers
 ---------------------
-KMH world objects (Defs/WorldObjectDefs/*.xml in the client mod) currently point at vanilla
+Colony Nexus world objects (Defs/WorldObjectDefs/*.xml in the client mod) currently point at vanilla
 RimWorld textures, so the mod ships no extra world art. Note that the archetype-matched vanilla
 work-site textures (FarmingWorkSite / MiningWorkSite / LoggingWorkSite) are Ideology DLC and
 must NOT be referenced by a base-game mod.

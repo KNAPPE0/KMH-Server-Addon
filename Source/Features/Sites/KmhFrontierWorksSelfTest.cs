@@ -87,7 +87,7 @@ namespace KMHServerAddon.Features.Sites
             r.Add(("Frontier: stability clamps to 0-100",
                    SiteStability.Clamp(-50) == 0 && SiteStability.Clamp(999) == 100, ""));
 
-            // These call the site's real output path, so a rule deleted from it fails here rather than going dead quietly.
+            // These call the site's real output path, so a rule deleted from it fails here instead of going quietly dead.
             SiteEntry live = Worked(new SiteEntry { OutputTier = 2, TierMaxOutputMultiplier = 2.0, Stability = 100 });
             r.Add(("Frontier: a healthy plain site produces at its skill factor",
                    Math.Abs(SiteStore.OutputFactor(live) - 1.0) < 0.001, $"{SiteStore.OutputFactor(live):0.000}"));
@@ -250,12 +250,23 @@ namespace KMHServerAddon.Features.Sites
             r.Add(("Ownership: a guild site with no guild named is manageable by nobody",
                    !SiteOwnership.CanManage(new SiteEntry { OwnerKind = SiteEntry.OwnerGuildKind }, "Ada"), ""));
             // That read is not a comparison, so the contract guard cannot see it and this is the only cover it has.
-            var guildOwned = new SiteEntry { OwnerKind = SiteEntry.OwnerGuildKind, ControllingGuild = "Wardens" };
-            r.Add(("Ownership: a guild site's live guild is the guild that controls it",
-                   SiteStore.OwnerCurrentGuild(guildOwned) == "Wardens", SiteStore.OwnerCurrentGuild(guildOwned)));
+            string wardens = "selftest wardens " + Guid.NewGuid().ToString("N").Substring(0, 6);
+            string founder = "__kmh_selftest_" + Guid.NewGuid().ToString("N").Substring(0, 8);
+            int wTile = 8_100_000 + new Random().Next(0, 90_000);
+            var guildOwned = new SiteEntry { Tile = wTile, OwnerKind = SiteEntry.OwnerGuildKind, ControllingGuild = wardens };
+            try
+            {
+                Guilds.GuildStore.CreateGuildAndJoinAsAdmin(founder, wardens, out _);
+                SiteStore.BindGuildForTest(wTile, Guilds.GuildIdentity.Of(wardens));
+                string bound = SiteStore.OwnerCurrentGuild(guildOwned);
+                SiteStore.BindGuildForTest(wTile, SiteStore.OrphanBindingPrefix + "selftest");
+                string orphaned = SiteStore.OwnerCurrentGuild(guildOwned);
+                r.Add(("Ownership: a guild site's live guild is the guild that controls it - while bound to that incarnation",
+                       bound == wardens && orphaned == "", $"bound='{bound}' orphaned='{orphaned}'"));
+            }
+            finally { SiteStore.BindGuildForTest(wTile, null); Guilds.GuildStore.Leave(founder, out _); }
             r.Add(("Ownership: a system outpost consumes nobody's guild quota",
                    SiteStore.OwnerCurrentGuild(sys) == "" && SiteStore.OwnerCurrentGuild(neut) == "", ""));
-
 
             r.Add(("Outpost: an ordinary site is not an outpost",
                    !SiteOutposts.IsOutpost(legacy2)
@@ -504,18 +515,24 @@ namespace KMHServerAddon.Features.Sites
             reloaded.WorkerProgress = new Dictionary<string, WorkerProgressDto> { { "Ada", new WorkerProgressDto { PawnLoadId = 7, Xp = 40 } } };
             reloaded.StoredItems    = new Dictionary<string, int> { { "Steel", 5 }, { "steel", 7 } };
             SiteStore.NormalizeKeys(reloaded);
+            // Rows re-key onto their pawn on load.
             r.Add(("Sites: a reloaded site matches its workers regardless of casing",
-                   reloaded.WorkerProgress.ContainsKey("ada"), "a case-sensitive map reads as no workers and pauses the site"));
+                   reloaded.WorkerProgress.ContainsKey(SiteWorkerKey.For("ada", 7))
+                   && SiteWorkerKey.IsOwnedBy(SiteWorkerKey.For("Ada", 7), "ADA"),
+                   "a case-sensitive map reads as no workers and pauses the site"));
             r.Add(("Sites: reloaded storage merges a case clash instead of dropping a side",
                    reloaded.StoredItems.TryGetValue("STEEL", out int steelQty) && steelQty == 12, $"steel={steelQty}"));
 
             // A JSON null passes the length check, so clamping must replace it or the classifier throws on first build.
-            var holed = new SitesConfig { OutputTiers = new SiteOutputTier[] { null, null, null, null } };
+            var holed = new SitesConfig
+            {
+                Output = new SiteOutput { Tiers = new SiteOutputTier[] { null, null, null, null } },
+            };
             holed.Clamp();
             bool tiersFilled = true;
-            foreach (SiteOutputTier t in holed.OutputTiers) if (t == null) tiersFilled = false;
+            foreach (SiteOutputTier t in holed.Output.Tiers) if (t == null) tiersFilled = false;
             r.Add(("Sites: a hand-edited config with a null output tier is repaired, not carried",
-                   tiersFilled && holed.OutputTiers.Length >= 4, "a null tier throws the first time it is classified"));
+                   tiersFilled && holed.Output.Tiers.Length >= 4, "a null tier throws the first time it is classified"));
 
             r.Add(("Sites: an unnamed place is still called something",
                    SiteStore.NameOf(new SiteEntry { Tile = 4211 }) == "tile 4211"

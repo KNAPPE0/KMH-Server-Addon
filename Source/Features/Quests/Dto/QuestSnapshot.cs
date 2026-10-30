@@ -28,7 +28,7 @@ namespace KMHServerAddon.Features.Quests.Dto
         public const string StateOpen          = "open";
         public const string StateClaimed       = "claimed";
         public const string StateSubmitted     = "submitted";
-        public const string StatePendingReview = "pending_review"; // proof submitted, awaiting poster
+        public const string StatePendingReview = "pending_review";
         public const string StateCompleted     = "completed";
         public const string StateExpired       = "expired";
         public const string StateCancelled     = "cancelled";

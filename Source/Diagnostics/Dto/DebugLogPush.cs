@@ -8,7 +8,7 @@ namespace KMHServerAddon.Diagnostics.Dto
     {
         [JsonProperty("lines")] public List<string> Lines { get; set; } = new List<string>();
 
-        // Blank from a pre-1.3.0 client, so nothing may require it.
+        // Blank from older clients, so nothing may require it.
         [JsonProperty("session_id")] public string SessionId { get; set; } = "";
         [JsonProperty("seq")]        public long   Sequence  { get; set; } = 0;
     }

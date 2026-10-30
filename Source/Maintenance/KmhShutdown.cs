@@ -3,7 +3,7 @@ using KMHServerAddon.Diagnostics;
 
 namespace KMHServerAddon.Maintenance
 {
-    // Ordered quiescence: the old shutdown flushed the stores while the scheduler was still settling auctions.
+    // Order matters: flushing stores while the scheduler still settles auctions writes half-settled state.
     internal static class KmhShutdown
     {
         private static readonly object _lock = new object();
@@ -19,30 +19,44 @@ namespace KMHServerAddon.Maintenance
                 _begun = true;
             }
 
-            // 1. No new ordinary mutation; admin and recovery stay privileged so the steps below are not gated against themselves.
+            // Admin and recovery stay privileged so the steps below are not gated against themselves.
             KmhMaintenanceGate.Enter(KmhMaintenanceReason.Shutdown);
 
-            // 2. Park background work and wait for the job already running to finish.
             if (!KmhScheduler.StopAndDrain(TimeSpan.FromSeconds(10)))
                 ServerLog.Warn("Shutdown: a scheduler job was still running after 10s - flushing anyway.");
 
-            // 3. Durability work that must complete: the ledger holds entries no store snapshot contains.
+            // The gate stops new moves; one admitted before it may be between its writes and must finish first.
+            if (!KmhValueOps.WaitForIdle(TimeSpan.FromSeconds(10)))
+                ServerLog.Warn($"Shutdown: {KmhValueOps.InFlight} value move(s) still running after 10s - flushing anyway.");
+
+            // Before the config flush below, or a heartbeat in flight can persist a sequence after it.
+            try
+            {
+                if (!Features.Global.KmhGlobalService.StopAndWait(TimeSpan.FromSeconds(10)))
+                    ServerLog.Warn("Shutdown: a Global heartbeat was still in flight after 10s - flushing anyway.");
+            }
+            catch (Exception ex) { ServerLog.Warn($"Shutdown: Global heartbeat stop failed: {ex.Message}"); }
+
+            // Parked with it: the world chat poller talks to the same directory on its own timer.
+            try { Features.Discord.KmhWorldChatDiscordBridge.Stop(); }
+            catch (Exception ex) { ServerLog.Warn($"Shutdown: world chat bridge stop failed: {ex.Message}"); }
+
+            // The ledger holds entries no store snapshot contains.
             try { Persistence.TransactionLedger.Flush(); }
             catch (Exception ex) { ServerLog.Warn($"Shutdown: ledger flush failed: {ex.Message}"); }
 
-            // 4. Now nothing else is writing, so the snapshot on disk is the one in memory.
             try { ServerLog.Info($"Shutdown flush: {KmhDataFlush.FlushAll()} store(s) saved."); }
             catch (Exception ex) { ServerLog.Warn($"Shutdown: store flush failed: {ex.Message}"); }
 
-            // 5. Extensions last: IKmhServerExtension declares Shutdown(), and they may still want to read state.
+            // Extensions after the flush, since they may still want to read state.
             try { Extensibility.ExtensionLoader.ShutdownAll(); }
             catch (Exception ex) { ServerLog.Warn($"Shutdown: extension shutdown failed: {ex.Message}"); }
 
-            // 6. Its own loop would otherwise keep appending behind everything above.
+            // Its own loop would otherwise keep appending behind everything above.
             try { Persistence.TransactionLedger.Stop(); }
             catch (Exception ex) { ServerLog.Warn($"Shutdown: ledger stop failed: {ex.Message}"); }
 
-            // 7. Last, and bounded: everything above is worth recording, but a stuck sink must not hold the exit.
+            // Last, and bounded: everything above is worth recording, but a stuck sink must not hold the exit.
             try
             {
                 ServerLog.Info($"Shutdown complete - {Persistence.JsonFileStore.DescribeHealth()}");
@@ -59,6 +73,7 @@ namespace KMHServerAddon.Maintenance
                 _begun = false;
             }
             KmhMaintenanceGate.Release();
+            KmhScheduler.UnparkForTest();
         }
     }
 }

@@ -103,7 +103,7 @@ namespace KMHServerAddon.Diagnostics
 
                 if (TryRestoreKnownGood(path))
                 {
-                    ServerLog.Warn($"RWT config {name} was {Describe(state)} - restored from KMH's last-good copy. "
+                    ServerLog.Warn($"RWT config {name} was {Describe(state)} - restored from the Colony Nexus last-good copy. "
                                  + "That is what a failed write leaves behind, so check free disk space.");
                     continue;
                 }

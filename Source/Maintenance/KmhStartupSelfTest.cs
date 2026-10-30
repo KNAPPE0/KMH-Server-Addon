@@ -4,7 +4,7 @@ using KMHServerAddon.Features.Economy;
 
 namespace KMHServerAddon.Maintenance
 {
-    // Handlers before their stores, workers past a failed start, stale interactions: each acts on state the server does not have.
+    // Handlers before stores, workers past a failed start, stale interactions: each acts on state the server lacks.
     internal static class KmhStartupSelfTest
     {
         public static List<(string Name, bool Ok, string Detail)> Run()
@@ -54,7 +54,7 @@ namespace KMHServerAddon.Maintenance
                 KmhReadyState was = KmhReadiness.State;
                 try
                 {
-                    // The reported failure may BE an incompatible host, so the report must not call into it - a throw here kills the process.
+                    // The failure may BE an incompatible host, so the report must not call into it; a throw kills the process.
                     KmhReadiness.ResetForTest(KmhReadyState.Starting);
                     KmhReadiness.Failed("selftest: host API mismatch");
                     bool held = KmhReadiness.State == KmhReadyState.Failed
@@ -123,6 +123,7 @@ namespace KMHServerAddon.Maintenance
 
                 bool drained = KmhScheduler.StopAndDrain(TimeSpan.FromSeconds(5));
                 bool idle = !KmhScheduler.IsBusy;
+                KmhScheduler.UnparkForTest();
                 bool sameJobs = after == before;
                 bool ok = sameJobs && drained && idle;
                 return (ok, ok ? $"{after} job(s) registered once; the scheduler drained before shutdown flushes"

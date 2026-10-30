@@ -123,7 +123,7 @@ namespace KMHServerAddon.Features.Roadworks
                    RoadworksStore.ReservedSilverFor("__kmh_no_such_player__") == 0
                    && RoadworksStore.ReservedSilverFor("") == 0, ""));
 
-            // The settled fixtures have spent != reserved on purpose, or the subtraction alone returns 0 and the state rule is never exercised.
+            // Settled fixtures keep spent != reserved, or the subtraction alone gives 0 and the state rule goes untested.
             RoadProject building  = new RoadProject { State = RoadProject.StateBuilding,  EscrowSilver = 300, EscrowSilverSpent = 100 };
             RoadProject done      = new RoadProject { State = RoadProject.StateComplete,  EscrowSilver = 300, EscrowSilverSpent = 100 };
             RoadProject cancelled = new RoadProject { State = RoadProject.StateCancelled, EscrowSilver = 300, EscrowSilverSpent = 100 };
@@ -169,6 +169,15 @@ namespace KMHServerAddon.Features.Roadworks
                    RoadworksStore.ProjectsForSnapshot(owned, "__kmh_no_such_player__").Count == 0
                    && RoadworksStore.ProjectsForSnapshot(owned, "").Count == 0, ""));
 
+            owned[0].Route = new List<RoadTile> { new RoadTile { LayerId = 0, TileId = 11 }, new RoadTile { LayerId = 0, TileId = 12 }, new RoadTile { LayerId = 1, TileId = 13 } };
+            owned[2].Route = new List<RoadTile> { new RoadTile { LayerId = 0, TileId = 91 }, new RoadTile { LayerId = 0, TileId = 92 } };
+            List<Dto.RoadProjectDto> routed = RoadworksStore.ProjectsForSnapshot(owned, "Ada");
+            Dto.RoadProjectDto first = routed.Find(d => d.Id == 1);
+            string sent = first == null ? "none" : string.Join(",", first.RouteTiles) + " / " + string.Join(",", first.RouteLayers);
+            r.Add(("Roadworks: the owner's snapshot carries each planned route tile for tile, layers included, and nobody else's",
+                   sent == "11,12,13 / 0,0,1" && !routed.Exists(d => d.RouteTiles.Contains(91))
+                   && routed.Find(d => d.Id == 2)?.RouteTiles.Count == 0, $"route {sent}"));
+
             var network = new List<RoadSegment>
             {
                 new RoadSegment { A = T(1), B = T(2), Tier = RoadTiers.Highway },
@@ -190,10 +199,9 @@ namespace KMHServerAddon.Features.Roadworks
             r.Add(("Roadworks: a player with no projects gets none and no escrow",
                    snap.Projects.Count == 0 && snap.EscrowSilver == 0, ""));
             r.Add(("Roadworks: the snapshot carries the route limit the server will enforce",
-                   snap.MaxRouteSegments == Economy.EconomyConfig.Current.RoadworksMaxSegmentsPerProject,
+                   snap.MaxRouteSegments == Economy.EconomyConfig.Current.Roadworks.MaxSegmentsPerProject,
                    "a client that quotes a different limit builds routes the server rejects"));
 
-            // The planet's roads are identical for everyone, so a broadcast builds them once and hands the same list out.
             Dto.RoadworksSnapshot a1 = RoadworksStore.BuildSnapshotFor("__kmh_no_such_player__");
             Dto.RoadworksSnapshot a2 = RoadworksStore.BuildSnapshotFor("__kmh_other_player__");
             r.Add(("Roadworks: two players in one broadcast share one segment list",
@@ -203,7 +211,7 @@ namespace KMHServerAddon.Features.Roadworks
                    a1.Segments.Count == RoadworksStore.SegmentsForSnapshot(
                        RoadworksStore.SegmentsForTest(), a1.AllowRoadworks).Count,
                    $"{a1.Segments.Count} shared vs {RoadworksStore.SegmentsForTest().Count} held"));
-            // Sharing is only safe while a change throws the copy away; a cache nothing invalidates would pass the check above.
+            // Sharing is safe only while a change throws the copy away; a never-invalidated cache passes the check above.
             RoadworksStore.BumpRevisionForTest();
             Dto.RoadworksSnapshot a3 = RoadworksStore.BuildSnapshotFor("__kmh_no_such_player__");
             r.Add(("Roadworks: a change to the network throws the shared list away",

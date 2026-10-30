@@ -1,11 +1,9 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
-using Discord;
-using Discord.WebSocket;
+using Kmh.Discord.Wire;
 using KMHServerAddon.Features.ItemLabels;
 using KMHServerAddon.Util;
-using KMHServerAddon.Features.LinkedAccounts;
 using KMHServerAddon.Features.Marketplace;
 using KMHServerAddon.Features.Marketplace.Dto;
 using KMHServerAddon.Features.Quests;
@@ -20,7 +18,7 @@ namespace KMHServerAddon.Features.Discord
     {
         private const int PageSize = 8;
 
-        public static async Task<bool> TryHandleAsync(SocketMessage raw, string cmd, string[] parts)
+        public static async Task<bool> TryHandleAsync(KmhDiscordMessage raw, string cmd, string[] parts)
         {
             switch (cmd)
             {
@@ -61,10 +59,11 @@ namespace KMHServerAddon.Features.Discord
             }
         }
 
-        private static async Task HandleMarket(SocketMessage raw, string[] parts)
+        private static async Task HandleMarket(KmhDiscordMessage raw, string[] parts)
         {
-            string callerUser = ResolveLinkedUsername(raw);
-            MarketplaceSnapshot snap = MarketplaceStore.BuildSnapshot(callerUser ?? "");
+            string callerUser = DiscordCommandUtil.LinkedUsername(raw);
+            // The public view: the reply lands in a channel, where a guild's own listings must not show.
+            MarketplaceSnapshot snap = MarketplaceStore.BuildSnapshot("");
             List<MarketplaceListing> rows = snap?.Listings ?? new List<MarketplaceListing>();
 
             int  page    = 1;
@@ -82,13 +81,7 @@ namespace KMHServerAddon.Features.Discord
                         return;
                     }
                     myOnly = true;
-                    List<MarketplaceListing> mine = new List<MarketplaceListing>();
-                    foreach (MarketplaceListing l in rows)
-                    {
-                        if (string.Equals(l.SellerUsername, callerUser, StringComparison.OrdinalIgnoreCase))
-                            mine.Add(l);
-                    }
-                    rows = mine;
+                    rows = DiscordShowcaseBuilder.ListingsBy(rows, callerUser);
                 }
                 else if (int.TryParse(parts[1], out int p) && p > 0)
                 {
@@ -102,9 +95,9 @@ namespace KMHServerAddon.Features.Discord
                 return byItem != 0 ? byItem : a.UnitPriceSilver.CompareTo(b.UnitPriceSilver);
             });
 
-            EmbedBuilder eb = new EmbedBuilder()
+            KmhEmbedSpecBuilder eb = new KmhEmbedSpecBuilder()
                 .WithTitle(myOnly ? "Your listings" : "Marketplace")
-                .WithColor(new Color(0xFF, 0xC4, 0x61));
+                .WithColor(0xFFC461);
 
             if (rows.Count == 0)
             {
@@ -143,9 +136,9 @@ namespace KMHServerAddon.Features.Discord
             await raw.Channel.SendMessageAsync(embed: eb.Build()).ConfigureAwait(false);
         }
 
-        private static async Task HandleQuests(SocketMessage raw, string[] parts)
+        private static async Task HandleQuests(KmhDiscordMessage raw, string[] parts)
         {
-            string callerUser = ResolveLinkedUsername(raw);
+            string callerUser = DiscordCommandUtil.LinkedUsername(raw);
             QuestSnapshot snap = QuestStore.BuildSnapshot(callerUser ?? "");
             List<QuestEntry> rows = snap?.Quests ?? new List<QuestEntry>();
 
@@ -158,9 +151,9 @@ namespace KMHServerAddon.Features.Discord
             int page = 1;
             if (parts.Length >= 2 && int.TryParse(parts[1], out int p) && p > 0) page = p;
 
-            EmbedBuilder eb = new EmbedBuilder()
+            KmhEmbedSpecBuilder eb = new KmhEmbedSpecBuilder()
                 .WithTitle("Quest board")
-                .WithColor(new Color(0x8C, 0xDC, 0x8C));
+                .WithColor(0x8CDC8C);
 
             if (open.Count == 0)
             {
@@ -180,7 +173,7 @@ namespace KMHServerAddon.Features.Discord
             {
                 QuestEntry q = open[i];
                 string kindLabel = q.Kind == QuestEntry.KindBounty ? "Bounty" : "Deliver";
-                string title     = string.IsNullOrEmpty(q.Title) ? "(no title)" : q.Title;
+                string title     = string.IsNullOrEmpty(q.Title) ? "(no title)" : DiscordText.SafeName(q.Title);
                 string body      = $"**{kindLabel}** · bounty `{SilverFmt.Format(q.BountySilver)}` · by **{DiscordText.SafeName(q.PosterUsername)}**";
                 if (q.Kind == QuestEntry.KindDeliverItem && !string.IsNullOrEmpty(q.TargetItemDefName))
                 {
@@ -191,7 +184,7 @@ namespace KMHServerAddon.Features.Discord
                     string desc = q.Description.Length > 200
                         ? q.Description.Substring(0, 197) + "…"
                         : q.Description;
-                    body += $"\n{desc}";
+                    body += $"\n{DiscordText.Escape(desc)}";
                 }
                 body += $"\n_{FormatExpiry(q.ExpiresUtcTicks)}_";
                 eb.AddField($"#{q.Id} · {title}", body, inline: false);
@@ -206,9 +199,9 @@ namespace KMHServerAddon.Features.Discord
             await raw.Channel.SendMessageAsync(embed: eb.Build()).ConfigureAwait(false);
         }
 
-        private static async Task HandleTreasury(SocketMessage raw)
+        private static async Task HandleTreasury(KmhDiscordMessage raw)
         {
-            string callerUser = ResolveLinkedUsername(raw);
+            string callerUser = DiscordCommandUtil.LinkedUsername(raw);
             if (string.IsNullOrEmpty(callerUser))
             {
                 await raw.Channel.SendMessageAsync(
@@ -219,9 +212,9 @@ namespace KMHServerAddon.Features.Discord
             }
 
             TreasurySnapshot t = TreasuryStore.GetSnapshotFor(callerUser);
-            EmbedBuilder eb = new EmbedBuilder()
+            KmhEmbedSpecBuilder eb = new KmhEmbedSpecBuilder()
                 .WithTitle($"Treasury · {callerUser}")
-                .WithColor(new Color(0xBA, 0x84, 0xF6));
+                .WithColor(0xBA84F6);
 
             if (t == null)
             {
@@ -261,7 +254,7 @@ namespace KMHServerAddon.Features.Discord
             await raw.Channel.SendMessageAsync(embed: eb.Build()).ConfigureAwait(false);
         }
 
-        private static async Task HandleFind(SocketMessage raw, string[] parts)
+        private static async Task HandleFind(KmhDiscordMessage raw, string[] parts)
         {
             if (parts.Length < 2)
             {
@@ -270,11 +263,11 @@ namespace KMHServerAddon.Features.Discord
                     .ConfigureAwait(false);
                 return;
             }
-            string query = JoinFrom(parts, 1).Trim();
+            string query = DiscordCommandUtil.JoinFrom(parts, 1).Trim();
             if (string.IsNullOrEmpty(query)) return;
 
-            string callerUser = ResolveLinkedUsername(raw);
-            MarketplaceSnapshot snap = MarketplaceStore.BuildSnapshot(callerUser ?? "");
+            string callerUser = DiscordCommandUtil.LinkedUsername(raw);
+            MarketplaceSnapshot snap = MarketplaceStore.BuildSnapshot("");
             List<MarketplaceListing> hits = new List<MarketplaceListing>();
             if (snap?.Listings != null)
             {
@@ -287,9 +280,9 @@ namespace KMHServerAddon.Features.Discord
                 }
             }
 
-            EmbedBuilder eb = new EmbedBuilder()
+            KmhEmbedSpecBuilder eb = new KmhEmbedSpecBuilder()
                 .WithTitle($"Search: {query}")
-                .WithColor(new Color(0xFF, 0xC4, 0x61));
+                .WithColor(0xFFC461);
 
             if (hits.Count == 0)
             {
@@ -314,7 +307,7 @@ namespace KMHServerAddon.Features.Discord
             await raw.Channel.SendMessageAsync(embed: eb.Build()).ConfigureAwait(false);
         }
 
-        private static async Task HandleCompare(SocketMessage raw, string[] parts)
+        private static async Task HandleCompare(KmhDiscordMessage raw, string[] parts)
         {
             if (parts.Length < 2)
             {
@@ -324,7 +317,7 @@ namespace KMHServerAddon.Features.Discord
                     .ConfigureAwait(false);
                 return;
             }
-            string query = JoinFrom(parts, 1).Trim();
+            string query = DiscordCommandUtil.JoinFrom(parts, 1).Trim();
             if (string.IsNullOrEmpty(query)) return;
 
             string defName = ItemLabelCache.ResolveDefNameByQuery(query, out List<string> candidates);
@@ -332,21 +325,14 @@ namespace KMHServerAddon.Features.Discord
             {
                 if (candidates != null && candidates.Count > 1)
                 {
-                    System.Text.StringBuilder sb = new System.Text.StringBuilder();
-                    sb.Append("`").Append(query).Append("` matches multiple items - be more specific:\n");
-                    foreach (string c in candidates)
-                    {
-                        sb.Append("• **").Append(DiscordText.Escape(ItemLabelCache.LabelFor(c)))
-                          .Append("** _(").Append(c).Append(")_\n");
-                    }
-                    await raw.Channel.SendMessageAsync(sb.ToString()).ConfigureAwait(false);
+                    await raw.Channel.SendMessageAsync(DiscordCommandUtil.AmbiguousItems(query, candidates)).ConfigureAwait(false);
                     return;
                 }
                 defName = query.Replace(' ', '_');
             }
 
-            string callerUser = ResolveLinkedUsername(raw);
-            MarketplaceSnapshot snap = MarketplaceStore.BuildSnapshot(callerUser ?? "");
+            string callerUser = DiscordCommandUtil.LinkedUsername(raw);
+            MarketplaceSnapshot snap = MarketplaceStore.BuildSnapshot("");
             List<MarketplaceListing> matches = new List<MarketplaceListing>();
             if (snap?.Listings != null)
             {
@@ -359,9 +345,9 @@ namespace KMHServerAddon.Features.Discord
 
             string label = ItemLabelCache.LabelFor(defName);
             string emoji = DiscordItemIconMap.EmojiFor(defName);
-            EmbedBuilder eb = new EmbedBuilder()
+            KmhEmbedSpecBuilder eb = new KmhEmbedSpecBuilder()
                 .WithTitle($"{emoji} Price compare · {label}")
-                .WithColor(new Color(0xFF, 0xC4, 0x61));
+                .WithColor(0xFFC461);
 
             if (matches.Count == 0)
             {
@@ -390,13 +376,13 @@ namespace KMHServerAddon.Features.Discord
             }
 
             // Cheapest only, because Discord caps a message at 25 buttons and the rest carry a !kmh-buy id anyway.
-            MessageComponent components = DiscordBuyButton.BuildBuyComponents(matches[0]);
+            KmhComponentSpec components = DiscordBuyButton.BuildBuyComponents(matches[0]);
             await raw.Channel.SendMessageAsync(embed: eb.Build(), components: components).ConfigureAwait(false);
         }
 
-        private static async Task HandleHistory(SocketMessage raw, string[] parts)
+        private static async Task HandleHistory(KmhDiscordMessage raw, string[] parts)
         {
-            string callerUser = ResolveLinkedUsername(raw);
+            string callerUser = DiscordCommandUtil.LinkedUsername(raw);
             if (string.IsNullOrEmpty(callerUser))
             {
                 await raw.Channel.SendMessageAsync(
@@ -409,9 +395,9 @@ namespace KMHServerAddon.Features.Discord
             if (parts.Length >= 2 && int.TryParse(parts[1], out int n) && n > 0) count = Math.Min(25, n);
 
             TreasurySnapshot t = TreasuryStore.GetSnapshotFor(callerUser);
-            EmbedBuilder eb = new EmbedBuilder()
+            KmhEmbedSpecBuilder eb = new KmhEmbedSpecBuilder()
                 .WithTitle($"Recent transactions · {callerUser}")
-                .WithColor(new Color(0xBA, 0x84, 0xF6));
+                .WithColor(0xBA84F6);
 
             if (t == null || t.RecentTransactions == null || t.RecentTransactions.Count == 0)
             {
@@ -445,12 +431,12 @@ namespace KMHServerAddon.Features.Discord
             await raw.Channel.SendMessageAsync(embed: eb.Build()).ConfigureAwait(false);
         }
 
-        private static async Task HandleCatalog(SocketMessage raw, string[] parts)
+        private static async Task HandleCatalog(KmhDiscordMessage raw, string[] parts)
         {
             int count = ItemLabelCache.Count;
-            EmbedBuilder eb = new EmbedBuilder()
+            KmhEmbedSpecBuilder eb = new KmhEmbedSpecBuilder()
                 .WithTitle($"Item catalog · {count} known defNames")
-                .WithColor(new Color(0xBA, 0x84, 0xF6));
+                .WithColor(0xBA84F6);
 
             if (count == 0)
             {
@@ -461,7 +447,7 @@ namespace KMHServerAddon.Features.Discord
                 return;
             }
 
-            string query = parts.Length >= 2 ? JoinFrom(parts, 1).Trim() : "";
+            string query = parts.Length >= 2 ? DiscordCommandUtil.JoinFrom(parts, 1).Trim() : "";
             List<KeyValuePair<string, string>> sample = ItemLabelCache.Sample(query, 25);
 
             System.Text.StringBuilder sb = new System.Text.StringBuilder();
@@ -480,18 +466,6 @@ namespace KMHServerAddon.Features.Discord
             await raw.Channel.SendMessageAsync(embed: eb.Build()).ConfigureAwait(false);
         }
 
-        private static string JoinFrom(string[] parts, int startIndex)
-        {
-            if (parts == null || startIndex >= parts.Length) return "";
-            System.Text.StringBuilder sb = new System.Text.StringBuilder();
-            for (int i = startIndex; i < parts.Length; i++)
-            {
-                if (i > startIndex) sb.Append(' ');
-                sb.Append(parts[i]);
-            }
-            return sb.ToString();
-        }
-
         private static string TryFormatRelative(long utcTicks)
         {
             if (utcTicks <= 0) return "(?)";
@@ -502,13 +476,6 @@ namespace KMHServerAddon.Features.Discord
                 return $"<t:{unix}:R>";
             }
             catch { return "(?)"; }
-        }
-
-        // Id only: a display-name fallback would let someone read another player's treasury by copying their name.
-        private static string ResolveLinkedUsername(SocketMessage raw)
-        {
-            if (raw?.Author == null) return null;
-            return LinkedAccountsStore.FindUsernameByDiscordId(raw.Author.Id);
         }
 
         private static string FormatExpiry(long utcTicks)

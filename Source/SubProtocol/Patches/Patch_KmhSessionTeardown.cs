@@ -3,7 +3,7 @@ using KMHServerAddon.Diagnostics;
 
 namespace KMHServerAddon.SubProtocol.Patches
 {
-    // Matched on the exact ServerClient: the player may already be back on a new session, and a username-keyed teardown would tear down the reconnection.
+    // Matched on the exact ServerClient: a username-keyed teardown would kill the player's newer reconnected session.
     [HarmonyPatch(typeof(InformationDisplayer), nameof(InformationDisplayer.DisplayDisconnect))]
     internal static class Patch_KmhSessionTeardown
     {
@@ -14,6 +14,8 @@ namespace KMHServerAddon.SubProtocol.Patches
             {
                 Features.Transport.KmhApiServer.CloseForSession(client);
                 KmhRouter.ForgetPeer(client);
+                Features.Global.KmhVerifiedPlayers.Forget(client);
+                Features.Global.Federation.FederationHandler.Forget(client);
             }
             catch (System.Exception ex) { ServerLog.Error("Session teardown threw", ex); }
         }

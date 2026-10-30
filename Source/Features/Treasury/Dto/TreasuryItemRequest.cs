@@ -10,7 +10,7 @@ namespace KMHServerAddon.Features.Treasury.Dto
         [JsonProperty("qty")]           public int    Qty         { get; set; } = 0;
         [JsonProperty("fingerprint")]   public string Fingerprint { get; set; } = "";
         [JsonProperty("payloads")]      public List<Items.KmhThingPayload> Payloads { get; set; }
-        // Durable-deposit txn id (new clients). Empty from old clients -> immediate-credit legacy path.
+        // Durable-deposit txn id; empty from an older client, which takes the immediate-credit path.
         [JsonProperty("txn_id")]        public string TxnId       { get; set; } = "";
     }
 }

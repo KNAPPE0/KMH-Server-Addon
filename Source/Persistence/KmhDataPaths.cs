@@ -18,8 +18,10 @@ namespace KMHServerAddon.Persistence
             public readonly bool   Regenerable;
             // Absence is a finding only for a file a healthy server should already have.
             public readonly bool   AbsentIsNormal;
-            public DataFile(string label, string path, bool regenerable, bool absentIsNormal = false)
-            { Label = label; Path = path; Regenerable = regenerable; AbsentIsNormal = absentIsNormal; }
+            // The config schema of the first build that writes this file: data older than that cannot have it yet.
+            public readonly int    SinceSchema;
+            public DataFile(string label, string path, bool regenerable, bool absentIsNormal = false, int sinceSchema = 0)
+            { Label = label; Path = path; Regenerable = regenerable; AbsentIsNormal = absentIsNormal; SinceSchema = sinceSchema; }
         }
 
         public static IReadOnlyList<DataFile> KnownDataFiles => new[]
@@ -44,6 +46,10 @@ namespace KMHServerAddon.Persistence
             new DataFile("Notifications",       NotificationsFile,  false),
             new DataFile("Recovery",            RecoveryFile,       false),
             new DataFile("Delivery/Outbound",   DeliveryFile,       false),
+            new DataFile("Connected treasury", ConnectedTreasuryFile, false, sinceSchema: 4),
+            new DataFile("Federated guilds", FederatedGuildsFile, false, sinceSchema: 4),
+            // Queued reports and leave notices Global has not taken yet; losing it loses a guild's departure.
+            new DataFile("Federation outbox", FederationOutboxFile, false, sinceSchema: 5),
             new DataFile("Seasons",             SeasonsFile,        false),
             new DataFile("Accounts",            LinkedAccountsFile, false),
             new DataFile("Guilds/Contributions", GuildContributionsFile, false),
@@ -60,8 +66,13 @@ namespace KMHServerAddon.Persistence
             new DataFile("Discord/UserState",   DiscordUserStateFile,        true, true),
             new DataFile("Discord/GuildRoles",  DiscordGuildRolesFile,       true, true),
             new DataFile("Discord/Leaderboard", DiscordLeaderboardStateFile, true, true),
+            new DataFile("Discord/Live",        DiscordLiveStateFile,        true, true),
             // Absent MEANS no migration is in flight, so this must never be created to reach a zero missing count.
             new DataFile("Migrations/Journal",  MigrationJournalFile,        true, true),
+            // Only while a season reset is unfinished; boot finishes it.
+            new DataFile("Migrations/SeasonReset", SeasonResetJournalFile,   true, true),
+            // Written on the first beat after RWT loads its mod config, so a server that never listed has none.
+            new DataFile("Mods/Profile",        ModProfileFile,              true, true),
             new DataFile("Config/Economy",      EconomyConfigFile,        true),
             new DataFile("Config/Sites",        SitesConfigFile,          true),
             new DataFile("Config/Frontier",     FrontierConfigFile,       true),
@@ -73,11 +84,25 @@ namespace KMHServerAddon.Persistence
             new DataFile("Config/Transport",    TransportConfigFile,      true),
             new DataFile("Config/Chat",         ChatConfigFile,           true),
             new DataFile("Config/Mail",         MailConfigFile,           true),
+            new DataFile("Config/Federation",   FederationConfigFile,     true),
+            new DataFile("Config/Mods",         ModPolicyConfigFile,      true),
             new DataFile("Config/Media",        MediaConfigFile,          true),
             new DataFile("Config/Staff",        StaffConfigFile,          true),
+            new DataFile("Moderation/Bans",     BansFile,                 true, true),
             new DataFile("Sites/Catalog",       SiteCatalogFile,          true, true),
             new DataFile("Config/Discord",      DiscordConfigFile,        true),
             new DataFile("Config/Features",     FeaturesConfigFile,       true),
+            new DataFile("Config/Global",       GlobalConfigFile,         true),
+            new DataFile("Identity/GlobalSetup", GlobalSetupFile,         true, sinceSchema: 4),
+            // Written when Global first assigns an id or a legacy Global.json identity moves here; never rebuilt.
+            new DataFile("Identity/GlobalState", GlobalStateFile,         false, true, sinceSchema: 7),
+            // Absent until Global has been reached, which is not a damaged server.
+            new DataFile("Identity/DirectoryKey", DirectoryKeyFile,       true, true),
+            new DataFile("Moderation/NetworkBans", NetworkBansFile,       true, true),
+            // Learned from verified joins; losing it only weakens ban matching until players verify again.
+            new DataFile("Moderation/KnownIdentities", KnownIdentitiesFile, true, true),
+            // Freezes, deposit-limit allowances and the last day's deposit tallies; absent until staff or a deposit write it.
+            new DataFile("Moderation/EconomyGuard", EconomyGuardFile,    true, true),
         };
 
         // Binary-rooted, unlike Folder, which is data-rooted at the RWT cwd.
@@ -98,10 +123,13 @@ namespace KMHServerAddon.Persistence
 
         public static string SnapshotRequestFile => Path.Combine(Folder, ".kmh-snapshot-request");
 
+        // The owner's deliberate "migrate even though the safety backup failed". Consumed on use, never left armed.
+        public static string ForceMigrationFile => Path.Combine(Folder, ".kmh-force-migration");
+
         // Not a DataFile: these are daily JSONL, and the integrity scan JToken-parses whole documents.
         public static string LedgerDir => Sub("Ledger");
 
-        private static string Sub(params string[] parts)
+        internal static string Sub(params string[] parts)
         {
             string p = Folder;
             foreach (string s in parts) p = Path.Combine(p, s);
@@ -118,21 +146,44 @@ namespace KMHServerAddon.Persistence
         public static string TransportConfigFile     => Path.Combine(Sub("Config"), "Transport.json");
         public static string ChatConfigFile          => Path.Combine(Sub("Config"), "Chat.json");
         public static string MailConfigFile          => Path.Combine(Sub("Config"), "Mail.json");
+        public static string FederationConfigFile    => Path.Combine(Sub("Config"), "Federation.json");
+        public static string ModPolicyConfigFile     => Path.Combine(Sub("Config"), "Mods.json");
         public static string MediaConfigFile         => Path.Combine(Sub("Config"), "Media.json");
         // Deliberately not a DataFile: converted copies of other people's media, expiring and never worth restoring.
         public static string MediaCacheDir           => Sub("MediaCache");
         public static string DebugDir                => Sub("Debug");
+        public static string ReportsDir              => Sub("Reports");
         public static string StaffConfigFile         => Path.Combine(Sub("Config"), "Staff.json");
+        // Moderation state, not settings: backed up with the data, but a restore keeps the live copy (SanctionFiles).
+        public static string BansFile                => Path.Combine(Sub("Moderation"), "Bans.json");
+        // Kept live across a restore: rolling data back to undo a cheat must not lift the ban or freeze issued since.
+        public static string[] SanctionFiles => new[] { BansFile, NetworkBansFile, KnownIdentitiesFile, EconomyGuardFile };
+        public static string GlobalConfigFile        => Path.Combine(Sub("Config"), "Global.json");
+        public static string DirectoryKeyFile        => Path.Combine(Sub("Identity"), "DirectoryKey.json");
+        public static string NetworkBansFile         => Path.Combine(Sub("Moderation"), "NetworkBans.json");
+        public static string KnownIdentitiesFile     => Path.Combine(Sub("Moderation"), "KnownIdentities.json");
+        public static string EconomyGuardFile        => Path.Combine(Sub("Moderation"), "EconomyGuard.json");
+        public static string ConfigReadmeFile        => Path.Combine(Sub("Config"), "README.txt");
+        // Setup progress, not settings: it records how far first-run got, so a restart resumes rather than restarts.
+        public static string GlobalSetupFile         => Path.Combine(Sub("Identity"), "global-setup.json");
+        // What Global assigned: the registered id, its generation and the last accepted sequence. Not settings.
+        public static string GlobalStateFile         => Path.Combine(Sub("Identity"), "global-state.json");
+        // The Global signing key lives here, deliberately outside Config so a shared config never carries it.
+        public static string IdentityDir             => Sub("Identity");
         public static string SiteCatalogFile         => Path.Combine(Sub("Sites"), "Catalog.json");
         public static string FeaturesConfigFile      => Path.Combine(Sub("Config"), "Features.json");
         public static string PoliciesFile            => Path.Combine(Sub("Config"), "Policies.json");
         public static string MigrationsDir           => Sub("Migrations");
         public static string MigrationReportLatest   => Path.Combine(MigrationsDir, "latest.txt");
         public static string MigrationJournalFile    => Path.Combine(MigrationsDir, "journal.json");
+        public static string SeasonResetJournalFile  => Path.Combine(MigrationsDir, "season-reset.json");
         public static string DiscordConfigFile      => Path.Combine(Sub("Config", "Discord"), "DiscordConfig.json");
 
         // The owner drops the exact mod-config .xml files to enforce here; the server pushes them to clients.
         public static string EnforcementProfileDir  => Sub("Enforcement", "Profile");
+
+        // Only the revision counter. The mod list itself is RWT's, and is re-read from it on every boot.
+        public static string ModProfileFile         => Path.Combine(Sub("Mods"), "Profile.json");
 
         public static string TreasuryFile        => Path.Combine(Sub("Treasury"),    "Treasury.json");
         public static string MarketplaceFile     => Path.Combine(Sub("Marketplace"), "Marketplace.json");
@@ -150,6 +201,9 @@ namespace KMHServerAddon.Persistence
         public static string NotificationsFile   => Path.Combine(Sub("Notifications"), "Notifications.json");
         public static string RecoveryFile        => Path.Combine(Sub("Recovery"),     "Recovery.json");
         public static string DeliveryFile        => Path.Combine(Sub("Delivery"),     "Outbound.json");
+        public static string ConnectedTreasuryFile => Path.Combine(Sub("Global"), "ConnectedTreasury.json");
+        public static string FederatedGuildsFile   => Path.Combine(Sub("Global"), "FederatedGuilds.json");
+        public static string FederationOutboxFile  => Path.Combine(Sub("Global"), "FederationOutbox.json");
         public static string WantsFile           => Path.Combine(Sub("WantBoard"),   "Wants.json");
         public static string MailFile            => Path.Combine(Sub("Mail"),        "Mail.json");
         public static string ChatModerationFile  => Path.Combine(Sub("ChatModeration"), "Blocks.json");
@@ -165,6 +219,7 @@ namespace KMHServerAddon.Persistence
         public static string DiscordUserStateFile        => Path.Combine(Sub("Discord"), "UserState.json");
         public static string DiscordGuildRolesFile       => Path.Combine(Sub("Discord"), "GuildRoles.json");
         public static string DiscordLeaderboardStateFile => Path.Combine(Sub("Discord"), "LeaderboardState.json");
+        public static string DiscordLiveStateFile        => Path.Combine(Sub("Discord"), "LiveState.json");
 
         public static string IconsDir => Sub("Icons");
 
@@ -196,27 +251,7 @@ namespace KMHServerAddon.Persistence
             foreach (string d in RequiredDirectories())
                 try { Directory.CreateDirectory(d); } catch { }
 
-            try
-            {
-                string readme = Path.Combine(IconsDir, "README.txt");
-                if (!File.Exists(readme)) File.WriteAllText(readme, IconsReadme);
-            }
-            catch { }
+            // No Icons README here: DiscordIconAssets.Provision() writes it, and one here makes an empty folder look ready.
         }
-
-        private const string IconsReadme =
-@"KMH Discord embed icons
-=======================
-Drop icons here and the bot attaches them to its embeds. Names are
-extension-less - for each name below use any format Discord can show
-(.png / .webp / .gif / .jpg). A missing icon just posts without a thumbnail;
-kmh_logo is the fallback. (Discord can't display .dds - raster only.)
-
-Names: kmh_logo, marketplace, leaderboard, site_created, site_destroyed,
-quest, guild, treasury, warning, error.
-
-Turn the whole feature on/off with UseBundledIcons in
-Config/Discord/DiscordConfig.json.
-";
     }
 }

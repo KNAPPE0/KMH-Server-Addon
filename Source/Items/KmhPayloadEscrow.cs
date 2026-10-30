@@ -14,11 +14,11 @@ namespace KMHServerAddon.Items
 
         public static KmhThingPayload Clone(KmhThingPayload p, int stackCount) => KmhItemService.ClonePayload(p, stackCount);
 
-        // Dividing one captured stack is a weaker claim than merging two, because RimWorld already held these units together.
+        // Dividing one captured stack is a weaker claim than merging two: RimWorld already held these units together.
         public static bool IsSplittable(KmhThingPayload p)
             => p != null && (string.IsNullOrEmpty(p.ScribeXml) || p.Splittable || p.Mergeable);
 
-        // A caller that charges for a fill must size the charge with this, or it bills for goods an atomic stack never hands over.
+        // Size a fill's charge with this, or it bills for goods an atomic stack never hands over.
         public static int DeliverableUnits(IEnumerable<KmhThingPayload> taken, int want)
         {
             if (taken == null || want <= 0) return 0;
@@ -77,7 +77,7 @@ namespace KMHServerAddon.Items
             return false;
         }
 
-        // DepositSilver refuses an empty owner, so a payout read off a malformed row is held in recovery rather than vanishing.
+        // DepositSilver refuses an empty owner, so a payout off a malformed row is held in recovery, not lost.
         public static bool DeliverSilver(string username, long amount, string source, string reason)
         {
             if (amount <= 0) return true;

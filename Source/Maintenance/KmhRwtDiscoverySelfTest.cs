@@ -107,7 +107,7 @@ namespace KMHServerAddon.Maintenance
                     WriteBundle(Path.Combine(d, "GameServer.exe"), "KMHServerAddon.dll", "0Harmony.dll");
                     RwtDiscovery.Result r = RwtDiscovery.Locate(d, Path.Combine(d, ".rwt-runtime"));
                     bool named = r.Checked.Count > 0 && r.Checked[0].Rejection != null
-                              && r.Checked[0].Rejection.Contains("KMH");
+                              && r.Checked[0].Rejection.Contains("Colony Nexus");
                     return (r.SelectedExe == null && named,
                             r.SelectedExe != null ? "WRONGLY selected " + Path.GetFileName(r.SelectedExe)
                                                   : (r.Checked.Count > 0 ? r.Checked[0].Rejection : "no candidates"));
@@ -192,12 +192,12 @@ namespace KMHServerAddon.Maintenance
                     string p = Path.Combine(d, "RTServer.exe");
                     WriteBundle(p, "RTServer.dll");
                     string deps = Path.Combine(d, "RTServer.deps.json");
-                    string a = RwtDiscovery.Fingerprint(p, "RTServer.dll");   // absent
+                    string a = RwtDiscovery.Fingerprint(p, "RTServer.dll");
                     File.WriteAllText(deps, "{}");
-                    string b = RwtDiscovery.Fingerprint(p, "RTServer.dll");   // present
+                    string b = RwtDiscovery.Fingerprint(p, "RTServer.dll");
                     File.WriteAllText(deps, "{\"changed\":true}");
                     File.SetLastWriteTimeUtc(deps, DateTime.UtcNow.AddMinutes(5));
-                    string c = RwtDiscovery.Fingerprint(p, "RTServer.dll");   // changed
+                    string c = RwtDiscovery.Fingerprint(p, "RTServer.dll");
                     return (a != b && b != c, "three distinct keys");
                 });
 
@@ -214,7 +214,6 @@ namespace KMHServerAddon.Maintenance
                     bool before = File.Exists(Path.Combine(cache, "GameServer.dll"))
                                && RwtDiscovery.DetectGeneration(d, cache, r1.ServerDll) == "new";
 
-                    // Owner drops in the newer release under the same file name.
                     WriteBundle(p, "RTServer.dll", "RTShared.dll", "RTNetwork.dll");
                     File.SetLastWriteTimeUtc(p, DateTime.UtcNow.AddMinutes(5));
                     RwtDiscovery.Result r2 = RwtDiscovery.Locate(d, cache);
@@ -235,10 +234,12 @@ namespace KMHServerAddon.Maintenance
                     RwtDiscovery.Result r = RwtDiscovery.Locate(d, cache);
                     SingleFileBundle.Extract(r.SelectedExe, cache, r.Fingerprint, r.ServerDll);
                     string marker = Path.Combine(cache, "RTServer.dll");
-                    DateTime first = File.GetLastWriteTimeUtc(marker);
-                    File.SetLastWriteTimeUtc(marker, first.AddDays(-1));
+                    DateTime backdated = File.GetLastWriteTimeUtc(marker).AddDays(-1);
+                    File.SetLastWriteTimeUtc(marker, backdated);
                     SingleFileBundle.Extract(r.SelectedExe, cache, r.Fingerprint, r.ServerDll);
-                    return (File.GetLastWriteTimeUtc(marker) != first, "not re-extracted");
+                    // A reused cache leaves the backdated stamp alone; a re-extract rewrites it to now.
+                    DateTime after = File.GetLastWriteTimeUtc(marker);
+                    return (after == backdated, after == backdated ? "not re-extracted" : $"re-extracted (stamp {after:u})");
                 });
 
                 Check("Assembly identity check rejects a non-assembly", () =>
@@ -287,7 +288,7 @@ namespace KMHServerAddon.Maintenance
             using MemoryStream ms = new MemoryStream();
             using BinaryWriter w = new BinaryWriter(ms, Encoding.UTF8, true);
 
-            w.Write(new byte[Math.Max(1, pad)]);                       // stand-in for the native host
+            w.Write(new byte[Math.Max(1, pad)]);
 
             List<(long off, long len, string name)> entries = new List<(long, long, string)>();
             foreach (string n in managedNames)

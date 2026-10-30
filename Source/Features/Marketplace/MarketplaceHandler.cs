@@ -73,6 +73,8 @@ namespace KMHServerAddon.Features.Marketplace
             if (MarketplaceStore.Buy(username, listingId, qty, out string sellerUsername, out int boughtQty, out int paidSilver, env?.OpId ?? ""))
             {
                 ServerLog.Info($"Marketplace: {username} bought x{boughtQty} of listing #{listingId} for {paidSilver}s");
+                // The client only said "request sent", and every other value move answers its actor.
+                KmhRouter.Notify(client, "positive", $"Bought x{boughtQty} for {Util.SilverFmt.Format(paidSilver)} - the goods are in your treasury.");
                 BroadcastSnapshot();
                 SendTreasurySnapshotTo(client);
                 PushTreasuryTo(sellerUsername);

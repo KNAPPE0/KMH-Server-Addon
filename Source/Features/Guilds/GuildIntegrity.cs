@@ -12,7 +12,7 @@ namespace KMHServerAddon.Features.Guilds
         {
             public readonly OwnerFix Fix;
             public readonly int      OwnersBefore;
-            public readonly string   KeptOrPromoted;   // the surviving/promoted owner's username
+            public readonly string   KeptOrPromoted;
             public Result(OwnerFix fix, int before, string who) { Fix = fix; OwnersBefore = before; KeptOrPromoted = who; }
         }
 

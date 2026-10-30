@@ -24,7 +24,6 @@ namespace KMHServerAddon.Features.Reputation
             ReputationConfig cfg =
                 JsonFileStore.TryLoad(KmhDataPaths.ReputationConfigFile, out ReputationConfig loaded) && loaded != null
                     ? loaded : new ReputationConfig();
-            // Keep tiers ordered: Unreliable cutoff can't sit above Trusted.
             if (cfg.UnreliableBelow > cfg.TrustedScore) cfg.UnreliableBelow = cfg.TrustedScore;
             return cfg;
         }

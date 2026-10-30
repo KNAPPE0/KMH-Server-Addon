@@ -113,7 +113,7 @@ namespace KMHServerAddon.Features.Sites
                 Description  = "Produces from the broader server-approved pool. The worker skill is assigned "
                              + "automatically from whatever you select.",
                 WorkerSkill  = null,                    // derived per output - never player-chosen
-                CostMultiplier = 1.35,                  // not SitesConfig.CustomSitePriceMultiplier, which scales every archetype
+                CostMultiplier = 1.35,                  // not SitesConfig.Costs.PriceMultiplier, which scales every archetype
                 ProductionMultiplier = 1.0, PerkText = "No specialization bonus",
                 IsCustom = true,
             });
@@ -134,7 +134,14 @@ namespace KMHServerAddon.Features.Sites
             return _byId[SiteArchetypes.Custom];
         }
 
-        // Would this archetype accept an output of this family? Unknown is refused everywhere, including Custom.
+        // The perks the catalog shows, clamped so a bad registry edit cannot turn one into a multiplier exploit.
+        internal const double MaxPerk = 1.25;
+        internal static double ClampPerk(double m) => double.IsNaN(m) ? 1.0 : Math.Max(1.0, Math.Min(MaxPerk, m));
+        public static double ProductionPerk(string archetypeId) => ClampPerk(Get(archetypeId).ProductionMultiplier);
+        public static double StoragePerk(string archetypeId)    => ClampPerk(Get(archetypeId).StorageMultiplier);
+        public static double RoadworksPerk(string archetypeId)  => ClampPerk(Get(archetypeId).RoadworksProgressMultiplier);
+
+        // Unknown is refused everywhere, including Custom.
         public static bool Accepts(string archetypeId, string family) => Get(archetypeId).Allows(family);
 
         // Never the client's choice, and never a fallback for Unknown.

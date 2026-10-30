@@ -13,13 +13,7 @@ namespace KMHServerAddon.Features.Roadworks
 
         public static readonly string[] All = { Trail, Road, Highway };
 
-        public static string Normalize(string tier)
-        {
-            if (string.IsNullOrWhiteSpace(tier)) return Trail;
-            string t = tier.Trim().ToLowerInvariant();
-            foreach (string k in All) if (t == k) return k;
-            return Trail;
-        }
+        public static string Normalize(string tier) => Sites.KmhVocabulary.Canonical(tier, All, Trail);
 
         public static string DisplayName(string tier)
         {
@@ -31,7 +25,6 @@ namespace KMHServerAddon.Features.Roadworks
             }
         }
 
-        // Position on the ladder, 1-based.
         public static int RankOf(string tier)
         {
             switch (Normalize(tier))
@@ -56,9 +49,9 @@ namespace KMHServerAddon.Features.Roadworks
             Economy.EconomyConfig cfg = Economy.EconomyConfig.Current;
             switch (Normalize(tier))
             {
-                case Road:    return cfg.RoadworksSilverPerSegmentRoad;
-                case Highway: return cfg.RoadworksSilverPerSegmentHighway;
-                default:      return cfg.RoadworksSilverPerSegmentTrail;
+                case Road:    return cfg.Roadworks.SilverPerSegmentRoad;
+                case Highway: return cfg.Roadworks.SilverPerSegmentHighway;
+                default:      return cfg.Roadworks.SilverPerSegmentTrail;
             }
         }
 

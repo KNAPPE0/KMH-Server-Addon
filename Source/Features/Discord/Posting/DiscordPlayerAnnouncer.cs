@@ -4,7 +4,6 @@ using KMHServerAddon.Features.LinkedAccounts;
 
 namespace KMHServerAddon.Features.Discord
 {
-
     internal static class DiscordPlayerAnnouncer
     {
         private const int PruneIntervalMs = 60_000;
@@ -24,7 +23,7 @@ namespace KMHServerAddon.Features.Discord
                 PruneStaleLocked();
                 fresh = _joined.Add(username);
             }
-            if (!fresh) return; // already announced in this session
+            if (!fresh) return;
 
             string display = ResolveDisplay(username);
             string text    = $"🟢 **{display}** has joined the server!";
@@ -66,9 +65,9 @@ namespace KMHServerAddon.Features.Discord
             if (LinkedAccountsStore.TryGetLink(username, out string discord)
                 && !string.IsNullOrEmpty(discord))
             {
-                return $"{username} ({discord})";
+                return $"{DiscordText.SafeName(username)} ({DiscordText.SafeName(discord)})";
             }
-            return username;
+            return DiscordText.SafeName(username);
         }
 
         private static void PostIfConfigured(string text)

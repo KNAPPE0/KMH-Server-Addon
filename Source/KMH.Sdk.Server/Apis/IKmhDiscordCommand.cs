@@ -2,14 +2,8 @@ using System.Collections.Generic;
 
 namespace KMH.Sdk.Server.Apis
 {
-    /// <summary>
-    /// A <c>!command</c> that arrived in a channel the KMH bot watches, hiding Discord.NET's SocketMessage so
-    /// extension code never links against a specific Discord.NET version.
-    /// </summary>
-    /// <remarks>
-    /// Handlers run on the Discord gateway thread, so hand heavy work to your own thread; <see cref="Reply"/> is
-    /// fire-and-forget and never blocks the gateway.
-    /// </remarks>
+    /// <summary>A <c>!command</c> from a channel the KMH bot watches, hiding Discord.NET so extensions link no version of it.</summary>
+    /// <remarks>Handlers run on the Discord gateway thread, so move heavy work off it; <see cref="Reply"/> never blocks.</remarks>
     public interface IKmhDiscordCommand
     {
         /// <summary>The command word, lowercased, WITHOUT the bot prefix (e.g. "myext-foo" for "!myext-foo a b").</summary>
@@ -30,10 +24,7 @@ namespace KMH.Sdk.Server.Apis
         /// <summary>Id of the channel the command was sent in.</summary>
         ulong ChannelId { get; }
 
-        /// <summary>
-        /// The KMH username this author is linked to, empty if unlinked. Authorize account-scoped actions on this,
-        /// never on a display name.
-        /// </summary>
+        /// <summary>The linked KMH username, empty if unlinked; authorize account actions on this, never a display name.</summary>
         string LinkedUsername { get; }
 
         /// <summary>Post a reply to the same channel. Fire-and-forget; safe to call once per command.</summary>

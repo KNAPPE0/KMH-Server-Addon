@@ -55,7 +55,7 @@ namespace KMHServerAddon.Maintenance
                 }
             }
 
-            // Neither dictionary constructor inherits the source's comparer, so losing OrdinalIgnoreCase turns a lookup into a miss.
+            // Dictionary copy constructors drop the source's comparer, so a lost OrdinalIgnoreCase turns lookups into misses.
             var caseLost = new List<string>();
             foreach (PropertyInfo p in src.GetType().GetProperties())
             {

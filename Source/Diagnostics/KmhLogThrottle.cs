@@ -17,7 +17,7 @@ namespace KMHServerAddon.Diagnostics
         private static readonly object _lock = new object();
         private static readonly Dictionary<string, Window> _keys = new Dictionary<string, Window>(StringComparer.Ordinal);
 
-        // Suppressed lines are counted out on the next one that passes, so "quiet" reads differently from "repeating fast".
+        // The suppressed count is reported on the next line that passes, so "quiet" reads unlike "repeating fast".
         public static bool Allow(string key, TimeSpan window, long nowTicks, out int suppressed)
         {
             suppressed = 0;
@@ -39,6 +39,5 @@ namespace KMHServerAddon.Diagnostics
         }
 
         internal static void ResetForTest() { lock (_lock) _keys.Clear(); }
-        internal static int KeyCountForTest { get { lock (_lock) return _keys.Count; } }
     }
 }

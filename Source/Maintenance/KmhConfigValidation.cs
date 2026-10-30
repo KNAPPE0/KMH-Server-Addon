@@ -60,21 +60,25 @@ namespace KMHServerAddon.Maintenance
             yield return ("Chat",        KmhDataPaths.ChatConfigFile,        new Features.Chat.ChatConfig());
             yield return ("Media",       KmhDataPaths.MediaConfigFile,       new Features.Media.MediaConfig());
             yield return ("Mail",        KmhDataPaths.MailConfigFile,        new Features.Mail.MailConfig());
+            yield return ("Federation",  KmhDataPaths.FederationConfigFile,  new Features.Global.Federation.FederationConfig());
+            yield return ("Mods",        KmhDataPaths.ModPolicyConfigFile,   new Features.Mods.ModPolicyConfig());
             yield return ("Staff",       KmhDataPaths.StaffConfigFile,       new Features.Identity.StaffConfig());
+            yield return ("Global",      KmhDataPaths.GlobalConfigFile,      new Features.Global.GlobalConfig());
         }
 
         // A failed config loads safe defaults so the server still starts, rather than halting the boot.
         public static void GateOnBoot()
         {
-            List<string> failed = ValidateAll(recover: true);   // auto-restore each failed config from the boot backup
-            if (failed.Count > 0)
-                ServerLog.Warn($"Config validation: {failed.Count} config(s) failed the post-migration load-test ({string.Join(", ", failed)}) - recovery attempted (see the lines above).");
+            List<string> failed = ValidateAll(recover: true);
+            // Each recovery line already says what happened; this only matters as a count when several failed.
+            if (failed.Count > 1)
+                ServerLog.Warn($"Config validation: {failed.Count} configs did not load ({string.Join(", ", failed)}) - see the recovery lines above.");
 
-            // Logged so an owner sees an out-of-range value that boot silently corrected.
+            // Warn, not Verbose: owners must see a value boot silently corrected; none of these fire on a default config.
             foreach (KmhValidationIssue i in KmhConfigValidator.ValidateFiles())
             {
-                if (i.Severity == KmhValidationSeverity.Error)   ServerLog.Warn($"Config check {i}");
-                else if (i.Severity == KmhValidationSeverity.Warning) ServerLog.Verbose($"Config check {i}");
+                if (i.Severity == KmhValidationSeverity.Info) ServerLog.Info($"Config check {i}");
+                else ServerLog.Warn($"Config check {i}");
             }
         }
     }

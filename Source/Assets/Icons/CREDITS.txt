@@ -1,5 +1,9 @@
-KMH icons are from Google Noto Emoji (https://github.com/googlefonts/noto-emoji),
-licensed under the Apache License 2.0.
+kmh_logo.png is the Colony Nexus mark (the world, ring and moon from the Colony Nexus
+website), rendered from the same source as the mod icon (KMH-Patch/About/ModIcon.png).
+It is Colony Nexus's own artwork, and the
+file keeps the name kmh_logo.png. Replace it with your own server logo by dropping a PNG
+named kmh_logo.png into KMH-Data/Icons.
 
-kmh_logo is a placeholder (a castle) - replace it with your own server logo by
-dropping a PNG named kmh_logo.png into KMH-Data/Icons.
+Every other icon here is from Google Noto Emoji
+(https://github.com/googlefonts/noto-emoji), licensed under the Apache License 2.0
+(full text in LICENSE-Apache-2.0.txt beside this file).

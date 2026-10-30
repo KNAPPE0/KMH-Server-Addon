@@ -10,13 +10,16 @@ namespace KMHServerAddon.Maintenance
     {
         internal const string Mask = "***REDACTED***";
 
-        // Substring match, case-insensitive - a field is sensitive if its NAME says so.
         private static readonly string[] SensitiveKeyParts =
         {
             "token", "secret", "password", "passwd", "apikey", "api_key", "authorization",
             "bearer", "webhook", "credential", "privatekey", "private_key", "clientsecret",
             "client_secret", "connectionstring", "connection_string", "auth",
         };
+
+        private static readonly string LabelledSecret =
+            @"([A-Za-z0-9_-]*(?:" + string.Join("|", Array.ConvertAll(SensitiveKeyParts, Regex.Escape))
+            + @")[A-Za-z0-9_-]*)""?\s*[:=]\s*[""']?([^\s""',}]{8,})";
 
         private static readonly HashSet<string> _knownSecrets = new HashSet<string>(StringComparer.Ordinal);
 
@@ -37,14 +40,15 @@ namespace KMHServerAddon.Maintenance
             return false;
         }
 
-        // Redacts by key name, recursively. Structure is preserved so a reader can still see the shape.
-        internal static string Json(string json)
+        internal static string Json(string json) => Json(json, Newtonsoft.Json.Formatting.Indented);
+
+        internal static string Json(string json, Newtonsoft.Json.Formatting formatting)
         {
             try
             {
                 JToken root = JToken.Parse(json);
                 Walk(root);
-                return Text(root.ToString(Newtonsoft.Json.Formatting.Indented));
+                return Text(root.ToString(formatting));
             }
             catch { return Text(json); }
         }
@@ -66,7 +70,6 @@ namespace KMHServerAddon.Maintenance
             else if (node is JArray arr) foreach (JToken child in arr) Walk(child);
         }
 
-        // Free text: known secret values, then anything shaped like a credential after a labelled field.
         internal static string Text(string text)
         {
             if (string.IsNullOrEmpty(text)) return text ?? "";
@@ -77,9 +80,10 @@ namespace KMHServerAddon.Maintenance
             foreach (string s in secrets)
                 outp = Regex.Replace(outp, Regex.Escape(s), Mask, RegexOptions.IgnoreCase);
 
-            outp = Regex.Replace(outp,
-                @"(?i)\b(token|secret|password|api[_-]?key|authorization|bearer|webhook)\b\s*[:=]\s*[""']?([^\s""',}]{8,})",
-                m => m.Groups[1].Value + "=" + Mask);
+            // Derived from the JSON walker's list so the two cannot drift; names may carry affixes ("client_secret")
+            // and values may be quoted, because a JSON fragment logged as text is still text.
+            outp = Regex.Replace(outp, LabelledSecret,
+                m => m.Groups[1].Value + "=" + Mask, RegexOptions.IgnoreCase);
 
             // "Authorization: Bearer <token>" separates with a space, not with = or :.
             outp = Regex.Replace(outp, @"(?i)\b(bearer|basic)\s+([A-Za-z0-9._~+/=-]{8,})", m => m.Groups[1].Value + " " + Mask);
@@ -91,6 +95,31 @@ namespace KMHServerAddon.Maintenance
             outp = Regex.Replace(outp, @"(?i)([?&]hm=)[A-Za-z0-9%._-]+", m => m.Groups[1].Value + Mask);
 
             return outp;
+        }
+
+        internal const string AddressMask = "[address]";
+
+        private static readonly Regex Ipv4 = new Regex(
+            @"(?<![\w.])(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?!\w)(?!\.\d)", RegexOptions.CultureInvariant);
+
+        private static readonly Regex Ipv6Candidate = new Regex(
+            @"(?<![\w:])(?:[0-9A-Fa-f]{0,4}:){2,7}(?:(?:\d{1,3}\.){3}\d{1,3}|[0-9A-Fa-f]{0,4})(?![\w:])", RegexOptions.CultureInvariant);
+
+        // Global's disclosure promises no player IPs; an address-shaped version is masked too, but timestamps,
+        // "v1.3.1.0" and MAC-like strings are not.
+        internal static string Addresses(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return text ?? "";
+            string outp = Ipv4.Replace(text, AddressMask);
+            return Ipv6Candidate.Replace(outp, m =>
+            {
+                string v = m.Value;
+                int colons = 0;
+                foreach (char c in v) if (c == ':') colons++;
+                bool shaped = v.Contains("::") || colons == 7;
+                return shaped && System.Net.IPAddress.TryParse(v, out System.Net.IPAddress a)
+                       && a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6 ? AddressMask : v;
+            });
         }
     }
 }

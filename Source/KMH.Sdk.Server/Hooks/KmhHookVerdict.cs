@@ -1,8 +1,6 @@
 namespace KMH.Sdk.Server.Hooks
 {
-    /// <summary>
-    /// A hook's verdict on a pending KMH action: allow it, or deny it with a player-facing reason.
-    /// </summary>
+    /// <summary>A hook's verdict on a pending KMH action: allow it, or deny it with a player-facing reason.</summary>
     public readonly struct KmhHookVerdict
     {
         /// <summary>True if the action should be blocked.</summary>
