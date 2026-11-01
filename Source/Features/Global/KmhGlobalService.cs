@@ -319,6 +319,11 @@ namespace KMHServerAddon.Features.Global
 
             GlobalCallResult r = await client.PostAsync($"/api/v1/servers/{KmhServerIdentity.Id}/mod-profile", body, null, ct)
                                              .ConfigureAwait(false);
+            return OnModProfileAnswer(snap, publishedRevision, r);
+        }
+
+        internal static long OnModProfileAnswer(Mods.ModProfileSnapshot snap, long publishedRevision, GlobalCallResult r)
+        {
             if (!r.Ok)
             {
                 // Retried every beat; said once per mod list so a refused list is not silent.
@@ -330,6 +335,16 @@ namespace KMHServerAddon.Features.Global
                                  + "Players see its mods as unknown or out of date until it does; it is retried with every heartbeat.");
                 }
                 else ServerLog.Verbose($"Global: mod profile push refused ({r.ErrorCode}).");
+                return publishedRevision;
+            }
+
+            // A 200 with stored=false means Global kept a higher revision, as after a reinstall: nothing was published.
+            if ((bool?)r.Body?["stored"] == false && (long?)r.Body["revision"] is long kept)
+            {
+                long sent = snap.Revision;
+                long next = Mods.ModProfile.ClimbPast(kept);
+                ServerLog.Info($"Global: Colony Nexus still lists an earlier mod list for this server under revision {kept}, "
+                             + $"above this one ({sent}). Publishing this server's list again as revision {next}.");
                 return publishedRevision;
             }
 

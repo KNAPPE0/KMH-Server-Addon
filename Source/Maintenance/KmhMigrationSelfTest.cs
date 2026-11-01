@@ -415,6 +415,16 @@ namespace KMHServerAddon.Maintenance
 
             r.Add(("Banner: names the pre-migration backup an owner has to restore from",
                    !regenerates || text.Contains("premigration-config"), "restore path named"));
+
+            // An owner already on v1.3.1 keeps their configs, so taking v1.3.1.1 must not tell them they were regenerated.
+            string patch = string.Join("\n", KmhWhatsNewBanner.LinesFor("1.3.1.0"));
+            string fromOld = string.Join("\n", KmhWhatsNewBanner.LinesFor("1.3.0.0"));
+            bool patchWarns = patch.Contains("REGENERATED");
+            bool oldWarns = fromOld.Contains("REGENERATED") && !fromOld.Contains("unchanged");
+            string title = KmhWhatsNewBanner.Title("1.3.1.0");
+            r.Add(("Banner: an update within v1.3.1 skips the regeneration warning that one from v1.3.0 still gets",
+                   !patchWarns && patch.Contains("unchanged") && oldWarns && title.Contains("to " + KmhVersion.Display + "."),
+                   $"within v1.3.1 warns={patchWarns}, from v1.3.0 warns={oldWarns}, title '{title.Trim()}'"));
         }
 
         // The doctor follows the banner: an upgrade that replaced the owner's values must not say they were kept.

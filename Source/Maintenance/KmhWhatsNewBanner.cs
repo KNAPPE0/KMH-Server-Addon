@@ -1,12 +1,24 @@
 using KMHServerAddon.Diagnostics;
-using KMHServerAddon.SubProtocol;
 
 namespace KMHServerAddon.Maintenance
 {
     // Shown once after an update. Main.cs gates this by the saved build stamp.
     internal static class KmhWhatsNewBanner
     {
-        internal static string[] LinesForTest => Highlights;
+        internal static string[] LinesForTest => LinesFor("1.3.0.0");
+
+        private static readonly string[] PatchHighlights =
+        {
+            "New in v1.3.1.1:",
+            "  - Enforcing servers show up in RimWorld Together's server browser again.",
+            "  - A mod list Colony Nexus kept from before a reinstall is replaced on the next heartbeat.",
+        };
+
+        private static readonly string[] SameSeriesNote =
+        {
+            "Your configs and data are unchanged, and every v1.3.1 client still connects.",
+            "",
+        };
 
         private static readonly string[] Highlights =
         {
@@ -46,17 +58,27 @@ namespace KMHServerAddon.Maintenance
             "  - New commands: 'kmh roadworks', 'kmh frontier', and 'kmh worldquest deliver' to credit a delivery lost to a disconnect.",
         };
 
+        // A server already on this series saw the v1.3.1 upgrade notes; its configs are not regenerated again.
+        internal static string[] LinesFor(string fromBuild)
+        {
+            var cur = typeof(KmhWhatsNewBanner).Assembly.GetName().Version;
+            bool sameSeries = System.Version.TryParse(fromBuild, out var v)
+                && v.Major == cur.Major && v.Minor == cur.Minor && v.Build == cur.Build;
+            return sameSeries ? SameSeriesNote.Concat(PatchHighlights).ToArray()
+                              : PatchHighlights.Concat(new[] { "" }).Concat(Highlights).ToArray();
+        }
+
+        internal static string Title(string fromBuild) => string.IsNullOrWhiteSpace(fromBuild)
+            ? $"  {Constants.DisplayName} updated to {KmhVersion.Display}. What's new:"
+            : $"  {Constants.DisplayName} updated from {fromBuild} to {KmhVersion.Display}. What's new:";
+
         public static void Print(string fromBuild)
         {
-            string toBuild = KmhProtocol.BuildVersion;
-
             ServerLog.Info("======================================================================");
-            ServerLog.Success(string.IsNullOrWhiteSpace(fromBuild)
-                ? $"  {Constants.DisplayName} updated to {toBuild}. What's new:"
-                : $"  {Constants.DisplayName} updated from {fromBuild} to {toBuild}. What's new:");
+            ServerLog.Success(Title(fromBuild));
             ServerLog.Info("----------------------------------------------------------------------");
 
-            foreach (string line in Highlights)
+            foreach (string line in LinesFor(fromBuild))
             {
                 ServerLog.Info(string.IsNullOrEmpty(line) ? "" : "  " + line);
             }

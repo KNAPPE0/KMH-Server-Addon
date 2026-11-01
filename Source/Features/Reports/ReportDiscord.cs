@@ -46,7 +46,7 @@ namespace KMHServerAddon.Features.Reports
             {
                 string.Join(" · ", head),
                 $"**{title}** — {excerpt}",
-                $"-# from **{DiscordText.SafeName(r.Reporter)}** · client {client} · server {DiscordText.SafeName($"{KmhVersion.Build} {KmhVersion.BuildTag}")}"
+                $"-# from **{DiscordText.SafeName(r.Reporter)}** · client {client} · server {DiscordText.SafeName($"{KmhVersion.Display} {KmhVersion.BuildTag}")}"
                 + $" · read it with `kmh reports show {reference}`",
             };
             if (r.WantsDevelopers)

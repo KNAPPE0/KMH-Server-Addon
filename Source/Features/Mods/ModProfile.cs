@@ -110,6 +110,20 @@ namespace KMHServerAddon.Features.Mods
             }
         }
 
+        // Global keeps the highest revision it was sent, so a counter a reinstall reset has to climb past it.
+        internal static long ClimbPast(long listed)
+        {
+            lock (_lock)
+            {
+                if (!_stateLoaded || listed < _state.Revision) return _state.Revision;
+                _state.Revision = listed + 1;
+                try { JsonFileStore.Save(KmhDataPaths.ModProfileFile, _state); }
+                catch (Exception ex) { ServerLog.Warn($"Mod profile: saving the revision failed: {ex.Message}"); }
+                _current.Revision = _state.Revision;
+                return _state.Revision;
+            }
+        }
+
         private static readonly HashSet<string> _warnedNames = new HashSet<string>(StringComparer.Ordinal);
 
         internal static bool ShouldSayOnce(string what)

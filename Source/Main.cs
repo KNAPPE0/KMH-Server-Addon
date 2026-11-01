@@ -91,7 +91,7 @@ namespace KMHServerAddon
                 Diagnostics.KmhLogSink.Start();
                 // Before anything can open a connection, so a self-test run sees every request that heads for Global.
                 Features.Global.KmhGlobalIsolationMonitor.StartIfSelfTest();
-                System.Console.WriteLine($"{Constants.LogPrefix} Colony Nexus server {KmhVersion.Build} ({KmhVersion.BuildTag}) starting…");
+                System.Console.WriteLine($"{Constants.LogPrefix} Colony Nexus server {KmhVersion.Display} ({KmhVersion.BuildTag}) starting…");
 
                 HarmonyInstance = new Harmony(HarmonyId);
                 HarmonyInstance.PatchAll(typeof(Main_).Assembly);

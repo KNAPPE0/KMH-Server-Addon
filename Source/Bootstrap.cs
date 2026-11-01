@@ -109,7 +109,7 @@ namespace KMHServerAddon
             w.WriteLine();
             w.WriteLine($"  Its TCPNetwork.dll has no {OldGenerationProbeType}, which Colony Nexus patches on every");
             w.WriteLine("  connection. RWT moved that type after 26.4.18.1, so 26.5.24.1 is the oldest release");
-            w.WriteLine($"  Colony Nexus v{KmhVersion.Build} runs on.");
+            w.WriteLine($"  Colony Nexus v{KmhVersion.Display} runs on.");
             w.WriteLine();
             w.WriteLine("  Nothing has been patched and no Colony Nexus data has been touched. Update RimWorld Together");
             w.WriteLine("  to 26.5.24.1 or newer and start the addon again.");

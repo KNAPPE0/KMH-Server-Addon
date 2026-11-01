@@ -259,12 +259,16 @@ namespace KMHServerAddon.Features.Enforcement
         private static bool FilterPacket(Listener __instance, PacketHeader __0, object __1)
         {
             if (!IsHeld(RwtCompat.TargetClientOf(__instance))) return true;
-            string header = __0.ToString();
             if (__0.Equals(RwtCompat.ChatHeader))
                 return __1 is PKT_Chat chat && IsControl(KmhEnvelope.TryParse(chat.Message)?.Kind);
-            return header == "Handshake" || header == "KeepAlive" || header == "Version" || header == "Login"
-                || header == "ServerPassword" || header == "HandshakeManager" || header == "KeepAliveManager"
-                || header == "VersionManager" || header == "LoginManager" || header == "ServerPasswordManager";
+            return AllowedWhileHeld(__0.ToString());
         }
+
+        // The browser report only ever goes to RWT's own browser connection, which has no admission session.
+        internal static bool AllowedWhileHeld(string header)
+            => header == "Handshake" || header == "KeepAlive" || header == "Version" || header == "Login"
+                || header == "ServerPassword" || header == "HandshakeManager" || header == "KeepAliveManager"
+                || header == "VersionManager" || header == "LoginManager" || header == "ServerPasswordManager"
+                || header == "ServerBrowserTelemetry";
     }
 }

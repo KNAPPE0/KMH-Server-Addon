@@ -185,6 +185,32 @@ namespace KMHServerAddon.Maintenance
                               : $"hash={GlobalStatusProbe.ManifestHash()} policy={GlobalStatusProbe.ModPolicy()} count={GlobalStatusProbe.ModCount()}");
             });
 
+            Check("Global: a mod list Global kept a higher revision of is published again above it, never reported as published", () =>
+            {
+                string path = Persistence.KmhDataPaths.ModProfileFile;
+                byte[] had = System.IO.File.Exists(path) ? System.IO.File.ReadAllBytes(path) : null;
+                GlobalCallResult Answer(string json)
+                    => new GlobalCallResult { Ok = true, Status = 200, Body = Newtonsoft.Json.Linq.JObject.Parse(json) };
+                try
+                {
+                    ModProfileSnapshot snap = Snap(ModPolicy.Enforced, new[] { "Core", "Harmony" }, new string[0]);
+                    ModProfile.ApplyForTest(snap, 2);
+                    long kept = KmhGlobalService.OnModProfileAnswer(snap, 1, Answer("{\"revision\":5,\"stored\":false}"));
+                    long climbed = ModProfile.Current.Revision;
+                    long late = ModProfile.ClimbPast(3);
+                    ModProfile.ApplyForTest(snap, 7);
+                    long stored = KmhGlobalService.OnModProfileAnswer(snap, 6, Answer("{\"revision\":7,\"stored\":true}"));
+                    long older = KmhGlobalService.OnModProfileAnswer(snap, 6, Answer("{\"revision\":7}"));
+                    bool ok = kept == 1 && climbed == 6 && late == 6 && stored == 7 && older == 7;
+                    return (ok, $"kept={kept} climbed={climbed} late={late} stored={stored} olderGlobal={older}");
+                }
+                finally
+                {
+                    if (had != null) System.IO.File.WriteAllBytes(path, had);
+                    else if (System.IO.File.Exists(path)) System.IO.File.Delete(path);
+                }
+            });
+
             Check("Global: a host is published only when the owner set one", () =>
             {
                 GlobalConfig cfg = new GlobalConfig { PublicHost = "" };

@@ -103,7 +103,7 @@ namespace KMHServerAddon.Maintenance
         private static string Identity()
         {
             var sb = new StringBuilder();
-            sb.AppendLine($"Colony Nexus build  : {KmhVersion.Build}");
+            sb.AppendLine($"Colony Nexus build  : {KmhVersion.Display}");
             sb.AppendLine($"Protocol version    : {SubProtocol.KmhProtocol.CurrentVersion}");
             sb.AppendLine($"Config schema       : {KmhVersion.ConfigSchema}");
             sb.AppendLine($"Data schema         : {KmhVersion.DataSchema}");

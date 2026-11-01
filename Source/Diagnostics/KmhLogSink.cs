@@ -156,7 +156,7 @@ namespace KMHServerAddon.Diagnostics
         {
             var sb = new StringBuilder();
             sb.AppendLine("=== Colony Nexus server diagnostic log ===");
-            sb.AppendLine($"Build        : {KmhVersion.Build} ({KmhVersion.BuildTag})");
+            sb.AppendLine($"Build        : {KmhVersion.Display} ({KmhVersion.BuildTag})");
             sb.AppendLine($"Protocol     : v{KmhVersion.Protocol}");
             sb.AppendLine($"ConfigSchema : {KmhVersion.ConfigSchema}   DataSchema: {KmhVersion.DataSchema}");
             sb.AppendLine($"StartedUtc   : {DateTime.UtcNow:O}");

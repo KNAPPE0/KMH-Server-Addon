@@ -43,6 +43,8 @@ namespace KMHServerAddon.Maintenance
             Check("RwtInteropUnknownSignatureFailsClosed", !EnforcementAdmission.IsConfigCheckSignature(null)
                 && !EnforcementAdmission.IsConfigCheckSignature(post)
                 && !EnforcementAdmission.LegacyPresenceOnlyLayout(typeof(KmhEnforcementAdmissionSelfTest), typeof(KmhEnforcementAdmissionSelfTest)));
+            Check("RwtBrowserReportPassesAdmissionHold", EnforcementAdmission.AllowedWhileHeld("ServerBrowserTelemetry")
+                && !EnforcementAdmission.AllowedWhileHeld("World"));
             Check("AdmissionFilterNeverCallsTargetClientDirectly", RwtCompat.TargetClientResolved
                 && KmhIlReader.CallsMadeBy(typeof(EnforcementAdmission).FullName, "FilterPacket", 3, "get_TargetClient").Count == 0);
             bool reads;

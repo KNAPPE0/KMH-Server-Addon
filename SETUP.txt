@@ -15,10 +15,10 @@ Then run KMHServerAddon.exe (NOT the RWT server).
 There are two downloads per platform, and which one you took decides what is in
 the zip:
 
-  KMH-ColonyNexus-ServerAddon-v1.3.1-<platform>.zip
+  KMH-ColonyNexus-ServerAddon-v1.3.1.1-<platform>.zip
     One KMHServerAddon.exe with everything inside it. Needs .NET 10 on the host.
 
-  KMH-ColonyNexus-ServerAddon-v1.3.1-<platform>-selfcontained.zip
+  KMH-ColonyNexus-ServerAddon-v1.3.1.1-<platform>-selfcontained.zip
     Carries .NET 10 with it, so nothing to install - but it is a folder of files,
     and KMHServerAddon.exe is only a small launcher that will not start without
     them. Extract the whole thing and keep it together.

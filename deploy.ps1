@@ -129,8 +129,10 @@ foreach ($p in $payloads) {
         throw "Payload missing after build: $payloadDll"
     }
 
-    $payloadVersion = [System.Reflection.AssemblyName]::GetAssemblyName($payloadDll).Version.ToString(3)
-    if ($payloadVersion -ne $version) {
+    # Unset parts count as 0, so 1.3.1 matches its 1.3.1.0 assembly while 1.3.1.1 stays exact.
+    $payloadVersion = [System.Reflection.AssemblyName]::GetAssemblyName($payloadDll).Version
+    $w = [version]$version
+    if ($payloadVersion -ne [version]::new($w.Major, $w.Minor, [Math]::Max($w.Build, 0), [Math]::Max($w.Revision, 0))) {
         throw "Payload version $payloadVersion does not match project version $version - stale payload would ship."
     }
 

@@ -173,7 +173,7 @@ are covered in the *Managed / panel hosts* section of [SETUP.txt](SETUP.txt).
 other people under other licences, so KMH fetches them rather than shipping
 them: run `Tools\get-media-tools.ps1` (or the `.sh`) from inside the extracted
 server and both land where KMH looks. The same scripts are published on their
-own as **`KMH-MediaTools-v1.3.1.zip`**. Either one runs on any machine with
+own as **`KMH-MediaTools-v1.3.1.1.zip`**. Either one runs on any machine with
 internet, so a server without any is fine — fetch elsewhere, copy the `Tools`
 folder over. Details in [SETUP.txt](SETUP.txt).
 

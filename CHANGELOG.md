@@ -3,6 +3,26 @@
 All notable changes to the KMH: Colony Nexus Server Addon. Versions follow the KMH build number shared with the
 KMH: Colony Nexus client.
 
+## v1.3.1.1
+
+A server update for v1.3.1. Every v1.3.1 client connects, and players need nothing from it.
+
+### rel-285
+
+- Numbered v1.3.1.1, alongside the client. The version clients compare stays 1.3.1, so every v1.3.1 client
+  still matches.
+
+### rel-284
+
+- **Enforcing servers show up in RimWorld Together's server browser again.** With config enforcement on, the
+  admission hold dropped every packet on a connection with no admitted player, and that included RimWorld
+  Together's own report to its server browser. The server vanished from the list with nothing in any log. The
+  browser report now passes the hold; players are still held exactly as before.
+- **A mod list Colony Nexus kept from before a reinstall is replaced.** Global keeps the highest mod-list revision a
+  server ever sent. A reinstalled server starts counting again, so its new list was refused while the console said
+  "published", and the browser kept showing the old mods. The server now notices, moves its revision past the one
+  Global holds and publishes again on the next heartbeat.
+
 ## v1.3.1 — Connected Worlds
 
 **Read this before upgrading.** Two things changed that earlier releases promised would not.

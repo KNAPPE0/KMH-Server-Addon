@@ -8,7 +8,7 @@ namespace KMHServerAddon.Maintenance
     {
         public static void Print(int fieldsBackfilled)
         {
-            ServerLog.Info($"=== Colony Nexus {KmhVersion.Build} ({KmhVersion.BuildTag}) startup summary ===");
+            ServerLog.Info($"=== Colony Nexus {KmhVersion.Display} ({KmhVersion.BuildTag}) startup summary ===");
             ServerLog.Info($"  server: {KmhServerIdentity.Name}");
             Features.Mods.ModPolicyConfig mods = Features.Mods.ModPolicyConfig.Current;
             string stated = Features.Mods.ModPolicyConfig.GameVersionOf(mods.RimWorldVersion);

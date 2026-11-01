@@ -76,7 +76,7 @@ namespace KMHServerAddon.Features.Discord
 
         internal static Facts Gather(DateTime now)
         {
-            var f = new Facts { Build = $"{KmhVersion.Build} ({KmhVersion.BuildTag})" };
+            var f = new Facts { Build = $"{KmhVersion.Display} ({KmhVersion.BuildTag})" };
 
             foreach (ServerClient c in Network.ServerClients.Keys)
             {
