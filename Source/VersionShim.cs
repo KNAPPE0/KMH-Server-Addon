@@ -76,18 +76,22 @@ namespace KMHServerAddon
         }
 
 #if RWT_RT
-        private const string UserStoreName = "RTServer.Managers.UserManagerH";
+        // RWT 26.11.2.1 folded UserManagerH into UserManager.
+        private static readonly string[] UserStoreNames = { "RTServer.Managers.UserManagerH", "RTServer.Managers.UserManager" };
 #else
-        private const string UserStoreName = "GameServer.Managers.UserManagerH";
+        private static readonly string[] UserStoreNames = { "GameServer.Managers.UserManagerH" };
 #endif
 
         // Reflected: RWT reshapes its account store within a generation, and a bound call throws before the caller's try.
         internal static System.Reflection.MethodInfo UserStoreMethod(string name, int parameters)
         {
-            System.Type store = typeof(PM_Login).Assembly.GetType(UserStoreName, throwOnError: false);
-            if (store == null) return null;
-            foreach (System.Reflection.MethodInfo m in store.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static))
-                if (m.Name == name && m.GetParameters().Length == parameters) return m;
+            foreach (string storeName in UserStoreNames)
+            {
+                System.Type store = typeof(PM_Login).Assembly.GetType(storeName, throwOnError: false);
+                if (store == null) continue;
+                foreach (System.Reflection.MethodInfo m in store.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static))
+                    if (m.Name == name && m.GetParameters().Length == parameters) return m;
+            }
             return null;
         }
 

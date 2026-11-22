@@ -3,6 +3,57 @@
 All notable changes to the KMH: Colony Nexus Server Addon. Versions follow the KMH build number shared with the
 KMH: Colony Nexus client.
 
+## v1.3.1.2
+
+A server hotfix for v1.3.1.1. Every v1.3.1 client connects, and players need nothing from it. It supports RimWorld
+Together 26.11.21.1, the release the Steam Workshop now gives every player, and is needed before a server moves to it.
+
+### rel-285.2
+
+- **RimWorld Together 26.11.21.1 keeps every returning player's colony.** That release looks up each player's save,
+  and its own guild files, under a new account-based name and moves nothing over, so every returning player was sent
+  to colony creation and their old save was deleted at their next upload. On the first start with 26.11.21.1 the
+  add-on renames each save and each RimWorld Together guild file to the name it looks for, before RimWorld Together
+  reads anything. Nothing is renamed on older RimWorld Together builds, nor on a later release this add-on was not
+  checked against: there the server does not start while saves still use the old names. A save present under both
+  names keeps the new one and the older copy is moved to KMH-Data/RwtLegacyFiles, never deleted; if a rename fails
+  the server does not start, so no player can join into a new colony.
+- **Players outside a RimWorld Together guild can log in on 26.11.21.1.** Once any RimWorld Together guild existed
+  on a server, that release disconnected every player not in a guild while they logged in.
+- **Linking Discord needs a confirmation in game.** A link code used on Discord now only asks the player to type
+  `/kmh link confirm`, naming the Discord account that used it. A code someone else saw, for example in a channel
+  post the bot ignored, links nothing. A new `/kmh link` or ten minutes cancels an unconfirmed request.
+- `tools/Sanitize-KmhClone.ps1` clears a copy's Discord token first and no longer stops on current Global.json
+  files, which left a "sanitized" copy able to log into the real bot.
+- **Port scans no longer disconnect players.** A connection that never logged in, which a port scan can leave open
+  for days, made RimWorld Together fail whenever it looked through its players: forming, moving or ending a
+  caravan, trading, sending aid or a raid, a settlement's Info button and a RimWorld Together market sale dropped
+  the player who did it. Such connections are now passed over; they also no longer count as players in the server
+  list or take a player slot.
+- **Moving or abandoning a settlement no longer disconnects a player** whose game still had a settlement the server
+  had already dropped (a gravship move made after the last save, then an older save loaded). RimWorld Together
+  called it an illegal action, so the next move never reached the server and every later one was refused too.
+- **Landing a gravship again where the server already has the player's settlement no longer disconnects them.** The
+  server records a landing at once, but the game saves it only at the next save; a crash or a dropped connection in
+  between sends the game back to before the landing, and it lands there again. RimWorld Together called re-adding the
+  player's own settlement an illegal action, and a save made during the flight repeated it on every join.
+- **A second player can start "The Gravship".** Every colony started from that scenario on a world begins on the same
+  orbit tile, and RimWorld Together disconnected the second player at colony creation, then on every map upload and on
+  the takeoff from orbit. A settlement change on another player's tile (adding a settlement, removing one, uploading
+  its map) is now refused without disconnecting: the other player's settlement and map are not touched, and the
+  colony is registered at its first landing on a free tile.
+- **The site output picker offers every eligible item on large modpacks.** The server refused any catalog chunk
+  holding more than 200 plain resources, so steel, stone, wood, crops, cloth and leather could be missing from the
+  picker. It also shows the skill a site of the item would use, and no longer offers items a site cannot be built
+  on because the server has no trusted value for them.
+
+### rel-285.1 (part of this release; it ran on the Colony Nexus servers but was not in the v1.3.1.1 download)
+
+- **RimWorld Together 26.11.2.1 support.** RimWorld Together moved its account check and its account list, so the
+  guard against look-alike account names and the staff lookup stopped attaching. That release also compares names
+  exactly, so a name differing only by case would have registered as a new account on an existing player's data.
+  Both now attach on old and new builds.
+
 ## v1.3.1.1
 
 A server update for v1.3.1. Every v1.3.1 client connects, and players need nothing from it.

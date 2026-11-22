@@ -1107,7 +1107,9 @@ namespace KMHServerAddon.Features.Discord
                 return;
             }
             string code = parts[1];
-            if (!DiscordLinkFlow.TryConsume(code, out string username))
+            string display2 = message.Author?.Display;
+            ulong  authorId = message.Author?.Id ?? 0;
+            if (!DiscordLinkFlow.Redeem(code, display2, authorId, out string username))
             {
                 await Reply(message,
                     "That code is invalid or expired. Run `/kmh link` in-game to get a new one.")
@@ -1115,23 +1117,31 @@ namespace KMHServerAddon.Features.Discord
                 return;
             }
 
-            string display2 = message.Author.Display;
-            ulong  authorId = message.Author?.Id ?? 0;
-            if (!LinkedAccountsStore.SetLink(username, display2, authorId, out string linkRefusal))
+            ServerLog.Info($"Discord: '{display2}' used {username}'s link code; waiting for {username} to confirm in game.");
+            Patches.Patch_PM_Chat_LinkCommands.TellAboutPendingLink(username, display2);
+            await Reply(message,
+                "Almost done: in RimWorld, type `/kmh link confirm` within 10 minutes. Nothing is linked until you do.")
+                .ConfigureAwait(false);
+        }
+
+        internal static bool ConfirmLink(string username, out string reply)
+        {
+            if (!DiscordLinkFlow.TryTakeConfirmation(username, out string display, out ulong discordId))
             {
-                ServerLog.Warn($"Discord: link refused for '{username}' <-> '{display2}': {linkRefusal}");
-                // The code was already spent getting here, so say plainly that a new one is needed.
-                await Reply(message, linkRefusal + " Then run `/kmh link` in-game for a fresh code.")
-                    .ConfigureAwait(false);
-                return;
+                reply = "Nothing to confirm. Run /kmh link, use the code on Discord with !kmh-link, then type /kmh link confirm here within 10 minutes.";
+                return false;
+            }
+            if (!LinkedAccountsStore.SetLink(username, display, discordId, out string refusal))
+            {
+                ServerLog.Warn($"Discord: link refused for '{username}' <-> '{display}': {refusal}");
+                reply = refusal + " Then run /kmh link for a fresh code.";
+                return false;
             }
             LinkedAccountsHandler.BroadcastSnapshot();
-            AnnounceLink(username, display2, "link");
-
-            ServerLog.Info($"Discord: linked '{username}' <-> '{display2}'");
-            await Reply(message,
-                $"Linked **{username}** to **{display2}**. Unlink anytime with `!kmh-unlink`.")
-                .ConfigureAwait(false);
+            AnnounceLink(username, display, "link");
+            ServerLog.Info($"Discord: linked '{username}' <-> '{display}'");
+            reply = $"Linked to Discord: {display}. Unlink anytime with /kmh unlink.";
+            return true;
         }
 
         private static async Task HandleUnlink(KmhDiscordMessage message)

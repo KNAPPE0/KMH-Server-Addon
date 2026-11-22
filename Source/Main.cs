@@ -40,6 +40,13 @@ namespace KMHServerAddon
                 System.Console.Error.WriteLine("Colony Nexus admission compatibility failed; refusing to start an unguarded RWT server.");
                 return 1;
             }
+#if RWT_RT
+            if (!Maintenance.RwtHashKeyMigration.RunAtBoot())
+            {
+                System.Console.Error.WriteLine("Colony Nexus could not rename RWT's save or guild files to the names this RWT looks for; refusing to start, so no returning player is given a new colony.");
+                return 1;
+            }
+#endif
             try
             {
                 // Try both identities rather than hard-coding one; RWT renamed the assembly mid-life.

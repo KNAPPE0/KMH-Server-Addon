@@ -69,6 +69,33 @@ namespace KMHServerAddon.Maintenance
                               : $"claimedSuccess={claimed}, leftInMemory={leftBehind}");
             });
 
+            Check("Discord link: a used code only asks the player to confirm in game; nothing is linked until they do, then the Discord that used it is", () =>
+            {
+                LinkedAccountsStore.ResetForTest();
+                string code = Features.Discord.DiscordLinkFlow.IssueCodeFor("selftest_link_a");
+                bool used = Features.Discord.DiscordLinkFlow.Redeem(code, "lurker#1", Snowflake, out string owner);
+                bool linkedEarly = LinkedAccountsStore.IsLinked("selftest_link_a") || LinkedAccountsStore.FindUsernameByDiscordId(Snowflake) != null;
+                bool usedTwice = Features.Discord.DiscordLinkFlow.Redeem(code, "other#2", Snowflake + 1, out _);
+                bool confirmed = Features.Discord.DiscordBridge.ConfirmLink("selftest_link_a", out string reply);
+                bool linked = LinkedAccountsStore.DiscordIdFor("selftest_link_a") == Snowflake;
+                bool ok = used && owner == "selftest_link_a" && !linkedEarly && !usedTwice && confirmed && linked;
+                return (ok, $"used {used} for '{owner}', linked before confirm {linkedEarly}, second use {usedTwice}, confirmed {confirmed} ({reply}), linked to the user of the code {linked}");
+            });
+
+            Check("Discord link: another player cannot confirm it, and a new /kmh link or ten minutes cancels an unconfirmed request", () =>
+            {
+                LinkedAccountsStore.ResetForTest();
+                Features.Discord.DiscordLinkFlow.Redeem(Features.Discord.DiscordLinkFlow.IssueCodeFor("selftest_link_a"), "lurker#1", Snowflake, out _);
+                bool otherPlayer = Features.Discord.DiscordBridge.ConfirmLink("selftest_link_b", out _);
+                Features.Discord.DiscordLinkFlow.IssueCodeFor("selftest_link_a");
+                bool afterNewCode = Features.Discord.DiscordBridge.ConfirmLink("selftest_link_a", out _);
+                Features.Discord.DiscordLinkFlow.Redeem(Features.Discord.DiscordLinkFlow.IssueCodeFor("selftest_link_a"), "lurker#1", Snowflake, out _);
+                Features.Discord.DiscordLinkFlow.AgeConfirmationForTest("selftest_link_a", TimeSpan.FromMinutes(11));
+                bool afterExpiry = Features.Discord.DiscordBridge.ConfirmLink("selftest_link_a", out _);
+                bool ok = !otherPlayer && !afterNewCode && !afterExpiry && !LinkedAccountsStore.IsLinked("selftest_link_a") && !LinkedAccountsStore.IsLinked("selftest_link_b");
+                return (ok, $"confirmed by another player {otherPlayer}, after a new code {afterNewCode}, after 11 minutes {afterExpiry}");
+            });
+
             return r;
         }
     }

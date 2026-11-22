@@ -9,6 +9,16 @@ namespace KMHServerAddon.Maintenance
 
         private static readonly string[] PatchHighlights =
         {
+            "New in v1.3.1.2:",
+            "  - RimWorld Together 26.11.21.1 support: on its first start the add-on renames each player's save and each RimWorld Together guild file to the names that release looks for, so returning players keep their colony. Never start 26.11.21.1 with an older Colony Nexus.",
+            "  - On RimWorld Together 26.11.21.1, players outside a RimWorld Together guild are no longer disconnected at login once any guild exists.",
+            "  - Linking Discord now ends with /kmh link confirm in game, so a link code someone else saw links nothing.",
+            "  - A connection that never logged in (a port scan) no longer disconnects players who form or move a caravan, trade, send aid or a raid, use a settlement's Info button or sell on the RimWorld Together market.",
+            "  - Moving a settlement by gravship or abandoning one no longer disconnects a player whose game still had a settlement the server had already dropped.",
+            "  - A gravship landing the server already recorded no longer disconnects the player when their game lands there again after losing its save (a crash or a dropped connection after the landing).",
+            "  - A second player starting \"The Gravship\" (every such colony starts on the same orbit tile) is no longer disconnected; another player's settlement and map are still never changed.",
+            "  - The site output picker offers every eligible item on large modpacks (steel, stone, wood and crops were missing), shows the skill a site of it would use, and leaves out items a site cannot be built on.",
+            "",
             "New in v1.3.1.1:",
             "  - Enforcing servers show up in RimWorld Together's server browser again.",
             "  - A mod list Colony Nexus kept from before a reinstall is replaced on the next heartbeat.",

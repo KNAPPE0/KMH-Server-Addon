@@ -13,8 +13,17 @@ ones who have it.
 
 ## RWT version
 
-Colony Nexus v1.3.1 runs next to RWT **26.10.20.1**, which makes it a RimWorld 1.7
-server, or RWT **26.10.15.1** for RimWorld 1.6. It needs .NET 10; the
+Colony Nexus v1.3.1.2 runs next to RWT **26.11.21.1** (what the Steam Workshop gives
+players now) or **26.11.2.1**, which make it a RimWorld 1.7 server, or RWT **26.10.15.1**
+for RimWorld 1.6. Players' RWT must be the same release as the server's.
+
+**Moving a server to RWT 26.11.21.1:** stop it, back it up, put Colony Nexus v1.3.1.2 in
+place, then replace RWT. On its first start Colony Nexus renames each player's save and
+each RWT guild file to the names 26.11.21.1 looks for. Never start 26.11.21.1 with an
+older Colony Nexus: returning players would be sent to colony creation and lose their
+save at the next upload.
+
+It needs .NET 10; the
 self-contained packages carry it. The addon auto-detects which RWT it is sitting
 next to and loads the matching build — it identifies the RWT server by what the
 executable actually contains, so a renamed or panel-mangled server file is still
@@ -173,7 +182,7 @@ are covered in the *Managed / panel hosts* section of [SETUP.txt](SETUP.txt).
 other people under other licences, so KMH fetches them rather than shipping
 them: run `Tools\get-media-tools.ps1` (or the `.sh`) from inside the extracted
 server and both land where KMH looks. The same scripts are published on their
-own as **`KMH-MediaTools-v1.3.1.1.zip`**. Either one runs on any machine with
+own as **`KMH-MediaTools-v1.3.1.2.zip`**. Either one runs on any machine with
 internet, so a server without any is fine — fetch elsewhere, copy the `Tools`
 folder over. Details in [SETUP.txt](SETUP.txt).
 

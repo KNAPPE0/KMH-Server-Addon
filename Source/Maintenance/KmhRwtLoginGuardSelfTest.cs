@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using KMHServerAddon.Features.Simulation;
 using KMHServerAddon.SubProtocol.Patches;
 
@@ -38,6 +39,44 @@ namespace KMHServerAddon.Maintenance
             {
                 List<Conn> hit = Patch_PM_Login_OldSessions.OlderSessions(new Conn(null), null, new[] { new Conn("alice") }, c => c.Name);
                 return (hit.Count == 0, $"{hit.Count} closed");
+            });
+
+            Check("Connections: a connection that never logged in is passed over by the relay to all but the sender, the lookup by name and RWT's old-session check, rather than dropping whoever asked", () =>
+            {
+                var h = new HarmonyLib.Harmony("kmh.selftest.unlogged-peers");
+                ServerClient Fake(string name)
+                {
+                    var c = new ServerClient(null, null, createListener: false);
+                    if (name != null) c.GetData<UserFile>(new UserFile { Username = name });
+                    return c;
+                }
+                ServerClient sender = Fake("selftest_relay_a"), peer = Fake("selftest_relay_b"), scanner = Fake(null);
+                try
+                {
+                    // Boot's PatchAll takes only annotated classes; then RWT's own methods, which unpatched throw on the scanner.
+                    bool atBoot = HarmonyLib.GeneralExtensions.HasHarmonyAttribute(typeof(Patch_ServerNetwork_SkipUnloggedPeers));
+                    h.CreateClassProcessor(typeof(Patch_ServerNetwork_SkipUnloggedPeers)).Patch();
+                    foreach (ServerClient c in new[] { sender, peer, scanner }) Network.ServerClients.TryAdd(c, -1);
+                    MethodBase list = Patch_ServerNetwork_SkipUnloggedPeers.Target();
+                    var relayed = (ServerClient[])list.Invoke(null, new object[] { sender });
+                    var everyone = (ServerClient[])list.Invoke(null, new object[] { null });
+                    MethodBase byName = HarmonyLib.AccessTools.Method(list.DeclaringType, "GetConnectedClientFromUsername");
+                    object found = byName.Invoke(null, new object[] { "selftest_relay_b" }), offline = byName.Invoke(null, new object[] { "selftest_relay_offline" });
+#if RWT_RT
+                    HarmonyLib.AccessTools.Method(typeof(PM_Login), "RemoveOldClientSessions").Invoke(null, new object[] { sender });
+#endif
+                    bool ok = atBoot && relayed.Contains(peer) && !relayed.Contains(sender) && !relayed.Contains(scanner)
+                           && everyone.Contains(sender) && everyone.Contains(peer) && !everyone.Contains(scanner)
+                           && ReferenceEquals(found, peer) && offline == null;
+                    return (ok, $"applied at boot={atBoot}; relayed to {relayed.Length} (unlogged={relayed.Contains(scanner)}); listed {everyone.Length} (unlogged={everyone.Contains(scanner)}); "
+                              + $"by name: peer={ReferenceEquals(found, peer)}, offline={offline == null}");
+                }
+                catch (TargetInvocationException e) { return (false, $"RWT threw {e.InnerException?.GetType().Name}: {e.InnerException?.Message}"); }
+                finally
+                {
+                    foreach (ServerClient c in new[] { sender, peer, scanner }) Network.ServerClients.TryRemove(c, out _);
+                    h.UnpatchAll(h.Id);
+                }
             });
 
             Check("Join: a renamed Workshop mod takes the name this server lists, matched by its Workshop id", () =>
@@ -161,9 +200,132 @@ namespace KMHServerAddon.Maintenance
                 return (ok, $"map object suppressed={kept == null}, packet error rethrown={ReferenceEquals(dropped, locked)}, socket loss rethrown={ReferenceEquals(lost, gone)}; "
                           + string.Join(" | ", seen.Select(e => e.What + ": " + e.Detail)));
             });
+
+            Check("Connections: RimWorld Together's settlement removal exists in this generation", () =>
+                (Patch_PM_Settlements_StaleRemoval.Target() != null, Patch_PM_Settlements_StaleRemoval.Target()?.Name ?? "MISSING - the guard would be skipped"));
+
+            // Unpatched, RWT calls the removal illegal and drops the player; a connection with no listener throws there instead.
+            Check("Connections: removing a settlement this server no longer has, or another player's, keeps the player and removes nothing; removing your own still goes to RimWorld Together", () =>
+            {
+                var h = new HarmonyLib.Harmony("kmh.selftest.stale-settlement");
+                var client = new ServerClient(null, null, createListener: false);
+                client.GetData<UserFile>(new UserFile { Username = "selftest_settle" });
+                const int gone = 987654321, held = 987654322, own = 987654323;
+                string file = Path.Combine(Master.SettlementsPath, held + ".json"), ownFile = Path.Combine(Master.SettlementsPath, own + ".json");
+                object Packet(int tile)
+                {
+                    var p = new PKT_PlayerSettlement();
+                    PropertyInfo prop = typeof(PKT_PlayerSettlement).GetProperty("File");
+                    object f = prop.GetValue(p) ?? Activator.CreateInstance(prop.PropertyType);
+                    f.GetType().GetProperty("Tile").SetValue(f, tile);
+                    prop.SetValue(p, f);
+                    return p;
+                }
+                try
+                {
+                    bool atBoot = HarmonyLib.GeneralExtensions.HasHarmonyAttribute(typeof(Patch_PM_Settlements_StaleRemoval));
+                    h.CreateClassProcessor(typeof(Patch_PM_Settlements_StaleRemoval)).Patch();
+                    Directory.CreateDirectory(Master.SettlementsPath);
+                    File.WriteAllText(file, "{\"Tile\":" + held + ",\"IconID\":0,\"IconColor\":0,\"Username\":\"selftest_settle_other\"}");
+                    File.WriteAllText(ownFile, "{\"Tile\":" + own + ",\"IconID\":0,\"IconColor\":0,\"Username\":\"selftest_settle\"}");
+                    Patch_PM_Settlements_StaleRemoval.Target().Invoke(null, new object[] { client, Packet(gone) });
+                    Patch_PM_Settlements_StaleRemoval.Target().Invoke(null, new object[] { client, Packet(held) });
+                    List<JoinDiagnostics.Event> seen = JoinDiagnostics.Snapshot(2);
+                    bool kept = File.Exists(file);
+                    bool toRwt = Patch_PM_Settlements_StaleRemoval.PrefixForTest(client, Packet(own));
+                    bool ok = atBoot && seen.Count == 2 && seen[0].What == "kept connected: removed a settlement this server no longer has" && seen[0].Detail == "tile " + gone
+                           && seen[1].What == "kept connected: did not remove another player's settlement" && seen[1].Detail == "tile " + held && kept && toRwt;
+                    return (ok, $"applied at boot={atBoot}; {string.Join(" | ", seen.Select(e => e.What + " (" + e.Detail + ")"))}; other's file kept={kept}; own tile goes to RWT={toRwt}");
+                }
+                catch (TargetInvocationException e) { return (false, $"RWT threw {e.InnerException?.GetType().Name}: {e.InnerException?.Message}"); }
+                finally { try { File.Delete(file); File.Delete(ownFile); } catch { } h.UnpatchAll(h.Id); }
+            });
+
+            Check("Connections: RimWorld Together's settlement add exists in this generation", () =>
+                (Patch_PM_Settlements_OwnReAdd.Target() != null, Patch_PM_Settlements_OwnReAdd.Target()?.Name ?? "MISSING - the guard would be skipped"));
+
+            // Unpatched, RWT calls the add illegal and drops the player; a connection with no listener throws there instead.
+            Check("Connections: adding a settlement on a tile the server has, the player's own or another's, keeps the player and changes nothing; a free tile still goes to RimWorld Together", () =>
+            {
+                var h = new HarmonyLib.Harmony("kmh.selftest.own-settlement");
+                var client = new ServerClient(null, null, createListener: false);
+                client.GetData<UserFile>(new UserFile { Username = "selftest_settle" });
+                const int own = 987654331, other = 987654332, free = 987654333;
+                string ownFile = Path.Combine(Master.SettlementsPath, own + ".json"), otherFile = Path.Combine(Master.SettlementsPath, other + ".json");
+                object Packet(int tile)
+                {
+                    var p = new PKT_PlayerSettlement();
+                    PropertyInfo prop = typeof(PKT_PlayerSettlement).GetProperty("File");
+                    object f = prop.GetValue(p) ?? Activator.CreateInstance(prop.PropertyType);
+                    f.GetType().GetProperty("Tile").SetValue(f, tile);
+                    prop.SetValue(p, f);
+                    return p;
+                }
+                try
+                {
+                    bool atBoot = HarmonyLib.GeneralExtensions.HasHarmonyAttribute(typeof(Patch_PM_Settlements_OwnReAdd));
+                    h.CreateClassProcessor(typeof(Patch_PM_Settlements_OwnReAdd)).Patch();
+                    Directory.CreateDirectory(Master.SettlementsPath);
+                    File.WriteAllText(ownFile, "{\"Tile\":" + own + ",\"IconID\":0,\"IconColor\":0,\"Username\":\"selftest_settle\"}");
+                    File.WriteAllText(otherFile, "{\"Tile\":" + other + ",\"IconID\":0,\"IconColor\":0,\"Username\":\"selftest_settle_other\"}");
+                    Patch_PM_Settlements_OwnReAdd.Target().Invoke(null, new object[] { client, Packet(own) });
+                    Patch_PM_Settlements_OwnReAdd.Target().Invoke(null, new object[] { client, Packet(other) });
+                    List<JoinDiagnostics.Event> seen = JoinDiagnostics.Snapshot(2);
+                    bool otherKept = File.ReadAllText(otherFile).Contains("\"selftest_settle_other\"");
+                    bool freeToRwt = Patch_PM_Settlements_OwnReAdd.PrefixForTest(client, Packet(free));
+                    bool ok = atBoot && seen.Count == 2 && seen[0].What == "kept connected: re-added its own settlement" && seen[0].Detail == "tile " + own
+                           && seen[1].What == "kept connected: did not add a settlement on another player's tile" && seen[1].Detail == "tile " + other && otherKept && freeToRwt;
+                    return (ok, $"applied at boot={atBoot}; {string.Join(" | ", seen.Select(e => e.What + " (" + e.Detail + ")"))}; other's owner kept={otherKept}; a free tile goes to RWT={freeToRwt}");
+                }
+                catch (TargetInvocationException e) { return (false, $"RWT threw {e.InnerException?.GetType().Name}: {e.InnerException?.Message}"); }
+                finally { try { File.Delete(ownFile); File.Delete(otherFile); } catch { } h.UnpatchAll(h.Id); }
+            });
+
+            Check("Connections: RimWorld Together's map upload exists in this generation", () =>
+                (Patch_PM_Map_OthersTile.Target() != null, Patch_PM_Map_OthersTile.Target()?.Name ?? "MISSING - the guard would be skipped"));
+
+            // Unpatched, 26.11.2.1 calls the upload illegal and drops the player; older builds store it over the owner's map.
+            Check("Connections: uploading a map for another player's tile keeps the player and stores nothing; the player's own tile and a free tile still go to RimWorld Together", () =>
+            {
+                var h = new HarmonyLib.Harmony("kmh.selftest.others-map");
+                var client = new ServerClient(null, null, createListener: false);
+                client.GetData<UserFile>(new UserFile { Username = "selftest_settle" });
+                const int own = 987654341, other = 987654342, free = 987654343;
+                string ownFile = Path.Combine(Master.SettlementsPath, own + ".json"), otherFile = Path.Combine(Master.SettlementsPath, other + ".json");
+                string otherMap = Path.Combine(Master.MapsPath, other + ".json");
+                object Packet(int tile)
+                {
+                    var p = new PKT_Map();
+                    HarmonyLib.Traverse.Create(p).Property("Tile").SetValue(tile);
+                    HarmonyLib.Traverse.Create(p).Property("Bytes").SetValue(new byte[] { 1 });
+                    return p;
+                }
+                try
+                {
+                    bool atBoot = HarmonyLib.GeneralExtensions.HasHarmonyAttribute(typeof(Patch_PM_Map_OthersTile));
+                    h.CreateClassProcessor(typeof(Patch_PM_Map_OthersTile)).Patch();
+                    Directory.CreateDirectory(Master.SettlementsPath); Directory.CreateDirectory(Master.MapsPath);
+                    File.WriteAllText(ownFile, "{\"Tile\":" + own + ",\"IconID\":0,\"IconColor\":0,\"Username\":\"selftest_settle\"}");
+                    File.WriteAllText(otherFile, "{\"Tile\":" + other + ",\"IconID\":0,\"IconColor\":0,\"Username\":\"selftest_settle_other\"}");
+                    Patch_PM_Map_OthersTile.Target().Invoke(null, new object[] { client, Packet(other) });
+                    JoinDiagnostics.Event e = JoinDiagnostics.Snapshot(1)[0];
+                    bool stored = File.Exists(otherMap);
+                    bool ownToRwt = Patch_PM_Map_OthersTile.PrefixForTest(client, Packet(own)), freeToRwt = Patch_PM_Map_OthersTile.PrefixForTest(client, Packet(free));
+                    bool ok = atBoot && e.What == "kept connected: did not store a map for another player's tile" && e.Detail == "tile " + other && !stored && ownToRwt && freeToRwt;
+                    return (ok, $"applied at boot={atBoot}; {e.What} ({e.Detail}); map stored={stored}; own tile goes to RWT={ownToRwt}, a free tile={freeToRwt}");
+                }
+                catch (TargetInvocationException e) { return (false, $"RWT threw {e.InnerException?.GetType().Name}: {e.InnerException?.Message}"); }
+                finally { try { File.Delete(ownFile); File.Delete(otherFile); File.Delete(otherMap); } catch { } h.UnpatchAll(h.Id); }
+            });
 #else
             Check("Login: the guard is skipped on generations it was not written for", () =>
                 (Patch_PM_Login_OldSessions.Target() == null, ""));
+            Check("Connections: the settlement removal guard is skipped on generations it was not written for", () =>
+                (Patch_PM_Settlements_StaleRemoval.Target() == null, ""));
+            Check("Connections: the own-settlement guard is skipped on generations it was not written for", () =>
+                (Patch_PM_Settlements_OwnReAdd.Target() == null, ""));
+            Check("Connections: the map upload guard is skipped on generations it was not written for", () =>
+                (Patch_PM_Map_OthersTile.Target() == null, ""));
 #endif
 
             Check("Simulated players: RWT is told a simulated player is offline, and asking about a person runs RWT's own check", () =>
@@ -250,6 +412,169 @@ namespace KMHServerAddon.Maintenance
                 bool removal = SimulatedColonyGate.RwtType("PacketManagers.PM_Settlements")?.GetMethod("RemoveSettlement")?.GetParameters().Length == 2;
                 bool ok = SimulatedColonyGate.ConnectedTarget() != null && SimulatedColonyGate.SessionTarget() != null && removal;
                 return (ok, $"connected check {SimulatedColonyGate.ConnectedTarget()?.Name ?? "MISSING"}, session {SimulatedColonyGate.SessionTarget()?.Name ?? "MISSING"}, removal {removal}");
+            });
+
+            string HashFiles(Action<string, string, string, string> body)
+            {
+                string root = Path.Combine(Path.GetTempPath(), "kmh-rwthash-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+                string users = Path.Combine(root, "Users"), saves = Path.Combine(root, "Saves"), guilds = Path.Combine(root, "Guilds");
+                try
+                {
+                    foreach (string d in new[] { users, saves, guilds }) Directory.CreateDirectory(d);
+                    File.WriteAllText(Path.Combine(users, "HA.json"), "{\"Username\":\"alice\",\"Hash\":\"HA\"}");
+                    File.WriteAllText(Path.Combine(users, "bob.json"), "{\"Username\":\"bob\",\"Hash\":\"HB\"}");
+                    File.WriteAllText(Path.Combine(users, "HC.json"), "{\"Username\":\"carol\",\"Hash\":\"HC\"}");
+                    File.WriteAllText(Path.Combine(saves, "alice.json"), "A");
+                    File.WriteAllText(Path.Combine(saves, "bob.json"), "B");
+                    File.WriteAllText(Path.Combine(guilds, "Smiths.json"), "{\"Name\":\"Smiths\",\"IconID\":4,\"IconColor\":2,\"GuildMembers\":[{\"Username\":\"alice\",\"Rank\":2}]}");
+                    body(users, saves, guilds, Path.Combine(root, "park"));
+                    return string.Join(" ", Directory.GetFiles(root, "*", SearchOption.AllDirectories)
+                        .Select(f => f.Substring(root.Length + 1).Replace('\\', '/') + "=" + File.ReadAllText(f).Length).OrderBy(s => s, StringComparer.Ordinal));
+                }
+                finally { try { Directory.Delete(root, true); } catch { } }
+            }
+            Func<string, string> fakeHash = s => "G" + s.ToUpperInvariant();
+
+            Check("RWT files: on an RWT that finds saves by hash, each returning player's save is renamed to the account's hash name and an old RWT guild gets its hash, keeping its members", () =>
+            {
+                RwtHashKeyMigration.Outcome o = null;
+                string guild = null;
+                string files = HashFiles((u, s, g, park) =>
+                {
+                    o = RwtHashKeyMigration.Run(u, s, g, park, fakeHash);
+                    string p = Path.Combine(g, "GSMITHS.json");
+                    guild = File.Exists(p) ? File.ReadAllText(p) : "";
+                    bool moved = File.ReadAllText(Path.Combine(s, "HA.json")) == "A" && File.ReadAllText(Path.Combine(s, "HB.json")) == "B";
+                    if (!moved) o.Failures.Add("save contents");
+                });
+                bool ok = o.Saves == 2 && o.Guilds == 1 && o.Parked == 0 && o.Failures.Count == 0
+                       && guild.Contains("\"Hash\": \"GSMITHS\"") && guild.Contains("alice") && guild.Contains("\"IconID\": 4")
+                       && !files.Contains("Saves/alice.json") && !files.Contains("Saves/bob.json") && !files.Contains("Guilds/Smiths.json");
+                return (ok, $"saves {o.Saves}, guilds {o.Guilds}, parked {o.Parked}, failures {string.Join("; ", o.Failures)} | {files}");
+            });
+
+            Check("RWT files: a second run changes nothing, and a save left under both names keeps the account one and moves the older one aside rather than letting RWT delete it", () =>
+            {
+                RwtHashKeyMigration.Outcome again = null, both = null;
+                string kept = null, parked = null;
+                HashFiles((u, s, g, park) =>
+                {
+                    RwtHashKeyMigration.Run(u, s, g, park, fakeHash);
+                    again = RwtHashKeyMigration.Run(u, s, g, park, fakeHash);
+                    File.WriteAllText(Path.Combine(s, "alice.json"), "older");
+                    both = RwtHashKeyMigration.Run(u, s, g, park, fakeHash);
+                    kept = File.ReadAllText(Path.Combine(s, "HA.json"));
+                    string p = Path.Combine(park, "Saves", "alice.json");
+                    parked = File.Exists(p) ? File.ReadAllText(p) : "missing";
+                    if (File.Exists(Path.Combine(s, "alice.json"))) parked += " (still in Saves)";
+                });
+                bool ok = again.Saves + again.Guilds + again.Parked == 0 && both.Parked == 1 && both.Saves == 0 && kept == "A" && parked == "older";
+                return (ok, $"second run {again.Saves}/{again.Guilds}/{again.Parked}; both names: parked {both.Parked}, kept '{kept}', parked copy '{parked}'");
+            });
+
+            Check("RWT files: a save goes only to the account whose name matches its file exactly; two accounts with one name, or an account with no hash, stop the boot and leave the save alone", () =>
+            {
+                string root = Path.Combine(Path.GetTempPath(), "kmh-rwthash-own-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+                string users = Path.Combine(root, "Users"), saves = Path.Combine(root, "Saves");
+                try
+                {
+                    Directory.CreateDirectory(users); Directory.CreateDirectory(saves);
+                    File.WriteAllText(Path.Combine(users, "a-dana.json"), "{\"Username\":\"dana\",\"Hash\":\"HL\"}");
+                    File.WriteAllText(Path.Combine(users, "b-Dana.json"), "{\"Username\":\"Dana\",\"Hash\":\"HD\"}");
+                    File.WriteAllText(Path.Combine(users, "c1.json"), "{\"Username\":\"Eve\",\"Hash\":\"HE1\"}");
+                    File.WriteAllText(Path.Combine(users, "c2.json"), "{\"Username\":\"Eve\",\"Hash\":\"HE2\"}");
+                    File.WriteAllText(Path.Combine(users, "d.json"), "{\"Username\":\"Finn\",\"Hash\":\"\"}");
+                    File.WriteAllText(Path.Combine(saves, "Dana.json"), "D");
+                    File.WriteAllText(Path.Combine(saves, "Eve.json"), "E");
+                    File.WriteAllText(Path.Combine(saves, "Finn.json"), "F");
+                    RwtHashKeyMigration.Outcome o = RwtHashKeyMigration.Run(users, saves, Path.Combine(root, "Guilds"), Path.Combine(root, "park"), fakeHash);
+                    var left = new HashSet<string>(Directory.GetFiles(saves).Select(Path.GetFileName), StringComparer.Ordinal);
+                    bool dana = left.Contains("HD.json") && File.ReadAllText(Path.Combine(saves, "HD.json")) == "D" && !left.Contains("HL.json");
+                    bool kept = left.Contains("Eve.json") && left.Contains("Finn.json") && left.Count == 3;
+                    bool stopped = o.Failures.Count == 2 && o.Failures.Exists(f => f.Contains("Eve")) && o.Failures.Exists(f => f.Contains("Finn"));
+                    return (dana && kept && stopped && o.Saves == 1, $"Dana's save to Dana {dana}, others left alone {kept} ({string.Join(" ", left)}), stopped {stopped}: {string.Join("; ", o.Failures)}");
+                }
+                finally { try { Directory.Delete(root, true); } catch { } }
+            });
+
+            Check("RWT files: a save that cannot be renamed stops the boot and stays where it was", () =>
+            {
+                RwtHashKeyMigration.Outcome o = null;
+                bool stayed = false;
+                HashFiles((u, s, g, park) =>
+                {
+                    Directory.CreateDirectory(Path.Combine(s, "HA.json", "blocker"));
+                    o = RwtHashKeyMigration.Run(u, s, g, park, fakeHash);
+                    stayed = File.Exists(Path.Combine(s, "alice.json"));
+                });
+                bool ok = o.Failures.Count == 1 && o.Failures[0].Contains("alice") && stayed && o.Saves == 1;
+                return (ok, $"failures {o.Failures.Count}, alice's save still in place {stayed}, others renamed {o.Saves}");
+            });
+
+            Check("RWT guilds: with an RWT guild on the server, a player in no guild is looked up as in no guild instead of throwing at login", () =>
+            {
+                var h = new HarmonyLib.Harmony("kmh.selftest.no-guild");
+                string g0 = Master.GuildsPath;
+                string dir = Path.Combine(Path.GetTempPath(), "kmh-noguild-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+                try
+                {
+                    Directory.CreateDirectory(dir);
+                    File.WriteAllText(Path.Combine(dir, "G.json"), "{\"Name\":\"Smiths\",\"Hash\":\"G\",\"IconID\":1,\"IconColor\":1,\"GuildMembers\":[]}");
+                    Master.GuildsPath = dir;
+                    h.CreateClassProcessor(typeof(Patch_GuildManagerH_NoGuild)).Patch();
+                    MethodBase find = Patch_GuildManagerH_NoGuild.Target();
+                    object none = find.Invoke(null, new object[] { null });
+                    object other = find.Invoke(null, new object[] { "Nobody" });
+                    bool atBoot = HarmonyLib.GeneralExtensions.HasHarmonyAttribute(typeof(Patch_GuildManagerH_NoGuild));
+                    bool ok = atBoot && none == null && other == null && Patch_GuildManagerH_NoGuild.PrefixForTest("Smiths") == "Smiths";
+                    return (ok, $"patched at boot {atBoot}, no guild -> {none ?? "none"}, unknown guild -> {other ?? "none"}");
+                }
+                catch (TargetInvocationException ex) { return (false, $"RWT threw {ex.InnerException?.GetType().Name}: {ex.InnerException?.Message}"); }
+                finally { h.UnpatchAll(h.Id); Master.GuildsPath = g0; try { Directory.Delete(dir, true); } catch { } }
+            });
+
+            Check("RWT files: an RWT release whose layout was not checked renames nothing; it refuses to start while old-named saves remain, and starts once none do", () =>
+            {
+                string u0 = Master.UsersPath, s0 = Master.SavesPath, g0 = Master.GuildsPath;
+                bool startsWithOld = true, untouched = false, startsWhenDone = false;
+                try
+                {
+                    HashFiles((u, s, g, park) =>
+                    {
+                        Master.UsersPath = u; Master.SavesPath = s; Master.GuildsPath = g;
+                        startsWithOld = RwtHashKeyMigration.RunAtBoot("26.12.9.1");
+                        untouched = File.Exists(Path.Combine(s, "alice.json")) && !File.Exists(Path.Combine(s, "HA.json")) && File.Exists(Path.Combine(g, "Smiths.json"));
+                        RwtHashKeyMigration.Run(u, s, g, park, fakeHash);
+                        startsWhenDone = RwtHashKeyMigration.RunAtBoot("26.12.9.1");
+                    });
+                }
+                finally { Master.UsersPath = u0; Master.SavesPath = s0; Master.GuildsPath = g0; }
+                bool keyed = RwtHashKeyMigration.RwtKeysByHash;
+                bool ok = untouched && startsWhenDone && startsWithOld == !keyed;
+                return (ok, $"this RWT keys by hash {keyed}: starts with old names {startsWithOld}, files untouched {untouched}, starts once renamed {startsWhenDone}");
+            });
+
+            Check("RWT files: at boot, saves are renamed only on an RWT that finds them by hash (26.11.21.1 on), with that RWT's own hash", () =>
+            {
+                string version = typeof(UserFile).Assembly.GetType("RTShared.Misc.CommonValues")?.GetField("ExecutableVersion")?.GetRawConstantValue() as string;
+                bool expectHash = Version.TryParse(version, out Version v) && v >= new Version(26, 11, 21, 1);
+                string u0 = Master.UsersPath, s0 = Master.SavesPath, g0 = Master.GuildsPath;
+                bool booted = false, renamed = false;
+                try
+                {
+                    HashFiles((u, s, g, park) =>
+                    {
+                        Master.UsersPath = u; Master.SavesPath = s; Master.GuildsPath = g;
+                        booted = RwtHashKeyMigration.RunAtBoot();
+                        renamed = File.Exists(Path.Combine(s, "HA.json"));
+                    });
+                }
+                finally { Master.UsersPath = u0; Master.SavesPath = s0; Master.GuildsPath = g0; }
+                Func<string, string> hasher = RwtHashKeyMigration.RwtHasher();
+                string sha = BitConverter.ToString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.ASCII.GetBytes("Smiths"))).Replace("-", "");
+                bool hashOk = !expectHash || hasher?.Invoke("Smiths") == sha;
+                bool ok = booted && renamed == expectHash && RwtHashKeyMigration.RwtKeysByHash == expectHash && hashOk;
+                return (ok, $"RWT {version ?? "?"}: keys by hash {RwtHashKeyMigration.RwtKeysByHash}, renamed at boot {renamed}, boot ok {booted}, RWT hash matches {hashOk}");
             });
 #endif
             return r;

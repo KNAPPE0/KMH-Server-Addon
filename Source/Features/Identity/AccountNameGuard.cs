@@ -14,8 +14,8 @@ namespace KMHServerAddon.Features.Identity
 
         internal static bool Install(Harmony harmony)
         {
-            MethodInfo exists = RwtCompat.UserStoreMethod("CheckIfUserExists", 2);
-            if (exists == null || exists.ReturnType != typeof(bool) || exists.GetParameters()[0].ParameterType != typeof(ServerClient))
+            MethodInfo exists = ExistsCheck();
+            if (exists == null)
             {
                 ServerLog.Warn("Accounts: RWT's account check was not found - a look-alike of an existing account name is not refused.");
                 return false;
@@ -24,13 +24,22 @@ namespace KMHServerAddon.Features.Identity
             return true;
         }
 
+        // RWT 26.11.2.1 dropped the client from this check, and it now compares names exactly.
+        internal static MethodInfo ExistsCheck()
+        {
+            MethodInfo two = RwtCompat.UserStoreMethod("CheckIfUserExists", 2);
+            if (two != null) return two.ReturnType == typeof(bool) && two.GetParameters()[0].ParameterType == typeof(ServerClient) ? two : null;
+            MethodInfo one = RwtCompat.UserStoreMethod("CheckIfUserExists", 1);
+            return one != null && one.ReturnType == typeof(bool) && one.GetParameters()[0].ParameterType == typeof(PKT_Login) ? one : null;
+        }
+
         // "Exists" sends RWT down its sign-in path, which needs that account's exact name and password, so it is refused.
         private static void AfterExistsCheck(object[] __args, ref bool __result)
         {
             if (__result) return;
             try
             {
-                string name = LoginName(__args?.Length > 1 ? __args[1] : null);
+                string name = LoginName(__args?.Length > 0 ? __args[__args.Length - 1] : null);
                 string clash = ClashWith(name, StaffRegistry.Accounts(TimeSpan.Zero)?.Keys);
                 if (clash == null) return;
                 ServerLog.Warn($"Accounts: refused a new account '{name}' - Colony Nexus would keep it and '{clash}' as one player.");
@@ -39,10 +48,10 @@ namespace KMHServerAddon.Features.Identity
             catch (Exception ex) { ServerLog.Warn($"Accounts: the look-alike check failed ({ex.GetType().Name})."); }
         }
 
-        internal static bool AfterExistsCheckForTest(object login, bool rwtSaid)
+        internal static bool AfterExistsCheckForTest(object login, bool rwtSaid, bool loginOnly = false)
         {
             bool result = rwtSaid;
-            AfterExistsCheck(new object[] { null, login }, ref result);
+            AfterExistsCheck(loginOnly ? new[] { login } : new object[] { null, login }, ref result);
             return result;
         }
 

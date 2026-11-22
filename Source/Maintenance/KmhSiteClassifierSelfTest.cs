@@ -397,6 +397,22 @@ namespace KMHServerAddon.Maintenance
                        && !Regex.IsMatch(store, @"LoadFromDisk[\s\S]{0,4000}?AcceptsOutput"), ""));
             }
 
+            // A name guess reads "gold" in a meat as Mining; the picker shows what a Custom site of it would use.
+            SiteCatalogStore.ResetForTest();
+            string goldMeat = "Meat_KmhSelftestGoldilox", unpriced = "Meat_KmhSelftestUnpriced";
+            SiteCatalogStore.Accept("alice", "fp-G", 1, 1, new List<Features.Sites.Dto.SiteOutputMetadata> { Meta(goldMeat, animal: true), Meta(unpriced, animal: true) }, out _);
+            Features.ItemLabels.ItemLabelCache.Apply(new Dictionary<string, string> { [goldMeat] = "goldilox meat", [unpriced] = "unpriced meat" });
+            Features.ItemLabels.ItemLabelCache.ApplyValues(new Dictionary<string, long> { [goldMeat] = 3 });
+            List<Features.Sites.Dto.SiteCatalogEntry> offered = SiteStore.BuildOutputCatalogFor("alice", includeBlocked: false).Entries;
+            Features.Sites.Dto.SiteCatalogEntry shown = offered.Find(e => e.DefName == goldMeat);
+            r.Add(("catalog: the picker names the skill a site of the output would use, not a guess from its name",
+                   shown != null && shown.RelevantSkill == "Animals", shown == null ? "not offered" : shown.RelevantSkill));
+            bool unpricedOffered = offered.Exists(e => e.DefName == unpriced);
+            Features.Sites.Dto.SiteBuildQuote quote = SiteStore.QuoteBuild("alice", unpriced, 10, 0f, SiteArchetypes.Custom, 990001);
+            bool cannotBuild = !quote.Ok && (quote.Reason ?? "").Contains("no trusted market value");
+            r.Add(("catalog: an output a site cannot be built on (no trusted market value) is not offered",
+                   !unpricedOffered && shown != null && cannotBuild, $"offered={unpricedOffered}; build quote: {quote.Reason}"));
+
             SiteCatalogStore.ResetForTest();
             return r;
         }

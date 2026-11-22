@@ -400,6 +400,32 @@ namespace KMHServerAddon.Maintenance
                 finally { Features.Identity.StaffRegistry.AccountsForTest(null); }
             });
 
+            Check("Accounts: RWT 26.11.2.1's login-only check still refuses a name that differs only by case", () =>
+            {
+                // Older RWT generations name it _username.
+                object Login(string user)
+                {
+                    object pkt = Activator.CreateInstance(typeof(PKT_Login));
+                    foreach (string member in new[] { "Username", "_username" })
+                    {
+                        var p = typeof(PKT_Login).GetProperty(member);
+                        if (p != null && p.CanWrite) { p.SetValue(pkt, user); return pkt; }
+                        var f = typeof(PKT_Login).GetField(member);
+                        if (f != null) { f.SetValue(pkt, user); return pkt; }
+                    }
+                    return null;
+                }
+                Features.Identity.StaffRegistry.AccountsForTest(new Dictionary<string, Features.Identity.StaffRegistry.RwtAccount>(StringComparer.Ordinal)
+                    { ["KNAPPE0"] = default });
+                try
+                {
+                    bool refused = Features.Identity.AccountNameGuard.AfterExistsCheckForTest(Login("knappe0"), false, loginOnly: true);
+                    bool admitted = !Features.Identity.AccountNameGuard.AfterExistsCheckForTest(Login("someoneelse"), false, loginOnly: true);
+                    return (refused && admitted, $"case variant refused={refused} new name registers={admitted}");
+                }
+                finally { Features.Identity.StaffRegistry.AccountsForTest(null); }
+            });
+
             Check("Accounts: the guard patches RWT's real account check, and RWT's account list resolves", () =>
             {
                 const string id = "kmh.selftest.accountnames";
@@ -407,7 +433,7 @@ namespace KMHServerAddon.Maintenance
                 try
                 {
                     bool installed = Features.Identity.AccountNameGuard.Install(harmony);
-                    var target = RwtCompat.UserStoreMethod("CheckIfUserExists", 2);
+                    var target = Features.Identity.AccountNameGuard.ExistsCheck();
                     var info = target == null ? null : HarmonyLib.Harmony.GetPatchInfo(target);
                     bool patched = info != null && System.Linq.Enumerable.Any(info.Postfixes, p => p.owner == id);
                     bool list = RwtCompat.UserStoreMethod("GetAllUserFiles", 0) != null;

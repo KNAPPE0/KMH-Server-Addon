@@ -1935,6 +1935,8 @@ namespace KMHServerAddon.Features.Sites
             foreach ((string defName, string label, long value) in source)
             {
                 SiteOutputClass cls = SiteOutputRules.Classify(defName, label);
+                // A build refuses an output with no trusted value (insect meat rounds to 0), so the picker must not offer it.
+                if (cls.IsAllowed && value <= 0) { cls.IsAllowed = false; cls.BlockReason = "no trusted market value yet"; }
                 if (!cls.IsAllowed)
                 {
                     if (!includeBlocked || blocked >= blockedCap) continue;
@@ -1956,7 +1958,8 @@ namespace KMHServerAddon.Features.Sites
                 snap.Entries.Add(new Dto.SiteCatalogEntry
                 {
                     DefName = defName, Label = label, Tier = cls.TierNumber, TierName = cls.TierName,
-                    RelevantSkill = cls.RelevantSkill, MaxAmount = maxAmount, EstBuildCost = estCost,
+                    // What a Custom site of it would use, not the name guess ("Meat_DA_Goldilox" read as gold, so Mining).
+                    RelevantSkill = SkillFor(SiteArchetypes.Custom, meta?.Family, cls.RelevantSkill), MaxAmount = maxAmount, EstBuildCost = estCost,
                     EstCycleMinutes = estCycleMin, Allowed = true,
                     Family = meta?.Family ?? SiteOutputFamilies.Unknown,
                     AllowedArchetypes = snap.ArchetypesReady ? SiteArchetypeRegistry.ArchetypesFor(meta) : "",

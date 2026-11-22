@@ -286,6 +286,141 @@ namespace KMHServerAddon.SubProtocol.Patches
 #endif
     }
 
+    // RWT reads every listed connection's player to relay, to find a player by name or hash and to close old sessions; one
+    // that never logged in (a port scan stuck mid-packet stayed for days on Fantasy) has none, and the throw drops the asker.
+    [HarmonyPatch]
+    internal static class Patch_ServerNetwork_SkipUnloggedPeers
+    {
+        internal static MethodBase Target()
+            => AccessTools.Method(typeof(PM_Login).Assembly.GetType(typeof(PM_Login).Namespace.Split('.')[0] + ".Hooks.TCPNetwork.ServerNetwork"),
+                                  "GetConnectedClients");
+        private static bool Prepare() => Target() != null;
+        private static MethodBase TargetMethod() => Target();
+
+        [HarmonyPrefix]
+        private static bool Prefix(ServerClient toExclude, ref ServerClient[] __result)
+        {
+            string sender = toExclude?.GetData<UserFile>()?.Username;
+            __result = Network.ServerClients.Keys.Where(c => c.GetData<UserFile>() is UserFile p && (toExclude == null || p.Username != sender)).ToArray();
+            return false;
+        }
+    }
+
+    [HarmonyPatch]
+    internal static class Patch_PM_Settlements_StaleRemoval
+    {
+#if RWT_RT
+        internal static MethodBase Target() => AccessTools.Method(typeof(PM_Settlements), "RemoveSettlement");
+#else
+        internal static MethodBase Target() => null;
+#endif
+        private static bool Prepare() => Target() != null;
+        private static MethodBase TargetMethod() => Target();
+
+#if RWT_RT
+        // A stale save re-removes a settlement already gone or now another player's; RWT drops the player, and every later move again.
+        [HarmonyPrefix]
+        private static bool Prefix(ServerClient __0, object __1)
+        {
+            int? tile = TileOf(__1);
+            if (__0 == null || tile == null) return true;
+            string user = __0.GetData<UserFile>()?.Username, owner = Patch_PM_Settlements_OwnReAdd.OwnerOf(tile.Value);
+            if (owner != null && owner == user) return true;
+            JoinDiagnostics.Record(__0.IP, user, owner == null ? "kept connected: removed a settlement this server no longer has"
+                                                               : "kept connected: did not remove another player's settlement", $"tile {tile}");
+            return false;
+        }
+
+        // By name: every released RWT calls it File, the pre-release build this compiles against does not.
+        internal static int? TileOf(object packet)
+            => Traverse.Create(Traverse.Create(packet).Property("File").GetValue()).Property("Tile").GetValue() as int?;
+
+        internal static bool PrefixForTest(ServerClient client, object packet) => Prefix(client, packet);
+#endif
+    }
+
+    [HarmonyPatch]
+    internal static class Patch_PM_Settlements_OwnReAdd
+    {
+#if RWT_RT
+        internal static MethodBase Target() => AccessTools.Method(typeof(PM_Settlements), "AddSettlement");
+#else
+        internal static MethodBase Target() => null;
+#endif
+        private static bool Prepare() => Target() != null;
+        private static MethodBase TargetMethod() => Target();
+
+#if RWT_RT
+        // A landing lost from the save lands again, and every "The Gravship" start shares one orbit tile; RWT drops the player for adding a held tile.
+        [HarmonyPrefix]
+        private static bool Prefix(ServerClient __0, object __1)
+        {
+            int? tile = Patch_PM_Settlements_StaleRemoval.TileOf(__1);
+            if (__0 == null || tile == null) return true;
+            string user = __0.GetData<UserFile>()?.Username, owner = OwnerOf(tile.Value);
+            if (owner == null) return true;
+            JoinDiagnostics.Record(__0.IP, user, owner == user ? "kept connected: re-added its own settlement"
+                                                               : "kept connected: did not add a settlement on another player's tile", $"tile {tile}");
+            return false;
+        }
+
+        // By reflection: the settlement file's type is in another namespace in every released RWT.
+        internal static string OwnerOf(int tile)
+            => Traverse.Create(AccessTools.Method(typeof(PM_Settlements), "GetSettlementFileFromTile")?.Invoke(null, new object[] { tile })).Property("Username").GetValue() as string;
+
+        internal static bool PrefixForTest(ServerClient client, object packet) => Prefix(client, packet);
+#endif
+    }
+
+    [HarmonyPatch]
+    internal static class Patch_GuildManagerH_NoGuild
+    {
+#if RWT_RT
+        internal static MethodBase Target()
+            => AccessTools.Method(typeof(PM_Guilds).Assembly.GetType(typeof(PM_Guilds).Namespace + ".GuildManagerH"), "GetGuildFromName", new[] { typeof(string) });
+#else
+        internal static MethodBase Target() => null;
+#endif
+        private static bool Prepare() => Target() != null;
+        private static MethodBase TargetMethod() => Target();
+
+#if RWT_RT
+        // RWT 26.11.21.1 hashes the name before comparing, so once any RWT guild exists every player in no guild throws at login and is dropped.
+        [HarmonyPrefix]
+        private static void Prefix(ref string __0) { if (__0 == null) __0 = ""; }
+
+        internal static string PrefixForTest(string name) { Prefix(ref name); return name; }
+#endif
+    }
+
+    [HarmonyPatch]
+    internal static class Patch_PM_Map_OthersTile
+    {
+#if RWT_RT
+        internal static MethodBase Target() => AccessTools.Method(typeof(PM_Map), "SaveUserMap");
+#else
+        internal static MethodBase Target() => null;
+#endif
+        private static bool Prepare() => Target() != null;
+        private static MethodBase TargetMethod() => Target();
+
+#if RWT_RT
+        // A colony the server could not register on another player's tile uploads its map there; RWT drops the player for it.
+        [HarmonyPrefix]
+        private static bool Prefix(ServerClient __0, object __1)
+        {
+            int? tile = Traverse.Create(__1).Property("Tile").GetValue() as int?;
+            if (__0 == null || tile == null) return true;
+            string user = __0.GetData<UserFile>()?.Username, owner = Patch_PM_Settlements_OwnReAdd.OwnerOf(tile.Value);
+            if (owner == null || owner == user) return true;
+            JoinDiagnostics.Record(__0.IP, user, "kept connected: did not store a map for another player's tile", $"tile {tile}");
+            return false;
+        }
+
+        internal static bool PrefixForTest(ServerClient client, object packet) => Prefix(client, packet);
+#endif
+    }
+
     [HarmonyPatch]
     internal static class Patch_Listener_DropDiagnostics
     {

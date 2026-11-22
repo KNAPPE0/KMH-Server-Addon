@@ -15,10 +15,10 @@ Then run KMHServerAddon.exe (NOT the RWT server).
 There are two downloads per platform, and which one you took decides what is in
 the zip:
 
-  KMH-ColonyNexus-ServerAddon-v1.3.1.1-<platform>.zip
+  KMH-ColonyNexus-ServerAddon-v1.3.1.2-<platform>.zip
     One KMHServerAddon.exe with everything inside it. Needs .NET 10 on the host.
 
-  KMH-ColonyNexus-ServerAddon-v1.3.1.1-<platform>-selfcontained.zip
+  KMH-ColonyNexus-ServerAddon-v1.3.1.2-<platform>-selfcontained.zip
     Carries .NET 10 with it, so nothing to install - but it is a folder of files,
     and KMHServerAddon.exe is only a small launcher that will not start without
     them. Extract the whole thing and keep it together.
@@ -29,9 +29,14 @@ and uses the matching build automatically, identifying that server by what the
 file actually contains rather than by its name - so a renamed or panel-mangled
 server file is still found.
 
-RWT releases for this version:
-  26.10.20.1 - a RimWorld 1.7 server
+RWT releases for this version (players' RWT must be the same release):
+  26.11.21.1 - a RimWorld 1.7 server (the Steam Workshop's RWT since 2026-11-21)
+  26.11.2.1  - a RimWorld 1.7 server
   26.10.15.1 - a RimWorld 1.6 server
+Moving to 26.11.21.1: stop the server, back it up, install this Colony Nexus,
+then replace RWT. The first start renames each player's save and each RWT
+guild file to the names 26.11.21.1 looks for. Never start 26.11.21.1 with an
+older Colony Nexus: returning players would get a new colony.
 RWT moved a core network type below 26.5.24.1, so 26.4.18.1 and older are a
 different generation - on those Colony Nexus refuses to start and says so,
 leaving RWT running.

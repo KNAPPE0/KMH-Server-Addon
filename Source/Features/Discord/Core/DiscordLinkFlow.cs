@@ -9,6 +9,8 @@ namespace KMHServerAddon.Features.Discord
         private static readonly object _lock = new object();
         private static readonly Dictionary<string, Pending> _byCode
             = new Dictionary<string, Pending>(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, Awaiting> _awaiting
+            = new Dictionary<string, Awaiting>(StringComparer.OrdinalIgnoreCase);
 
         public static readonly TimeSpan TimeToLive = TimeSpan.FromMinutes(10);
 
@@ -27,8 +29,10 @@ namespace KMHServerAddon.Features.Discord
                         remove.Add(kv.Key);
                 }
                 foreach (string k in remove) _byCode.Remove(k);
+                _awaiting.Remove(username);
 
-                string code = GenerateCode();
+                string code;
+                do code = GenerateCode(); while (_byCode.ContainsKey(code));
                 _byCode[code] = new Pending
                 {
                     Username  = username,
@@ -50,6 +54,33 @@ namespace KMHServerAddon.Features.Discord
                 username = p.Username;
                 return true;
             }
+        }
+
+        // A code seen by someone else must not link their Discord, so a used code only asks the player to confirm in game.
+        public static bool Redeem(string code, string display, ulong discordId, out string username)
+        {
+            if (!TryConsume(code, out username)) return false;
+            lock (_lock) _awaiting[username] = new Awaiting { Display = display, DiscordId = discordId, AtUtc = DateTime.UtcNow };
+            return true;
+        }
+
+        public static bool TryTakeConfirmation(string username, out string display, out ulong discordId)
+        {
+            display = null; discordId = 0;
+            if (string.IsNullOrEmpty(username)) return false;
+            lock (_lock)
+            {
+                if (!_awaiting.TryGetValue(username, out Awaiting a)) return false;
+                _awaiting.Remove(username);
+                if (DateTime.UtcNow - a.AtUtc > TimeToLive) return false;
+                display = a.Display; discordId = a.DiscordId;
+                return true;
+            }
+        }
+
+        internal static void AgeConfirmationForTest(string username, TimeSpan by)
+        {
+            lock (_lock) if (_awaiting.TryGetValue(username, out Awaiting a)) a.AtUtc -= by;
         }
 
         // I, O, 1 and 0 are left out so a player reading a code aloud cannot produce a different one.
@@ -86,6 +117,13 @@ namespace KMHServerAddon.Features.Discord
             {
                 foreach (string k in dead) _byCode.Remove(k);
             }
+        }
+
+        private class Awaiting
+        {
+            public string   Display;
+            public ulong    DiscordId;
+            public DateTime AtUtc;
         }
 
         private class Pending

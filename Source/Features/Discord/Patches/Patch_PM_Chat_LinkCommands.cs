@@ -53,6 +53,12 @@ namespace KMHServerAddon.Features.Discord.Patches
 
             // "status" reports the binding without issuing a code, since issuing one invalidates the last.
             string after = raw.Length > CmdLink.Length ? raw.Substring(CmdLink.Length).Trim() : "";
+            if (after.Equals("confirm", StringComparison.OrdinalIgnoreCase))
+            {
+                DiscordBridge.ConfirmLink(username, out string reply);
+                Reply(client, reply);
+                return;
+            }
             if (after.StartsWith("status", StringComparison.OrdinalIgnoreCase))
             {
                 if (LinkedAccountsStore.TryGetLink(username, out string display) && !string.IsNullOrEmpty(display))
@@ -70,8 +76,8 @@ namespace KMHServerAddon.Features.Discord.Patches
             string code = DiscordLinkFlow.IssueCodeFor(username);
             int    mins = (int)DiscordLinkFlow.TimeToLive.TotalMinutes;
             Reply(client, $"Your link code: {code}");
-            Reply(client, $"In Discord, DM the bot or post in an allowed channel: !kmh-link {code}");
-            Reply(client, $"This code expires in {mins} minutes and can only be used once.");
+            Reply(client, $"In Discord, DM the bot: !kmh-link {code}");
+            Reply(client, $"Then type /kmh link confirm here. The code expires in {mins} minutes and can only be used once.");
             Reply(client, "(See your current link any time with: /kmh link status)");
         }
 
@@ -94,6 +100,13 @@ namespace KMHServerAddon.Features.Discord.Patches
             DiscordBridge.AnnounceLink(username, previousDisplay, "unlink");
             ServerLog.Info($"Link: {username} unlinked their Discord (via /kmh unlink)");
             Reply(client, "Your Discord link has been removed." + (saved ? "" : LinkedAccountsStore.UnlinkNotSavedNote));
+        }
+
+        internal static void TellAboutPendingLink(string username, string display)
+        {
+            foreach (ServerClient c in Network.ServerClients.Keys)
+                if (c?.IsVerified == true && string.Equals(c.GetData<UserFile>()?.Username, username, StringComparison.OrdinalIgnoreCase))
+                    Reply(c, $"Discord user '{display}' used your link code. If that is you, type /kmh link confirm. If not, ignore it: nothing is linked until you confirm.");
         }
 
         private static void Reply(ServerClient client, string text)

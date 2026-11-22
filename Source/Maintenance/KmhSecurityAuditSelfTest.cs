@@ -1711,6 +1711,20 @@ namespace KMHServerAddon.Maintenance
                 bool pass = !oversizedPush && admitted == Features.ItemLabels.ItemLabelsHandler.MaxPushesPerWindow && !longKept && compactions == 1;
                 return (pass, $"oversizedPush={oversizedPush} admitted={admitted}/{Features.ItemLabels.ItemLabelsHandler.MaxPushesPerWindow + 3} longKeyKept={longKept} compactions={compactions}");
             });
+
+            // As a client sends them: 800 labels a chunk, each plain resource among them flagged fungible too.
+            Check("Item labels: a full chunk of plain resources, every one flagged fungible, is taken", () =>
+            {
+                string id = Guid.NewGuid().ToString("N").Substring(0, 6);
+                var labels = new Dictionary<string, string>();
+                for (int i = 0; i < 800; i++) labels["KmhSelftestRes" + id + "_" + i] = "resource " + i;
+                var c = Client(Fresh("ilf"));
+                Features.ItemLabels.ItemLabelsHandler.PushForTest(c, SubProtocol.KmhEnvelope.ParseForTest(
+                    new { labels, fungible = new List<string>(labels.Keys), chunk_index = 1, chunk_total = 1 }));
+                int kept = 0;
+                foreach (KeyValuePair<string, string> kv in labels) if (Features.ItemLabels.ItemLabelCache.LabelFor(kv.Key) == kv.Value) kept++;
+                return (kept == labels.Count, $"{kept} of {labels.Count} labels kept");
+            });
         }
 
         // A save renamed into place before reaching disk can leave an unreadable store that boots empty, server Ready.

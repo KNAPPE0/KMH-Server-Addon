@@ -48,7 +48,8 @@ namespace KMHServerAddon.Features.ItemLabels
                 ServerLog.Verbose($"ItemLabels: push from {client?.GetData<UserFile>()?.Username ?? "?"} had no labels");
                 return;
             }
-            if (!Admit(client, payload.Labels.Count + (payload.Fungible?.Count ?? 0))) return;
+            // The flags name this chunk's own defs, so the cap is the larger list; their sum refused every plain-resource chunk.
+            if (!Admit(client, System.Math.Max(payload.Labels.Count, payload.Fungible?.Count ?? 0))) return;
             ItemLabelCache.Apply(payload.Labels);
             bool newFungible = ItemLabelCache.MarkFungible(payload.Fungible);
             ServerLog.Verbose(

@@ -30,7 +30,7 @@ namespace KMHServerAddon.Features.Simulation
 
         internal static MethodInfo ConnectedTarget()
         {
-            MethodInfo m = RwtType("Managers.UserManagerH")?.GetMethod("CheckIfUserIsConnected",
+            MethodInfo m = (RwtType("Managers.UserManagerH") ?? RwtType("Managers.UserManager"))?.GetMethod("CheckIfUserIsConnected",
                 BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static, null, new[] { typeof(string) }, null);
             return m != null && m.ReturnType == typeof(bool) ? m : null;
         }
